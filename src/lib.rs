@@ -1,5 +1,6 @@
 pub mod commands;
 pub mod crypto;
+pub mod discovery;
 pub mod error;
 pub mod identity;
 pub mod node;

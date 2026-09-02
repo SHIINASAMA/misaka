@@ -87,6 +87,8 @@ async fn main() -> Result<(), MisakaError> {
             // 后台任务
             let n1 = node.clone();
             tokio::spawn(async move { let _ = n1.state_broadcast_loop().await; });
+            let n0 = node.clone();
+            tokio::spawn(async move { let _ = n0.mdns_loop().await; });
             let n2 = node.clone();
             tokio::spawn(async move { let _ = n2.cleanup_loop().await; });
             let n3 = node.clone();
@@ -114,13 +116,37 @@ async fn main() -> Result<(), MisakaError> {
         }
 
         Command::Status => {
-            println!("Misaka Network");
-            println!("────────────────────────────────");
             let identity = SisterIdentity::load()
                 .map_err(|e| MisakaError::Other(e.to_string()))?
                 .ok_or_else(|| MisakaError::Other("Not running. Run 'misaka start' first.".into()))?;
-            println!("This Sister: {}  ({} {})", identity.display_name(), identity.hostname, identity.platform);
-            println!("  Port: {}", identity.listen_port);
+
+            // 本机实时资源
+            let mut state = misaka::state::LocalState::new();
+            state.refresh(&mut sysinfo::System::new());
+            let mem_gb = |b: u64| b as f64 / 1024.0 / 1024.0 / 1024.0;
+
+            println!("Misaka Network\n");
+            println!("This Sister");
+            println!("────────────────────────────────");
+            println!("{}  ({} {})", identity.display_name(), identity.hostname, identity.platform);
+            println!("  Port     : {}", identity.listen_port);
+            println!("  CPU      : {:.1}%", state.cpu_usage);
+            println!("  Memory   : {:.1} / {:.1} GB", mem_gb(state.memory_used), mem_gb(state.memory_total));
+            println!("  Queued   : {} job(s)", state.queued_jobs);
+
+            // 附近 Sister (来自 peers.json)
+            let nearby = misaka::peer::PeerStateTable::load_from_file();
+            println!("\nNearby Sisters");
+            println!("────────────────────────────────");
+            if nearby.is_empty() {
+                println!("  (none discovered yet)");
+            } else {
+                for bp in &nearby {
+                    let online = check_online(bp.addr.parse::<SocketAddr>().ok());
+                    let mark = if online { "●" } else { "○" };
+                    println!("{mark} #{}  \"{}\"  @ {}  {}", bp.id, bp.nickname, bp.addr, if online {"online"} else {"offline"});
+                }
+            }
         }
 
         Command::Run { command, local, sister } => {
@@ -158,6 +184,15 @@ fn print_result(result: &misaka::protocol::JobResultData) {
     if !result.output.is_empty() {
         println!("Output:\n{}", result.output);
     }
+}
+
+/// 快速探测某个地址是否在线 (对 mDNS 发现的 peer 做轻量握手)。
+fn check_online(addr: Option<SocketAddr>) -> bool {
+    let Some(addr) = addr else { return false };
+    // 阻塞式 TCP 连接尝试，超时 800ms
+    use std::net::TcpStream;
+    use std::time::Duration;
+    TcpStream::connect_timeout(&addr, Duration::from_millis(800)).is_ok()
 }
 
 /// 加密密钥。Phase 1 用网络密钥派生；后续换成基于身份的密钥。

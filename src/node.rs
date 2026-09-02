@@ -86,6 +86,13 @@ impl SisterNode {
         }
     }
 
+    /// 让本节点能感知局域网中其他 Sister，需要本机真实 IP (非 127.0.0.1)。
+    /// 单机测试时保持 127.0.0.1 即可；跨机部署时暴露本机局域网 IP。
+    pub fn set_advertise_host(&mut self, host: &str) {
+        self.bind_addr = format!("0.0.0.0:{}", self.identity.listen_port).parse().unwrap();
+        self.listen_addr = format!("{}:{}", host, self.identity.listen_port).parse().unwrap();
+    }
+
     pub fn get_crypto(&self) -> Crypto {
         Crypto::new(&self.encryption_key).unwrap()
     }
@@ -203,28 +210,24 @@ impl SisterNode {
             MessageType::JobRequest => {
                 // Work Stealing: 有人来要活。给一个本地排队中的任务。
                 let requester = env.from;
+                let peer_addr = self.peer_addr(requester).await;
                 if let Some(job) = self.job_queue.pop() {
                     let job_data = JobData {
                         id: job.id.clone(),
-                        creator: job.creator, // 保持原 creator
+                        creator: job.creator,
                         executor: requester,
-                        creator_addr: job.creator_addr.clone().unwrap_or_else(|| {
-                            // 本地创建的任务如果没有 creator_addr，用请求者自己填？不行，还是本机。
-                            // 首个执行者可能不在原 creator 的回送地址；但 work stealing 需把结果送回 creator。
-                            // 为简单起见把本机 listen_addr 填入，结果会回到这里，再由本地 executor 回溯。
-                            self.listen_addr.to_string()
-                        }),
+                        creator_addr: job.creator_addr.clone().unwrap_or_else(|| self.listen_addr.to_string()),
                         command: job.command.clone(),
                         arguments: vec![],
                         created_at: now_secs(),
                     };
-                    if let Some(addr) = self.peer_addr(requester).await {
+                    if let Some(addr) = peer_addr {
                         println!("[Misaka] {} stealing job {} out to #{}", self.identity.nickname, job.id, requester);
                         let env = Envelope::new(MessageType::Job, self.identity.id, requester, bincode::serialize(&job_data)?);
                         let _ = self.send_fire(addr, &env).await;
                     }
-                // 没有 → 回 Ack 空, 表示无活
-                } else if let Some(addr) = self.peer_addr(requester).await {
+                } else if let Some(addr) = peer_addr {
+                    // 没有 → 回 Ack 表示无活
                     let _ = self.send_fire(addr, &Envelope::new(MessageType::Ack, self.identity.id, requester, vec![])).await;
                 }
             }
@@ -418,6 +421,80 @@ impl SisterNode {
         job_result
     }
 
+    /// mDNS 广播 + 发现循环。注册本 Sister 服务，并持续把发现的 peer 收进 peer 表。
+    pub async fn mdns_loop(&self) -> crate::Result<()> {
+        let (advertise_guard, mut rx) = {
+            let (tx, rx) = tokio::sync::mpsc::channel(64);
+            let s = match crate::discovery::advertise(
+                &self.identity.nickname,
+                self.identity.id,
+                &self.identity.hostname,
+                &self.identity.platform,
+                self.identity.listen_port,
+                tx,
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("[Misaka] mDNS advertise failed: {:?}", e);
+                    return Ok(());
+                }
+            };
+            (s, rx)
+        };
+
+        println!("[Misaka] mDNS advertising as {} (port {})", self.identity.nickname, self.identity.listen_port);
+
+        while let Some(instance) = rx.recv().await {
+            // 忽略自己 (instance 名等于本机 nickname; 同时 id 相同则跳过)
+            if let Some((peer_id, _nick, addr)) = crate::discovery::instance_to_peer(&instance) {
+                if peer_id == self.identity.id {
+                    continue;
+                }
+                // 已有记录且地址没变，跳过
+                {
+                    let peers = self.peers.read().await;
+                    if let Some(p) = peers.get(peer_id) {
+                        if p.addr == addr.to_string() {
+                            continue;
+                        }
+                    }
+                }
+                // 新 peer：握手建立连接，写进 peer 表
+                if let Some(nick) = instance.attributes.get(&crate::discovery::TXT_NICK.to_string()) {
+                    let nick = nick.clone().unwrap_or_else(|| format!("misaka-{}", peer_id));
+                    let host = instance.attributes.get(&crate::discovery::TXT_HOST.to_string())
+                        .cloned().flatten().unwrap_or_default();
+                    let platform = instance.attributes.get(&crate::discovery::TXT_PLATFORM.to_string())
+                        .cloned().flatten().unwrap_or_default();
+                    println!("[Misaka] mDNS discovered #{} \"{}\" @ {}", peer_id, nick, addr);
+                    // 握手
+                    let _ = self.add_known_peer(addr).await;
+                    // 记录 host/platform (handshake 会更新 version 等，这里补齐 host/platform)
+                    let mut peers = self.peers.write().await;
+                    peers.upsert(crate::peer::PeerState {
+                        id: peer_id,
+                        nickname: nick,
+                        hostname: host,
+                        platform,
+                        version: String::new(),
+                        addr: addr.to_string(),
+                        cpu_usage: 0.0,
+                        memory_total: 0,
+                        memory_used: 0,
+                        running_jobs: 0,
+                        queued_jobs: 0,
+                        uptime_secs: 0,
+                        capabilities: vec![],
+                    });
+                }
+            }
+        }
+
+        // keep guard alive (unreachable normally)
+        let _ = advertise_guard;
+        Ok(())
+    }
+
     // ---------- 后台循环 ----------
 
     /// 启动监听，返回 listener
@@ -455,8 +532,13 @@ impl SisterNode {
             {
                 let mut state = self.local_state.write().await;
                 state.refresh(&mut sysinfo::System::new());
-                let qn = self.job_queue.len();
-                state.queued_jobs = qn;
+                // 从任务表统计排队/运行数，比 job_queue.len() 更准确
+                // (排队任务被 pop 后标记 running，若前面有长任务，queue.len() 会掉到 0 但仍有积压)
+                let jobs = self.local_jobs.read().await;
+                let queued = jobs.values().filter(|j| j.status == "queued").count();
+                let running = jobs.values().filter(|j| j.status == "running").count();
+                state.queued_jobs = queued;
+                state.running_jobs = running;
             }
             let addrs: Vec<SocketAddr> = {
                 let peers = self.peers.read().await;
@@ -500,25 +582,30 @@ impl SisterNode {
         }
     }
 
-    /// 工作窃取循环 (Phase 6): 本机空闲时，主动向有排队任务的 peer 要活。
-    /// steal_when_lt: 本机排队任务少于该值就认为"空闲"，去找活。
+    /// 工作窃取循环: 本机真正空闲 (无运行 + 无排队) 时，
+    /// 主动向已知 peer 要活。
     pub async fn work_stealing_loop(&self, steal_when_lt: usize) -> crate::Result<()> {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(8));
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(4));
         loop {
             interval.tick().await;
-            // 本机忙，不抢
-            if self.job_queue.len() >= steal_when_lt {
+            // 只在本地真的没活干时才去偷
+            let is_busy = {
+                let jobs = self.local_jobs.read().await;
+                jobs.values().any(|j| j.status == "running" || j.status == "queued") || !self.job_queue.is_empty()
+            };
+            if is_busy || self.job_queue.len() >= steal_when_lt {
                 continue;
             }
-            // 找一个已知有积压任务的 peer (从最近的状态里看 queued_jobs)
+            // 从已知 peer 里挑一个，请求它给我们一个排队任务
             let target = {
                 let peers = self.peers.read().await;
-                peers.all().into_iter()
-                    .filter(|p| p.queued_jobs > 0)
-                    .min_by_key(|p| p.queued_jobs) // 拿最闲的？不，找积压最多的
+                let list = peers.all();
+                list.into_iter()
+                    .filter(|p| p.queued_jobs > 0) // 只向确实有积压任务的 peer 要
+                    .min_by(|a, b| a.cpu_usage.partial_cmp(&b.cpu_usage).unwrap_or(std::cmp::Ordering::Equal))
             };
             if let Some(p) = target {
-                println!("[Misaka] {} is idle, requesting work from #{}", self.identity.nickname, p.id);
+                println!("[Misaka] {} wants work from #{} (peer has {} queued)", self.identity.nickname, p.id, p.queued_jobs);
                 let _ = self.request_work_from(p.id).await;
             }
         }

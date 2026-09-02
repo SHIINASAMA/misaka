@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 pub const PEER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-pub const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+pub const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// 本地资源状态,由 sysinfo 定期刷新
 #[derive(Debug, Clone)]
