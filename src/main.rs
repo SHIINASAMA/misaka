@@ -1,0 +1,169 @@
+use clap::{Parser, Subcommand};
+use misaka::error::MisakaError;
+use misaka::identity::SisterIdentity;
+use misaka::node::SisterNode;
+use std::net::SocketAddr;
+
+#[derive(Parser)]
+#[command(name = "misaka")]
+#[command(about = "Misaka Network - decentralized computing network")]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// 启动一个 Sister 节点
+    Start {
+        /// 监听端口
+        #[arg(long, default_value_t = 31700)]
+        port: u16,
+
+        /// 已知的 peer 地址，可重复指定 (Phase 1 临时替代 mDNS)
+        #[arg(long)]
+        peer: Vec<String>,
+
+        /// 设置昵称
+        #[arg(long)]
+        nickname: Option<String>,
+    },
+
+    /// 修改本机 Sister 的昵称
+    Nickname {
+        /// 新的昵称
+        nickname: String,
+    },
+
+    /// 查看本机信息与附近 Sister
+    Status,
+
+    /// 提交一个任务 (用 Network 自动选执行者；--local 强制本机)
+    Run {
+        /// 要执行的命令
+        command: String,
+
+        /// 强制本地执行 (不派发到别的 Sister)
+        #[arg(long)]
+        local: bool,
+
+        /// 指定目标 Sister ID
+        #[arg(long)]
+        sister: Option<u64>,
+    },
+}
+
+#[tokio::main]
+async fn main() -> Result<(), MisakaError> {
+    let cli = Cli::parse();
+    match cli.command {
+        Command::Start { port, peer, nickname } => {
+            // 加载或生成身份 (持久化)
+            let identity = SisterIdentity::load_or_init(nickname.clone(), port)
+                .await
+                .map_err(|e| MisakaError::Other(e.to_string()))?;
+            if nickname.clone().is_some() {
+                println!("[Misaka] nickname updated: {}", identity.nickname);
+            }
+
+            println!("{}", identity.display_name());
+            println!("  Device : {}", identity.hostname);
+            println!("  Platform: {}", identity.platform);
+            println!("  Version: {}", identity.version);
+
+            let key = identity_key();
+            let node = SisterNode::new(identity, key);
+
+            // 启动监听
+            let listener = node.start_listener().await?;
+
+            // 连接已知 peers
+            for p in &peer {
+                if let Ok(addr) = p.parse::<SocketAddr>() {
+                    let _ = node.add_known_peer(addr).await;
+                }
+            }
+
+            // 后台任务
+            let n1 = node.clone();
+            tokio::spawn(async move { let _ = n1.state_broadcast_loop().await; });
+            let n2 = node.clone();
+            tokio::spawn(async move { let _ = n2.cleanup_loop().await; });
+            let n3 = node.clone();
+            tokio::spawn(async move { let _ = n3.local_executor_loop().await; });
+            let n4 = node.clone();
+            tokio::spawn(async move { let _ = n4.work_stealing_loop(1).await; });
+
+            // 接受入站连接
+            loop {
+                let (stream, addr) = listener.accept().await?;
+                let node = node.clone();
+                tokio::spawn(async move {
+                    let _ = node.handle_inbound(stream, addr).await;
+                });
+            }
+        }
+
+        Command::Nickname { nickname } => {
+            let mut identity = SisterIdentity::load()
+                .map_err(|e| MisakaError::Other(e.to_string()))?
+                .ok_or_else(|| MisakaError::Other("No identity found. Run 'misaka start' first.".into()))?;
+            identity.nickname = nickname;
+            identity.save().map_err(|e| MisakaError::Other(e.to_string()))?;
+            println!("[Misaka] nickname updated to {}", identity.nickname);
+        }
+
+        Command::Status => {
+            println!("Misaka Network");
+            println!("────────────────────────────────");
+            let identity = SisterIdentity::load()
+                .map_err(|e| MisakaError::Other(e.to_string()))?
+                .ok_or_else(|| MisakaError::Other("Not running. Run 'misaka start' first.".into()))?;
+            println!("This Sister: {}  ({} {})", identity.display_name(), identity.hostname, identity.platform);
+            println!("  Port: {}", identity.listen_port);
+        }
+
+        Command::Run { command, local, sister } => {
+            let identity = SisterIdentity::load()
+                .map_err(|e| MisakaError::Other(e.to_string()))?
+                .ok_or_else(|| MisakaError::Other("Not running. Run 'misaka start' first.".into()))?;
+            let key = identity_key();
+            let node = SisterNode::new(identity, key);
+
+            if local {
+                println!("[Misaka] run --local: {}", command);
+                // 独立进程：不启动完整 runtime，直接同步执行并输出结果
+                let result = node.run_local_sync(&command).await;
+                print_result(&result);
+            } else if let Some(sid) = sister {
+                println!("[Misaka] run --sister #{}: {}", sid, command);
+                let result = node.submit_to_sister(sid, &command).await?;
+                print_result(&result);
+            } else {
+                println!("[Misaka] run (network): {}", command);
+                let result = node.submit_job(&command).await?;
+                print_result(&result);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn print_result(result: &misaka::protocol::JobResultData) {
+    println!("────────────────────────────────");
+    println!("Job {} completed by #{}{}",
+        result.job_id, result.executor,
+        if result.success { " (success)" } else { " (failed)" });
+    if !result.output.is_empty() {
+        println!("Output:\n{}", result.output);
+    }
+}
+
+/// 加密密钥。Phase 1 用网络密钥派生；后续换成基于身份的密钥。
+fn identity_key() -> [u8; 32] {
+    let mut key = [0u8; 32];
+    let seed = b"misaka_network_default_key_";
+    key[..seed.len()].copy_from_slice(seed);
+    key
+}
