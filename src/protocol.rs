@@ -16,8 +16,8 @@ pub enum MessageType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Envelope {
     pub msg_type: MessageType,
-    pub from: u64,   // 发送方 Sister ID
-    pub to: u64,     // 接收方 Sister ID (0 = 广播)
+    pub from: u64,     // 发送方 Sister ID
+    pub to: u64,       // 接收方 Sister ID (0 = 广播)
     pub data: Vec<u8>, // bincode 序列化后的具体 payload
 }
 

@@ -47,7 +47,9 @@ impl SisterNode {
     pub fn new(identity: SisterIdentity, encryption_key: [u8; 32]) -> Self {
         let bind_addr: SocketAddr = format!("0.0.0.0:{}", identity.listen_port).parse().unwrap();
         // 告知 peer 的连接地址: 单机测试用 127.0.0.1; 局域网环境可换成机器 IP。
-        let listen_addr: SocketAddr = format!("127.0.0.1:{}", identity.listen_port).parse().unwrap();
+        let listen_addr: SocketAddr = format!("127.0.0.1:{}", identity.listen_port)
+            .parse()
+            .unwrap();
         // 启动时立刻刷新一次本机状态
         let mut local_state = LocalState::new();
         local_state.refresh(&mut sysinfo::System::new());
@@ -89,8 +91,12 @@ impl SisterNode {
     /// 让本节点能感知局域网中其他 Sister，需要本机真实 IP (非 127.0.0.1)。
     /// 单机测试时保持 127.0.0.1 即可；跨机部署时暴露本机局域网 IP。
     pub fn set_advertise_host(&mut self, host: &str) {
-        self.bind_addr = format!("0.0.0.0:{}", self.identity.listen_port).parse().unwrap();
-        self.listen_addr = format!("{}:{}", host, self.identity.listen_port).parse().unwrap();
+        self.bind_addr = format!("0.0.0.0:{}", self.identity.listen_port)
+            .parse()
+            .unwrap();
+        self.listen_addr = format!("{}:{}", host, self.identity.listen_port)
+            .parse()
+            .unwrap();
     }
 
     pub fn get_crypto(&self) -> Crypto {
@@ -122,7 +128,11 @@ impl SisterNode {
 
     // ---------- 入站处理 ----------
 
-    pub async fn handle_inbound(&self, mut stream: TcpStream, _addr: SocketAddr) -> crate::Result<()> {
+    pub async fn handle_inbound(
+        &self,
+        mut stream: TcpStream,
+        _addr: SocketAddr,
+    ) -> crate::Result<()> {
         let env = read_envelope(&mut stream, &self.get_crypto()).await?;
         self.dispatch(env, &mut stream).await
     }
@@ -131,7 +141,8 @@ impl SisterNode {
         match env.msg_type {
             MessageType::Hello => {
                 let hello: HelloData = bincode::deserialize(&env.data)?;
-                self.remember_peer(&hello.identity, &hello.listen_addr).await;
+                self.remember_peer(&hello.identity, &hello.listen_addr)
+                    .await;
                 let reply = Envelope::new(
                     MessageType::Hello,
                     self.identity.id,
@@ -148,9 +159,14 @@ impl SisterNode {
                 let state: StateData = bincode::deserialize(&env.data)?;
                 println!(
                     "[Misaka] {} <- state from #{} ({}): cpu={:.1}% mem={}/{}, jobs {}/{}",
-                    self.identity.nickname, env.from, state.identity.nickname,
-                    state.cpu_usage, state.memory_used, state.memory_total,
-                    state.running_jobs, state.queued_jobs,
+                    self.identity.nickname,
+                    env.from,
+                    state.identity.nickname,
+                    state.cpu_usage,
+                    state.memory_used,
+                    state.memory_total,
+                    state.running_jobs,
+                    state.queued_jobs,
                 );
                 let mut peers = self.peers.write().await;
                 peers.upsert(PeerState {
@@ -179,7 +195,16 @@ impl SisterNode {
                             "[Misaka] {} forwarding job {} to #{}",
                             self.identity.nickname, job.id, job.executor
                         );
-                        self.send_fire(addr, &Envelope::new(MessageType::Job, env.from, job.executor, env.data.clone())).await?;
+                        self.send_fire(
+                            addr,
+                            &Envelope::new(
+                                MessageType::Job,
+                                env.from,
+                                job.executor,
+                                env.data.clone(),
+                            ),
+                        )
+                        .await?;
                         return Ok(());
                     }
                 }
@@ -192,7 +217,10 @@ impl SisterNode {
                 let mut jobs = self.local_jobs.write().await;
                 jobs.insert(job_id.clone(), local_job.clone());
                 self.job_queue.push(local_job);
-                println!("[Misaka] {} queued job {} from #{}: {}", self.identity.nickname, job_id, env.from, full_cmd);
+                println!(
+                    "[Misaka] {} queued job {} from #{}: {}",
+                    self.identity.nickname, job_id, env.from, full_cmd
+                );
             }
 
             MessageType::JobResponse => {
@@ -216,19 +244,35 @@ impl SisterNode {
                         id: job.id.clone(),
                         creator: job.creator,
                         executor: requester,
-                        creator_addr: job.creator_addr.clone().unwrap_or_else(|| self.listen_addr.to_string()),
+                        creator_addr: job
+                            .creator_addr
+                            .clone()
+                            .unwrap_or_else(|| self.listen_addr.to_string()),
                         command: job.command.clone(),
                         arguments: vec![],
                         created_at: now_secs(),
                     };
                     if let Some(addr) = peer_addr {
-                        println!("[Misaka] {} stealing job {} out to #{}", self.identity.nickname, job.id, requester);
-                        let env = Envelope::new(MessageType::Job, self.identity.id, requester, bincode::serialize(&job_data)?);
+                        println!(
+                            "[Misaka] {} stealing job {} out to #{}",
+                            self.identity.nickname, job.id, requester
+                        );
+                        let env = Envelope::new(
+                            MessageType::Job,
+                            self.identity.id,
+                            requester,
+                            bincode::serialize(&job_data)?,
+                        );
                         let _ = self.send_fire(addr, &env).await;
                     }
                 } else if let Some(addr) = peer_addr {
                     // 没有 → 回 Ack 表示无活
-                    let _ = self.send_fire(addr, &Envelope::new(MessageType::Ack, self.identity.id, requester, vec![])).await;
+                    let _ = self
+                        .send_fire(
+                            addr,
+                            &Envelope::new(MessageType::Ack, self.identity.id, requester, vec![]),
+                        )
+                        .await;
                 }
             }
 
@@ -278,8 +322,13 @@ impl SisterNode {
         );
         let reply = self.send_to(addr, &env).await?;
         let hello: HelloData = bincode::deserialize(&reply.data)?;
-        self.remember_peer(&hello.identity, &hello.listen_addr).await;
-        println!("[Misaka] Handshake with {} @ {}", hello.identity.display_name(), hello.listen_addr);
+        self.remember_peer(&hello.identity, &hello.listen_addr)
+            .await;
+        println!(
+            "[Misaka] Handshake with {} @ {}",
+            hello.identity.display_name(),
+            hello.listen_addr
+        );
         Ok(())
     }
 
@@ -302,7 +351,10 @@ impl SisterNode {
         };
 
         if executor != creator {
-            println!("[Misaka] {} submits to #{}", self.identity.nickname, executor);
+            println!(
+                "[Misaka] {} submits to #{}",
+                self.identity.nickname, executor
+            );
         }
         self.submit_to_sister(executor, command).await
     }
@@ -332,7 +384,11 @@ impl SisterNode {
 
     /// 提交一个任务到指定 Sister (run --sister)。若目标就是本机则本地执行。
     /// 远端部分会临时开一个响应端口，等结果回来。
-    pub async fn submit_to_sister(&self, executor: u64, command: &str) -> crate::Result<JobResultData> {
+    pub async fn submit_to_sister(
+        &self,
+        executor: u64,
+        command: &str,
+    ) -> crate::Result<JobResultData> {
         let my_listen = if executor == self.identity.id {
             self.listen_addr
         } else {
@@ -361,12 +417,20 @@ impl SisterNode {
         let (tx, rx) = oneshot::channel::<JobResultData>();
         self.pending_jobs.lock().unwrap().insert(job_id.clone(), tx);
 
-        let exec_addr = self.peer_addr(executor).await
+        let exec_addr = self
+            .peer_addr(executor)
+            .await
             .ok_or_else(|| crate::Error::Other(format!("no address for executor #{}", executor)))?;
-        let env = Envelope::new(MessageType::Job, creator, executor, bincode::serialize(&job_data)?);
+        let env = Envelope::new(
+            MessageType::Job,
+            creator,
+            executor,
+            bincode::serialize(&job_data)?,
+        );
         self.send_fire(exec_addr, &env).await?;
 
-        tokio::time::timeout(std::time::Duration::from_secs(60), rx).await
+        tokio::time::timeout(std::time::Duration::from_secs(60), rx)
+            .await
             .map_err(|_| crate::Error::Other(format!("job {} timed out", job_id)))?
             .map_err(|_| crate::Error::Other(format!("job {} canceled", job_id)))
     }
@@ -394,7 +458,11 @@ impl SisterNode {
         }
         println!("[Misaka] executing locally: {}", command);
         let result = crate::commands::CommandExecutor::execute(command).unwrap_or_else(|e| {
-            crate::commands::CommandResult { stdout: format!("Error: {}", e), stderr: String::new(), exit_code: -1 }
+            crate::commands::CommandResult {
+                stdout: format!("Error: {}", e),
+                stderr: String::new(),
+                exit_code: -1,
+            }
         });
         let finished = now_secs();
 
@@ -412,12 +480,26 @@ impl SisterNode {
         {
             let mut jobs = self.local_jobs.write().await;
             if let Some(lj) = jobs.get_mut(job_id) {
-                lj.status = if result.success() { "completed" } else { "failed" }.into();
+                lj.status = if result.success() {
+                    "completed"
+                } else {
+                    "failed"
+                }
+                .into();
                 lj.finished_at = Some(finished);
                 lj.result_output = Some(result.full_output());
             }
         }
-        println!("[Misaka] job {} done -> {:?}\n{}", job_id, if result.success(){"completed"}else{"failed"}, result.full_output());
+        println!(
+            "[Misaka] job {} done -> {:?}\n{}",
+            job_id,
+            if result.success() {
+                "completed"
+            } else {
+                "failed"
+            },
+            result.full_output()
+        );
         job_result
     }
 
@@ -442,7 +524,10 @@ impl SisterNode {
             (s, rx)
         };
 
-        println!("[Misaka] mDNS advertising as {} (port {})", self.identity.nickname, self.identity.listen_port);
+        println!(
+            "[Misaka] mDNS advertising as {} (port {})",
+            self.identity.nickname, self.identity.listen_port
+        );
 
         while let Some(instance) = rx.recv().await {
             // 忽略自己 (instance 名等于本机 nickname; 同时 id 相同则跳过)
@@ -460,13 +545,26 @@ impl SisterNode {
                     }
                 }
                 // 新 peer：握手建立连接，写进 peer 表
-                if let Some(nick) = instance.attributes.get(&crate::discovery::TXT_NICK.to_string()) {
-                    let nick = nick.clone().unwrap_or_else(|| format!("misaka-{}", peer_id));
-                    let host = instance.attributes.get(&crate::discovery::TXT_HOST.to_string())
-                        .cloned().flatten().unwrap_or_default();
-                    let platform = instance.attributes.get(&crate::discovery::TXT_PLATFORM.to_string())
-                        .cloned().flatten().unwrap_or_default();
-                    println!("[Misaka] mDNS discovered #{} \"{}\" @ {}", peer_id, nick, addr);
+                if let Some(nick) = instance.attributes.get(crate::discovery::TXT_NICK) {
+                    let nick = nick
+                        .clone()
+                        .unwrap_or_else(|| format!("misaka-{}", peer_id));
+                    let host = instance
+                        .attributes
+                        .get(crate::discovery::TXT_HOST)
+                        .cloned()
+                        .flatten()
+                        .unwrap_or_default();
+                    let platform = instance
+                        .attributes
+                        .get(crate::discovery::TXT_PLATFORM)
+                        .cloned()
+                        .flatten()
+                        .unwrap_or_default();
+                    println!(
+                        "[Misaka] mDNS discovered #{} \"{}\" @ {}",
+                        peer_id, nick, addr
+                    );
                     // 握手
                     let _ = self.add_known_peer(addr).await;
                     // 记录 host/platform (handshake 会更新 version 等，这里补齐 host/platform)
@@ -500,7 +598,11 @@ impl SisterNode {
     /// 启动监听，返回 listener
     pub async fn start_listener(&self) -> crate::Result<TcpListener> {
         let listener = TcpListener::bind(self.bind_addr).await?;
-        println!("[Misaka] {} listening on {}", self.identity.display_name(), self.bind_addr);
+        println!(
+            "[Misaka] {} listening on {}",
+            self.identity.display_name(),
+            self.bind_addr
+        );
         Ok(listener)
     }
 
@@ -511,14 +613,11 @@ impl SisterNode {
         let addr = listener.local_addr()?;
         let me = self.clone();
         tokio::spawn(async move {
-            loop {
-                match listener.accept().await {
-                    Ok((stream, a)) => {
-                        let me = me.clone();
-                        tokio::spawn(async move { let _ = me.handle_inbound(stream, a).await; });
-                    }
-                    Err(_) => break,
-                }
+            while let Ok((stream, a)) = listener.accept().await {
+                let me = me.clone();
+                tokio::spawn(async move {
+                    let _ = me.handle_inbound(stream, a).await;
+                });
             }
         });
         Ok(addr)
@@ -542,7 +641,11 @@ impl SisterNode {
             }
             let addrs: Vec<SocketAddr> = {
                 let peers = self.peers.read().await;
-                peers.all().iter().filter_map(|p| p.addr.parse().ok()).collect()
+                peers
+                    .all()
+                    .iter()
+                    .filter_map(|p| p.addr.parse().ok())
+                    .collect()
             };
             if addrs.is_empty() {
                 continue;
@@ -577,7 +680,11 @@ impl SisterNode {
             let mut peers = self.peers.write().await;
             let removed = peers.prune_offline(PEER_TIMEOUT);
             if !removed.is_empty() {
-                println!("[Misaka] {} sister(s) went offline: {:?}", removed.len(), removed);
+                println!(
+                    "[Misaka] {} sister(s) went offline: {:?}",
+                    removed.len(),
+                    removed
+                );
             }
         }
     }
@@ -591,7 +698,9 @@ impl SisterNode {
             // 只在本地真的没活干时才去偷
             let is_busy = {
                 let jobs = self.local_jobs.read().await;
-                jobs.values().any(|j| j.status == "running" || j.status == "queued") || !self.job_queue.is_empty()
+                jobs.values()
+                    .any(|j| j.status == "running" || j.status == "queued")
+                    || !self.job_queue.is_empty()
             };
             if is_busy || self.job_queue.len() >= steal_when_lt {
                 continue;
@@ -602,10 +711,17 @@ impl SisterNode {
                 let list = peers.all();
                 list.into_iter()
                     .filter(|p| p.queued_jobs > 0) // 只向确实有积压任务的 peer 要
-                    .min_by(|a, b| a.cpu_usage.partial_cmp(&b.cpu_usage).unwrap_or(std::cmp::Ordering::Equal))
+                    .min_by(|a, b| {
+                        a.cpu_usage
+                            .partial_cmp(&b.cpu_usage)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
             };
             if let Some(p) = target {
-                println!("[Misaka] {} wants work from #{} (peer has {} queued)", self.identity.nickname, p.id, p.queued_jobs);
+                println!(
+                    "[Misaka] {} wants work from #{} (peer has {} queued)",
+                    self.identity.nickname, p.id, p.queued_jobs
+                );
                 let _ = self.request_work_from(p.id).await;
             }
         }
@@ -645,10 +761,20 @@ impl SisterNode {
 
                 let mut jobs = self.local_jobs.write().await;
                 if let Some(lj) = jobs.get_mut(&job.id) {
-                    lj.status = if result.success() { "completed" } else { "failed" }.into();
+                    lj.status = if result.success() {
+                        "completed"
+                    } else {
+                        "failed"
+                    }
+                    .into();
                     lj.finished_at = Some(finished);
                     lj.result_output = Some(result.full_output());
-                    println!("[Misaka] job {} -> {:?}\n{}", job.id, lj.status, result.full_output());
+                    println!(
+                        "[Misaka] job {} -> {:?}\n{}",
+                        job.id,
+                        lj.status,
+                        result.full_output()
+                    );
                 }
                 drop(jobs);
 
@@ -686,10 +812,16 @@ fn rand_int() -> u64 {
 }
 
 /// 序列化 + 加密 + 写入 stream
-pub async fn write_envelope(stream: &mut TcpStream, crypto: &Crypto, env: &Envelope) -> crate::Result<()> {
+pub async fn write_envelope(
+    stream: &mut TcpStream,
+    crypto: &Crypto,
+    env: &Envelope,
+) -> crate::Result<()> {
     let plaintext = bincode::serialize(env)?;
     let encrypted = crypto.encrypt(&plaintext)?;
-    stream.write_all(&(encrypted.len() as u32).to_be_bytes()).await?;
+    stream
+        .write_all(&(encrypted.len() as u32).to_be_bytes())
+        .await?;
     stream.write_all(&encrypted).await?;
     Ok(())
 }

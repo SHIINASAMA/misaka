@@ -57,7 +57,11 @@ enum Command {
 async fn main() -> Result<(), MisakaError> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Start { port, peer, nickname } => {
+        Command::Start {
+            port,
+            peer,
+            nickname,
+        } => {
             // 加载或生成身份 (持久化)
             let identity = SisterIdentity::load_or_init(nickname.clone(), port)
                 .await
@@ -86,15 +90,25 @@ async fn main() -> Result<(), MisakaError> {
 
             // 后台任务
             let n1 = node.clone();
-            tokio::spawn(async move { let _ = n1.state_broadcast_loop().await; });
+            tokio::spawn(async move {
+                let _ = n1.state_broadcast_loop().await;
+            });
             let n0 = node.clone();
-            tokio::spawn(async move { let _ = n0.mdns_loop().await; });
+            tokio::spawn(async move {
+                let _ = n0.mdns_loop().await;
+            });
             let n2 = node.clone();
-            tokio::spawn(async move { let _ = n2.cleanup_loop().await; });
+            tokio::spawn(async move {
+                let _ = n2.cleanup_loop().await;
+            });
             let n3 = node.clone();
-            tokio::spawn(async move { let _ = n3.local_executor_loop().await; });
+            tokio::spawn(async move {
+                let _ = n3.local_executor_loop().await;
+            });
             let n4 = node.clone();
-            tokio::spawn(async move { let _ = n4.work_stealing_loop(1).await; });
+            tokio::spawn(async move {
+                let _ = n4.work_stealing_loop(1).await;
+            });
 
             // 接受入站连接
             loop {
@@ -109,16 +123,22 @@ async fn main() -> Result<(), MisakaError> {
         Command::Nickname { nickname } => {
             let mut identity = SisterIdentity::load()
                 .map_err(|e| MisakaError::Other(e.to_string()))?
-                .ok_or_else(|| MisakaError::Other("No identity found. Run 'misaka start' first.".into()))?;
+                .ok_or_else(|| {
+                    MisakaError::Other("No identity found. Run 'misaka start' first.".into())
+                })?;
             identity.nickname = nickname;
-            identity.save().map_err(|e| MisakaError::Other(e.to_string()))?;
+            identity
+                .save()
+                .map_err(|e| MisakaError::Other(e.to_string()))?;
             println!("[Misaka] nickname updated to {}", identity.nickname);
         }
 
         Command::Status => {
             let identity = SisterIdentity::load()
                 .map_err(|e| MisakaError::Other(e.to_string()))?
-                .ok_or_else(|| MisakaError::Other("Not running. Run 'misaka start' first.".into()))?;
+                .ok_or_else(|| {
+                    MisakaError::Other("Not running. Run 'misaka start' first.".into())
+                })?;
 
             // 本机实时资源
             let mut state = misaka::state::LocalState::new();
@@ -128,10 +148,19 @@ async fn main() -> Result<(), MisakaError> {
             println!("Misaka Network\n");
             println!("This Sister");
             println!("────────────────────────────────");
-            println!("{}  ({} {})", identity.display_name(), identity.hostname, identity.platform);
+            println!(
+                "{}  ({} {})",
+                identity.display_name(),
+                identity.hostname,
+                identity.platform
+            );
             println!("  Port     : {}", identity.listen_port);
             println!("  CPU      : {:.1}%", state.cpu_usage);
-            println!("  Memory   : {:.1} / {:.1} GB", mem_gb(state.memory_used), mem_gb(state.memory_total));
+            println!(
+                "  Memory   : {:.1} / {:.1} GB",
+                mem_gb(state.memory_used),
+                mem_gb(state.memory_total)
+            );
             println!("  Queued   : {} job(s)", state.queued_jobs);
 
             // 附近 Sister (来自 peers.json)
@@ -144,15 +173,27 @@ async fn main() -> Result<(), MisakaError> {
                 for bp in &nearby {
                     let online = check_online(bp.addr.parse::<SocketAddr>().ok());
                     let mark = if online { "●" } else { "○" };
-                    println!("{mark} #{}  \"{}\"  @ {}  {}", bp.id, bp.nickname, bp.addr, if online {"online"} else {"offline"});
+                    println!(
+                        "{mark} #{}  \"{}\"  @ {}  {}",
+                        bp.id,
+                        bp.nickname,
+                        bp.addr,
+                        if online { "online" } else { "offline" }
+                    );
                 }
             }
         }
 
-        Command::Run { command, local, sister } => {
+        Command::Run {
+            command,
+            local,
+            sister,
+        } => {
             let identity = SisterIdentity::load()
                 .map_err(|e| MisakaError::Other(e.to_string()))?
-                .ok_or_else(|| MisakaError::Other("Not running. Run 'misaka start' first.".into()))?;
+                .ok_or_else(|| {
+                    MisakaError::Other("Not running. Run 'misaka start' first.".into())
+                })?;
             let key = identity_key();
             let node = SisterNode::new(identity, key);
 
@@ -178,9 +219,16 @@ async fn main() -> Result<(), MisakaError> {
 
 fn print_result(result: &misaka::protocol::JobResultData) {
     println!("────────────────────────────────");
-    println!("Job {} completed by #{}{}",
-        result.job_id, result.executor,
-        if result.success { " (success)" } else { " (failed)" });
+    println!(
+        "Job {} completed by #{}{}",
+        result.job_id,
+        result.executor,
+        if result.success {
+            " (success)"
+        } else {
+            " (failed)"
+        }
+    );
     if !result.output.is_empty() {
         println!("Output:\n{}", result.output);
     }

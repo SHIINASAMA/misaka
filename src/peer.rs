@@ -113,7 +113,10 @@ impl PeerStateTable {
         let now = Instant::now();
         let mut removed = Vec::new();
         self.peers.retain(|id, _| {
-            let alive = self.last_seen.get(id).map_or(false, |t| now.duration_since(*t) <= timeout);
+            let alive = self
+                .last_seen
+                .get(id)
+                .is_some_and(|t| now.duration_since(*t) <= timeout);
             if !alive {
                 removed.push(*id);
             }
@@ -129,18 +132,22 @@ impl PeerStateTable {
     /// 把所有已知 peers 序列化持久化到磁盘 (供独立进程解析地址)
     pub fn save_to_file(&self) -> std::io::Result<()> {
         let dir = crate::identity::SisterIdentity::config_dir()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
         std::fs::create_dir_all(&dir)?;
         let path = dir.join("peers.json");
-        let blues: Vec<PeerBlueprint> = self.peers.values().map(|p| PeerBlueprint::from(p)).collect();
+        let blues: Vec<PeerBlueprint> = self.peers.values().map(PeerBlueprint::from).collect();
         let json = serde_json::to_string_pretty(&blues)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
         std::fs::write(path, json)
     }
 
     /// 从磁盘加载已知 peers 的地址映射 (供独立进程使用)
     pub fn load_from_file() -> Vec<PeerBlueprint> {
-        let dir = if let Ok(d) = crate::identity::SisterIdentity::config_dir() { d } else { return vec![] };
+        let dir = if let Ok(d) = crate::identity::SisterIdentity::config_dir() {
+            d
+        } else {
+            return vec![];
+        };
         let path = dir.join("peers.json");
         if !path.exists() {
             return vec![];

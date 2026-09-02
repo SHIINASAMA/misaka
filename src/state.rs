@@ -44,6 +44,12 @@ impl LocalState {
     }
 }
 
+impl Default for LocalState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn detect_capabilities() -> Vec<String> {
     let mut caps = Vec::new();
     if std::env::consts::OS == "macos" || std::env::consts::OS == "linux" {

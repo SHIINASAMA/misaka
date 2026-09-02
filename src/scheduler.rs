@@ -24,10 +24,11 @@ impl Scheduler {
         }
 
         // 找 CPU 最低的 peer (排除高负载 > 85%)
-        let best = peers
-            .iter()
-            .filter(|p| p.cpu_usage < 85.0)
-            .min_by(|a, b| a.cpu_usage.partial_cmp(&b.cpu_usage).unwrap_or(std::cmp::Ordering::Equal));
+        let best = peers.iter().filter(|p| p.cpu_usage < 85.0).min_by(|a, b| {
+            a.cpu_usage
+                .partial_cmp(&b.cpu_usage)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         match best {
             // peer 比本机明显更闲 → 派给它
@@ -36,5 +37,11 @@ impl Scheduler {
             Some(p) if local.queued_jobs >= 2 && p.cpu_usage < 50.0 => Some(p.id),
             _ => None, // 否则本地
         }
+    }
+}
+
+impl Default for Scheduler {
+    fn default() -> Self {
+        Self::new()
     }
 }

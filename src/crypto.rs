@@ -26,9 +26,8 @@ impl Crypto {
             return Err(CryptoError::InvalidKeyLength);
         }
 
-        let cipher = Aes256Gcm::new_from_slice(key).map_err(|e| {
-            CryptoError::AesGcm(format!("Failed to create cipher: {}", e))
-        })?;
+        let cipher = Aes256Gcm::new_from_slice(key)
+            .map_err(|e| CryptoError::AesGcm(format!("Failed to create cipher: {}", e)))?;
 
         Ok(Self { cipher })
     }

@@ -16,8 +16,8 @@ pub enum IdentityError {
 /// 每个 Sister 的稳定身份
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SisterIdentity {
-    pub id: u64,            // 稳定身份，重启不变
-    pub nickname: String,   // 用户可修改显示名
+    pub id: u64,          // 稳定身份，重启不变
+    pub nickname: String, // 用户可修改显示名
     pub hostname: String,
     pub platform: String,
     pub version: String,
@@ -57,14 +57,9 @@ impl SisterIdentity {
 
         let hostname = Self::detect_hostname();
 
-        let platform = format!(
-            "{} {}",
-            std::env::consts::OS,
-            std::env::consts::ARCH
-        );
+        let platform = format!("{} {}", std::env::consts::OS, std::env::consts::ARCH);
 
-        let nickname = nickname
-            .unwrap_or_else(|| format!("misaka-{}", id % 100000));
+        let nickname = nickname.unwrap_or_else(|| format!("misaka-{}", id % 100000));
 
         Self {
             id,
@@ -118,7 +113,10 @@ impl SisterIdentity {
     }
 
     /// 加载或生成身份，并读取最新端口
-    pub async fn load_or_init(nickname: Option<String>, listen_port: u16) -> Result<Self, IdentityError> {
+    pub async fn load_or_init(
+        nickname: Option<String>,
+        listen_port: u16,
+    ) -> Result<Self, IdentityError> {
         if let Some(mut existing) = Self::load()? {
             if let Some(nick) = nickname {
                 existing.nickname = nick;
