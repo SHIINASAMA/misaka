@@ -925,3 +925,18 @@ QUIC bidirectional stream, without changing the runtime's Direct TCP default.
 - [x] Implement v2 prepare, bounded worker streams, per-chunk ack validation,
   and finalize using the existing Direct TCP/Iroh endpoint selection.
 - [x] Cover CLI parsing and default compatibility with 11 CLI tests.
+
+### Task 57: Verify parallel Transfer v2 through Testament
+
+**Files:**
+- Modify: `crates/testament/src/scenario.rs`
+- Modify: `crates/testament/src/main.rs`
+- Modify: `docs/testing.md`
+- Modify: `docs/network-stream-v0.md`
+
+- [x] Add N19 using isolated real Iroh Sisters and manual discovery.
+- [x] Seed one durable completed chunk, invoke the public
+  `cp --resume --parallel 4` command, and verify exact final bytes plus cleanup.
+- [x] Run the focused N19 scenario successfully.
+- [x] Document that v2 is opt-in and sequential v1 remains the compatibility
+  path.

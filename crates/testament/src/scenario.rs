@@ -731,6 +731,10 @@ pub fn network_scenarios() -> Vec<ScenarioDef> {
             name: "N18_stream_summary_observability",
             run: Box::new(n18_stream_summary_observability),
         },
+        ScenarioDef {
+            name: "N19_iroh_parallel_transfer",
+            run: Box::new(n19_iroh_parallel_transfer),
+        },
     ]
 }
 
@@ -1729,6 +1733,99 @@ fn n18_stream_summary_observability(ctx: &mut Context) -> Result<(), ScenarioErr
                 && snapshot.stream_summary.rx_bytes == 0
         },
     )?;
+    Ok(())
+}
+
+/// N19: resume a v2 transfer from a durable completed-chunk bitmap and finish
+/// it through several real Iroh-backed worker streams.
+fn n19_iroh_parallel_transfer(ctx: &mut Context) -> Result<(), ScenarioError> {
+    ctx.start_iroh_pair()?;
+    let a_introspect = introspect_addr_of(ctx, "a")?;
+    let b_id = ctx.introspect("b")?.identity.id.as_u64();
+    assert::eventually(
+        a_introspect,
+        "a learns b Iroh stream candidate for parallel transfer",
+        Duration::from_secs(12),
+        |snapshot| {
+            snapshot.peers.iter().any(|peer| {
+                peer.id == b_id
+                    && peer
+                        .stream_endpoints
+                        .iter()
+                        .any(|endpoint| endpoint.starts_with("iroh://"))
+            })
+        },
+    )?;
+
+    let source = ctx.layout.root.join("iroh-parallel-source.bin");
+    let destination = ctx.layout.root.join("iroh-parallel-destination.bin");
+    let payload = (0..(8 * 64 * 1024 + 1234))
+        .map(|index| ((index * 13) % 251) as u8)
+        .collect::<Vec<_>>();
+    std::fs::write(&source, &payload)
+        .map_err(|error| ScenarioError::infra(format!("write parallel source: {error}")))?;
+
+    let chunk_size = 64 * 1024u64;
+    let chunk_count = (payload.len() as u64).div_ceil(chunk_size);
+    let mut partial = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(format!("{}.misaka-part-v2", destination.display()))
+        .map_err(|error| ScenarioError::infra(format!("create parallel partial: {error}")))?;
+    partial
+        .set_len(payload.len() as u64)
+        .map_err(|error| ScenarioError::infra(format!("size parallel partial: {error}")))?;
+    use std::io::{Seek, SeekFrom, Write};
+    partial
+        .seek(SeekFrom::Start(0))
+        .and_then(|_| partial.write_all(&payload[..chunk_size as usize]))
+        .map_err(|error| ScenarioError::infra(format!("seed parallel chunk: {error}")))?;
+    drop(partial);
+    let mut completed = vec![0u8; chunk_count.div_ceil(8) as usize];
+    completed[0] = 1;
+    let state = serde_json::json!({
+        "size": payload.len() as u64,
+        "digest": misaka_core::protocol::transfer_content_digest(&payload),
+        "chunk_size": chunk_size,
+        "chunk_count": chunk_count,
+        "completed": completed,
+    });
+    std::fs::write(
+        format!("{}.misaka-part-v2.json", destination.display()),
+        serde_json::to_vec(&state)
+            .map_err(|error| ScenarioError::infra(format!("encode parallel state: {error}")))?,
+    )
+    .map_err(|error| ScenarioError::infra(format!("write parallel state: {error}")))?;
+
+    let source_arg = source.to_string_lossy().to_string();
+    let destination_arg = format!("#{b_id}:{}", destination.display());
+    let output = ctx.run_cli(
+        "a",
+        &[
+            "cp",
+            "--resume",
+            "--parallel",
+            "4",
+            &source_arg,
+            &destination_arg,
+        ],
+    )?;
+    assert::assert_contains(
+        &output,
+        "Parallel copy",
+        "parallel transfer completion output",
+    )?;
+    let received = std::fs::read(&destination)
+        .map_err(|error| ScenarioError::assertion(format!("read parallel destination: {error}")))?;
+    assert::assert_eq(received, payload, "parallel Iroh transfer bytes")?;
+    if PathBuf::from(format!("{}.misaka-part-v2", destination.display())).exists()
+        || PathBuf::from(format!("{}.misaka-part-v2.json", destination.display())).exists()
+    {
+        return Err(ScenarioError::assertion(
+            "parallel transfer left durable partial state after completion",
+        ));
+    }
     Ok(())
 }
 

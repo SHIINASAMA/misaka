@@ -131,7 +131,10 @@ state. The CLI opt-in is `misaka cp --resume`; Transfer v0 remains unchanged.
 A deterministic runtime test covers disconnect, resume, and finalization, and
 the protocol works over Direct TCP or opt-in Iroh. The content digest is a
 verification identifier, not a content-addressed object store or a deduplication
-index; those remain separate transfer work.
+index. Transfer v2 adds opt-in `misaka cp --resume --parallel 4`: `MTR2` uses
+one durable completed-chunk bitmap, bounded worker streams, out-of-order
+offset writes, and a final whole-file SHA-256 check; N19 verifies this through
+real Iroh Sister processes. Sequential v1 remains the compatibility path.
 
 When a Sister has enabled loopback introspection, `misaka ps --json
 --introspect 127.0.0.1:<port>` includes the local active stream registry,
@@ -149,6 +152,6 @@ foundation for later transfer and tunnel work, not yet a general Internet
 transport.
 
 Multiplexing, compression, NAT traversal, and active relay path switching
-remain outside the raw insecure v0 contract. Transfer v1 does not yet include
-parallel chunks, a content-addressed object store, or cross-domain measurements.
+remain outside the raw insecure v0 contract. Transfer v2 does not yet include
+a content-addressed object store or cross-domain measurements.
 The later Tunnel, SSH, Relay, and Resolver snapshots are documented separately.

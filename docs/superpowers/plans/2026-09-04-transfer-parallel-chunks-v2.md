@@ -80,12 +80,12 @@
 **Interfaces:**
 - Adds N19 for a real-process parallel transfer over the selected stream endpoint and verifies exact destination bytes, out-of-order completion, and a retry from persisted bitmap state.
 
-- [ ] Add N19 to the network scenario manifest and update help text.
-- [ ] Use isolated `MISAKA_CONFIG_DIR` directories and deterministic manual discovery; invoke only public `misaka cp --resume --parallel` and inspect the destination file/result.
-- [ ] Run `cargo run -p testament -- run N19_transfer_parallel_chunks --json`; expect the scenario to fail until all earlier tasks are wired.
-- [ ] Implement the scenario's bounded polling and cleanup, then run N01–N19, T01–T13, and O01–O07.
-- [ ] Update protocol and roadmap docs to state that v2 is opt-in and v1 remains the compatibility path.
-- [ ] Commit `test(transfer): verify parallel chunks externally`.
+- [x] Add N19 to the network scenario manifest and update help text.
+- [x] Use isolated `MISAKA_CONFIG_DIR` directories and deterministic manual discovery; invoke only public `misaka cp --resume --parallel` and inspect the destination file/result.
+- [x] Run `cargo run -p testament -- run N19_iroh_parallel_transfer --json`; it passed against two real Iroh Sisters.
+- [x] Implement the scenario's bounded cleanup, then run N01–N19, T01–T13, and O01–O07; all passed.
+- [x] Update protocol and roadmap docs to state that v2 is opt-in and v1 remains the compatibility path.
+- [x] Commit `test(transfer): verify parallel chunks externally`.
 
 ### Task 58: Run the full regression gate and update project memory
 
