@@ -1,4 +1,5 @@
 use misaka_core::SisterId;
+use misaka_network::resolver::{rank_candidates, EndpointCandidate};
 use misaka_network::tls::{TlsClient, TlsIdentity};
 use misaka_network::{
     DirectTcpBackend, NetworkBackend, NetworkEndpoint, NetworkError, NetworkStream,
@@ -62,6 +63,7 @@ impl SisterConnector {
         }
 
         let mut last_error = None;
+        let mut candidates = Vec::new();
         for raw_endpoint in peer.stream_endpoints {
             let endpoint = match raw_endpoint.parse::<NetworkEndpoint>() {
                 Ok(endpoint) => endpoint,
@@ -74,7 +76,10 @@ impl SisterConnector {
                     continue;
                 }
             };
-            match self.backend.connect(endpoint).await {
+            candidates.push(EndpointCandidate::tcp(endpoint));
+        }
+        for candidate in rank_candidates(candidates) {
+            match self.backend.connect(candidate.endpoint).await {
                 Ok(stream) => return Ok(stream),
                 Err(error) => {
                     last_error = Some(ConnectionError::Connect {
@@ -129,6 +134,7 @@ impl SecureSisterConnector {
         )?;
 
         let mut last_error = None;
+        let mut candidates = Vec::new();
         for raw_endpoint in peer.stream_endpoints {
             let endpoint = match raw_endpoint.parse::<NetworkEndpoint>() {
                 Ok(endpoint) => endpoint,
@@ -141,7 +147,10 @@ impl SecureSisterConnector {
                     continue;
                 }
             };
-            match client.connect(endpoint).await {
+            candidates.push(EndpointCandidate::tcp(endpoint));
+        }
+        for candidate in rank_candidates(candidates) {
+            match client.connect(candidate.endpoint).await {
                 Ok(stream) => return Ok(stream),
                 Err(error) => {
                     last_error = Some(ConnectionError::Connect {

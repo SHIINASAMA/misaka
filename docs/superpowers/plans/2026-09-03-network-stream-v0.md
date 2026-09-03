@@ -488,3 +488,20 @@ metadata followed by fixed-size chunks, and verifies the receiver's result.
   payload decryption.
 - [x] Add an in-process socket-pairing regression test for the relay only;
   Testament remains an external harness for Sister behavior.
+
+## Phase 11: Resolver and Path Contract
+
+### Task 29: Rank endpoint candidates without coupling transports
+
+**Files:**
+- Create: `crates/misaka-network/src/resolver.rs`
+- Modify: `crates/misaka-network/src/lib.rs`
+- Modify: `crates/misaka-runtime/src/connection.rs`
+- Create: `docs/network-resolver-v0.md`
+
+- [x] Represent candidate route kind and priority independently from
+  `SisterId`.
+- [x] Prefer LAN candidates before public direct candidates.
+- [x] Keep relay as a reserved candidate kind without pretending it is wired
+  into the runtime.
+- [x] Add ranking coverage and sequential fallback through the connectors.
