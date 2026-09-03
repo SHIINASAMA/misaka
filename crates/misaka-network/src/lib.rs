@@ -21,7 +21,7 @@ pub const IROH_ALPN: &[u8] = b"misaka/stream/iroh/0";
 pub mod iroh_backend;
 pub mod resolver;
 pub mod tls;
-pub use iroh_backend::IrohBackend;
+pub use iroh_backend::{IrohBackend, IrohSession};
 
 #[derive(Debug, Error)]
 pub enum NetworkError {
@@ -549,6 +549,58 @@ mod tests {
         assert_eq!(&received, b"iroh-ok");
 
         server.close().await;
+        client.close().await;
+    }
+
+    #[tokio::test]
+    async fn iroh_session_reuses_one_connection_for_multiple_streams() {
+        let server_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .alpns(vec![IROH_ALPN.to_vec()])
+            .bind_addr("127.0.0.1:0")
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let client_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .alpns(vec![IROH_ALPN.to_vec()])
+            .bind_addr("127.0.0.1:0")
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let server = IrohBackend::new(server_endpoint, IROH_ALPN);
+        let client = IrohBackend::new(client_endpoint, IROH_ALPN);
+        let server_address = iroh::EndpointAddr::new(server.endpoint().id())
+            .with_ip_addr(server.endpoint().bound_sockets()[0]);
+        let server_task = tokio::spawn(async move {
+            let session = server.accept_session().await.unwrap();
+            let mut first = session.accept_stream().await.unwrap();
+            let mut second = session.accept_stream().await.unwrap();
+            first.write_all(b"one").await.unwrap();
+            second.write_all(b"two").await.unwrap();
+            let mut first_ack = [0u8; 3];
+            let mut second_ack = [0u8; 3];
+            first.read_exact(&mut first_ack).await.unwrap();
+            second.read_exact(&mut second_ack).await.unwrap();
+            assert_eq!(&first_ack, b"ack");
+            assert_eq!(&second_ack, b"ack");
+        });
+
+        let session = client
+            .connect_session(NetworkEndpoint::Iroh(server_address))
+            .await
+            .unwrap();
+        let mut first = session.open_stream().await.unwrap();
+        let mut second = session.open_stream().await.unwrap();
+        let mut first_response = [0u8; 3];
+        let mut second_response = [0u8; 3];
+        first.read_exact(&mut first_response).await.unwrap();
+        second.read_exact(&mut second_response).await.unwrap();
+        assert_eq!(&first_response, b"one");
+        assert_eq!(&second_response, b"two");
+        first.write_all(b"ack").await.unwrap();
+        second.write_all(b"ack").await.unwrap();
+        server_task.await.unwrap();
         client.close().await;
     }
 

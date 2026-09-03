@@ -10,13 +10,13 @@ use crate::{
     NetworkListener, NetworkListenerDriver, NetworkStream, PathInfo, Result, HANDSHAKE_LEN,
     HANDSHAKE_TIMEOUT, IROH_ALPN, MAGIC, PROTOCOL_VERSION,
 };
-use iroh::endpoint::{IncomingAddr, RecvStream, SendStream};
+use iroh::endpoint::{Connection, IncomingAddr, RecvStream, SendStream};
 use iroh::{Endpoint, EndpointAddr};
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 
 /// A backend backed by one Iroh endpoint.
 #[derive(Clone, Debug)]
@@ -52,6 +52,42 @@ impl IrohBackend {
         Ok(Self::new(endpoint, IROH_ALPN))
     }
 
+    /// Establish one long-lived Iroh connection without opening a logical
+    /// stream yet. Call `IrohSession::open_stream` for each operation.
+    pub async fn connect_session(&self, endpoint: NetworkEndpoint) -> Result<IrohSession> {
+        let NetworkEndpoint::Iroh(endpoint_addr) = endpoint else {
+            return Err(NetworkError::UnsupportedEndpoint(
+                "IrohBackend requires iroh:// endpoint".to_string(),
+            ));
+        };
+        let connection = self
+            .endpoint
+            .connect(endpoint_addr, &self.alpn)
+            .await
+            .map_err(|error| NetworkError::Iroh(error.to_string()))?;
+        Ok(IrohSession {
+            endpoint: self.endpoint.clone(),
+            connection,
+        })
+    }
+
+    /// Accept one long-lived Iroh connection without consuming a logical
+    /// stream. The caller can accept multiple streams from the session.
+    pub async fn accept_session(&self) -> Result<IrohSession> {
+        let incoming = self.endpoint.accept().await.ok_or(NetworkError::Closed)?;
+        let accepting = incoming
+            .accept()
+            .map_err(|error| NetworkError::Iroh(error.to_string()))?;
+        let connection = tokio::time::timeout(HANDSHAKE_TIMEOUT, accepting)
+            .await
+            .map_err(|_| NetworkError::Iroh("Iroh connection handshake timed out".to_string()))?
+            .map_err(|error| NetworkError::Iroh(error.to_string()))?;
+        Ok(IrohSession {
+            endpoint: self.endpoint.clone(),
+            connection,
+        })
+    }
+
     pub fn endpoint(&self) -> &Endpoint {
         &self.endpoint
     }
@@ -62,6 +98,62 @@ impl IrohBackend {
 
     pub async fn close(&self) {
         self.endpoint.close().await;
+    }
+}
+
+/// A long-lived Iroh connection that can carry multiple logical streams.
+#[derive(Clone)]
+pub struct IrohSession {
+    endpoint: Endpoint,
+    connection: Connection,
+}
+
+impl std::fmt::Debug for IrohSession {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("IrohSession")
+            .field("remote_id", &self.connection.remote_id())
+            .finish()
+    }
+}
+
+impl IrohSession {
+    pub fn remote_id(&self) -> iroh::EndpointId {
+        self.connection.remote_id()
+    }
+
+    pub async fn open_stream(&self) -> Result<NetworkStream> {
+        let (mut send, mut recv) = self
+            .connection
+            .open_bi()
+            .await
+            .map_err(|error| NetworkError::Iroh(error.to_string()))?;
+        write_handshake(&mut send).await?;
+        read_and_validate_handshake(&mut recv).await?;
+        Ok(network_stream(
+            send,
+            recv,
+            self.endpoint.clone(),
+            self.connection.remote_id(),
+        ))
+    }
+
+    pub async fn accept_stream(&self) -> Result<NetworkStream> {
+        let (mut send, mut recv) =
+            tokio::time::timeout(HANDSHAKE_TIMEOUT, self.connection.accept_bi())
+                .await
+                .map_err(|_| NetworkError::Handshake {
+                    reason: "Iroh logical stream open timed out".to_string(),
+                })?
+                .map_err(|error| NetworkError::Iroh(error.to_string()))?;
+        read_and_validate_handshake(&mut recv).await?;
+        write_handshake(&mut send).await?;
+        Ok(network_stream(
+            send,
+            recv,
+            self.endpoint.clone(),
+            self.connection.remote_id(),
+        ))
     }
 }
 
@@ -120,22 +212,11 @@ impl crate::NetworkBackend for IrohBackend {
             peer_id = %connection.remote_id(),
             "Iroh network stream connected"
         );
-        Ok(NetworkStream::from_stream_with_path(
-            IrohStream {
-                send,
-                recv,
-                _endpoint: self.endpoint.clone(),
-            },
-            PathInfo::new(
-                "iroh",
-                "iroh",
-                self.endpoint
-                    .bound_sockets()
-                    .into_iter()
-                    .next()
-                    .map(|addr| addr.to_string()),
-                remote_endpoint,
-            ),
+        Ok(network_stream_with_metadata(
+            send,
+            recv,
+            self.endpoint.clone(),
+            remote_endpoint,
         ))
     }
 }
@@ -227,6 +308,43 @@ struct IrohStream {
     _endpoint: Endpoint,
 }
 
+fn network_stream(
+    send: SendStream,
+    recv: RecvStream,
+    endpoint: Endpoint,
+    remote_id: iroh::EndpointId,
+) -> NetworkStream {
+    let remote_endpoint = serde_json::to_string(&EndpointAddr::new(remote_id))
+        .ok()
+        .map(|value| format!("iroh://{value}"));
+    network_stream_with_metadata(send, recv, endpoint, remote_endpoint)
+}
+
+fn network_stream_with_metadata(
+    send: SendStream,
+    recv: RecvStream,
+    endpoint: Endpoint,
+    remote_endpoint: Option<String>,
+) -> NetworkStream {
+    NetworkStream::from_stream_with_path(
+        IrohStream {
+            send,
+            recv,
+            _endpoint: endpoint.clone(),
+        },
+        PathInfo::new(
+            "iroh",
+            "iroh",
+            endpoint
+                .bound_sockets()
+                .into_iter()
+                .next()
+                .map(|addr| addr.to_string()),
+            remote_endpoint,
+        ),
+    )
+}
+
 impl AsyncRead for IrohStream {
     fn poll_read(
         self: Pin<&mut Self>,
@@ -280,6 +398,12 @@ async fn write_handshake(stream: &mut SendStream) -> Result<()> {
         .await
         .map_err(|error| NetworkError::Handshake {
             reason: format!("write Iroh handshake: {error}"),
+        })?;
+    stream
+        .flush()
+        .await
+        .map_err(|error| NetworkError::Handshake {
+            reason: format!("flush Iroh handshake: {error}"),
         })
 }
 

@@ -619,3 +619,18 @@ QUIC bidirectional stream, without changing the runtime's Direct TCP default.
 - [x] Include selected path metadata in runtime stream-close diagnostics.
 - [x] Keep introspection read-only and do not use diagnostic logs as Testament
   assertions.
+
+### Task 37: Add an explicit Iroh persistent-session API
+
+**Files:**
+- Modify: `crates/misaka-network/src/iroh_backend.rs`
+- Modify: `crates/misaka-network/src/lib.rs`
+- Modify: `docs/iroh-backend-spike-v0.md`
+
+- [x] Establish/accept one long-lived Iroh QUIC connection.
+- [x] Open and accept multiple independently handshaken logical streams on it.
+- [x] Keep endpoint lifetime attached to session-created streams.
+- [x] Verify concurrent logical stream lifetime with a deterministic loopback
+  test.
+- [x] Leave runtime-wide session ownership and transparent recovery for a
+  later checkpoint.

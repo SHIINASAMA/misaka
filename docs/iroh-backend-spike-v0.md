@@ -45,6 +45,11 @@ lifecycle and rotation requirements.
   rejected for Iroh endpoints because Iroh already authenticates the endpoint.
 - Each returned stream exposes `PathInfo` with `backend = iroh`, the selected
   route when known, and endpoint metadata suitable for diagnostics.
+- `IrohBackend::connect_session`/`accept_session` expose an explicit
+  long-lived QUIC connection; `IrohSession::open_stream` and
+  `accept_stream` create multiple independently handshaken logical streams on
+  that connection. The runtime's existing listener remains stream-scoped until
+  session ownership is designed for all backends.
 - One logical operation still owns one `NetworkStream`; no session
   multiplexing or transparent reconnect is introduced.
 - The current listener compatibility metadata remains a `SocketAddr`; relay
