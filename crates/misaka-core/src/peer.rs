@@ -12,6 +12,9 @@ pub struct PeerState {
     /// Candidate endpoints for long-lived streams; control-plane `addr` stays separate.
     #[serde(default)]
     pub stream_endpoints: Vec<String>,
+    /// Pinned peer certificate used by secure stream connectors.
+    #[serde(default)]
+    pub stream_certificate: Option<Vec<u8>>,
     pub addr: String,
 
     // 本地的观测字段
@@ -38,6 +41,8 @@ pub struct PeerBlueprint {
     pub addr: String,
     #[serde(default)]
     pub stream_endpoints: Vec<String>,
+    #[serde(default)]
+    pub stream_certificate: Option<Vec<u8>>,
     pub nickname: String,
     pub hostname: String,
     pub platform: String,
@@ -50,6 +55,7 @@ impl From<&PeerState> for PeerBlueprint {
             id: p.id,
             addr: p.addr.clone(),
             stream_endpoints: p.stream_endpoints.clone(),
+            stream_certificate: p.stream_certificate.clone(),
             nickname: p.nickname.clone(),
             hostname: p.hostname.clone(),
             platform: p.platform.clone(),
@@ -90,6 +96,9 @@ impl PeerStateTable {
             }
             if !state.stream_endpoints.is_empty() {
                 prev.stream_endpoints = state.stream_endpoints;
+            }
+            if state.stream_certificate.is_some() {
+                prev.stream_certificate = state.stream_certificate;
             }
         } else {
             self.peers.insert(state.id, state);
@@ -150,6 +159,7 @@ mod tests {
             platform: "p".into(),
             version: "v".into(),
             stream_endpoints: vec![],
+            stream_certificate: None,
             addr: addr.into(),
             cpu_usage: 10.0,
             memory_total: 0,
@@ -191,10 +201,12 @@ mod tests {
     fn peer_state_roundtrips_stream_endpoint_candidates() {
         let mut peer = state(7, "127.0.0.1:31700");
         peer.stream_endpoints = vec!["tcp://127.0.0.1:31701".into()];
+        peer.stream_certificate = Some(vec![1, 2, 3]);
 
         let encoded = serde_json::to_string(&peer).unwrap();
         let decoded: PeerState = serde_json::from_str(&encoded).unwrap();
 
         assert_eq!(decoded.stream_endpoints, peer.stream_endpoints);
+        assert_eq!(decoded.stream_certificate, peer.stream_certificate);
     }
 }

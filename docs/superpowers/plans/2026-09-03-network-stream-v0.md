@@ -417,8 +417,8 @@ loopback-only while those pieces are being integrated.
 - Modify: `crates/misaka-cli/src/main.rs`
 - Modify: `crates/testament/src/scenario.rs`
 
-- [ ] Add explicit secure-stream configuration and trust provisioning.
-- [ ] Bind non-loopback stream listeners only in secure mode.
-- [ ] Route SisterId connections through the secure backend and retain mDNS
+- [x] Add explicit secure-stream configuration and trust provisioning.
+- [x] Bind non-loopback stream listeners only in secure mode.
+- [x] Route SisterId connections through the secure backend and retain mDNS
   discovery as candidate metadata only.
 - [ ] Add black-box LAN-style secure connection coverage.

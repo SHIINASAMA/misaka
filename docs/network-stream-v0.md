@@ -54,8 +54,10 @@ Security v0 now provides an independent TLS 1.3/mTLS wrapper in
 `misaka-network::tls`. It uses certificate pinning plus the TLS server-name
 check for peer identity binding and delegates key exchange/record protection
 to rustls. The existing raw Direct TCP stream remains intentionally insecure
-and loopback-only until the LAN integration phase wires this secure transport
-into runtime listener and connector paths.
+and loopback-only by default; `RuntimeConfig::MutualTls` is the explicit path
+for a secure listener and `SecureSisterConnector` consumes the pinned peer
+certificate learned through peer state. Trust provisioning is required before
+using a non-loopback address.
 
 The handshake contains only the `MISAKA_STREAM` magic and protocol version 1.
 It carries no Sister identity, credentials, permissions, service metadata, or

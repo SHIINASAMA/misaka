@@ -32,6 +32,7 @@ pub(crate) async fn dispatch(
                 &hello.identity,
                 &hello.listen_addr,
                 hello.stream_addr.as_deref(),
+                hello.stream_certificate,
             )
             .await;
             let reply = Envelope::new(
@@ -42,6 +43,7 @@ pub(crate) async fn dispatch(
                     identity: node.identity.as_ref().clone(),
                     listen_addr: node.listen_addr.to_string(),
                     stream_addr: node.stream_endpoint(),
+                    stream_certificate: node.stream_certificate(),
                 })?,
             );
             node.transport.reply(stream, &reply).await?;
@@ -69,6 +71,7 @@ pub(crate) async fn dispatch(
                     platform: state.identity.platform,
                     version: state.identity.version,
                     stream_endpoints: state.stream_addr.into_iter().collect(),
+                    stream_certificate: state.stream_certificate,
                     addr: state.listen_addr,
                     cpu_usage: state.cpu_usage,
                     memory_total: state.memory_total,

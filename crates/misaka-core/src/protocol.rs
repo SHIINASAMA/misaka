@@ -48,6 +48,9 @@ pub struct HelloData {
     /// Optional candidate address for the long-lived stream listener.
     #[serde(default)]
     pub stream_addr: Option<String>,
+    /// Optional DER certificate used to pin the secure stream peer.
+    #[serde(default)]
+    pub stream_certificate: Option<Vec<u8>>,
 }
 
 /// 状态 payload —— Sister 上报自身局部状态
@@ -59,6 +62,9 @@ pub struct StateData {
     /// Optional candidate address for the long-lived stream listener.
     #[serde(default)]
     pub stream_addr: Option<String>,
+    /// Optional DER certificate used to pin the secure stream peer.
+    #[serde(default)]
+    pub stream_certificate: Option<Vec<u8>>,
     pub cpu_usage: f32,
     pub memory_total: u64,
     pub memory_used: u64,

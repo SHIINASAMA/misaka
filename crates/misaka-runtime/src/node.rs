@@ -71,6 +71,7 @@ impl SisterNode {
                 platform: bp.platform,
                 version: bp.version,
                 stream_endpoints: bp.stream_endpoints,
+                stream_certificate: bp.stream_certificate,
                 addr: bp.addr,
                 cpu_usage: 0.0,
                 memory_total: 0,
@@ -120,11 +121,20 @@ impl SisterNode {
             .config
             .stream_port
             .map(|port| SocketAddr::new(self.listen_addr.ip(), port));
-        candidate.filter(|addr| addr.ip().is_loopback())
+        candidate.filter(|addr| addr.ip().is_loopback() || self.config.stream_security.is_secure())
     }
 
     pub fn stream_endpoint(&self) -> Option<String> {
         self.stream_addr().map(|addr| format!("tcp://{addr}"))
+    }
+
+    pub fn stream_certificate(&self) -> Option<Vec<u8>> {
+        match &self.config.stream_security {
+            crate::config::StreamSecurity::InsecureLoopback => None,
+            crate::config::StreamSecurity::MutualTls { identity, .. } => {
+                Some(identity.certificate_der().to_vec())
+            }
+        }
     }
 
     pub fn get_crypto(&self) -> Crypto {
@@ -208,9 +218,10 @@ impl SisterNode {
         identity: &SisterIdentity,
         listen_addr: &str,
         stream_addr: Option<&str>,
+        stream_certificate: Option<Vec<u8>>,
     ) {
         self.peers
-            .remember_peer(identity, listen_addr, stream_addr)
+            .remember_peer(identity, listen_addr, stream_addr, stream_certificate)
             .await;
     }
 
@@ -224,6 +235,7 @@ impl SisterNode {
                 identity: self.identity.as_ref().clone(),
                 listen_addr: self.listen_addr.to_string(),
                 stream_addr: self.stream_endpoint(),
+                stream_certificate: self.stream_certificate(),
             })?,
         );
         let reply = self.send_to(addr, &env).await?;
@@ -232,6 +244,7 @@ impl SisterNode {
             &hello.identity,
             &hello.listen_addr,
             hello.stream_addr.as_deref(),
+            hello.stream_certificate,
         )
         .await;
         tracing::info!(
@@ -519,6 +532,7 @@ impl SisterNode {
                                 .into_iter()
                                 .map(|endpoint| endpoint.to_string())
                                 .collect(),
+                            stream_certificate: None,
                             addr: addr.to_string(),
                             cpu_usage: 0.0,
                             memory_total: 0,
@@ -609,6 +623,7 @@ impl SisterNode {
                     identity: self.identity.as_ref().clone(),
                     listen_addr: self.listen_addr.to_string(),
                     stream_addr: self.stream_endpoint(),
+                    stream_certificate: self.stream_certificate(),
                     cpu_usage: ls.cpu_usage,
                     memory_total: ls.memory_total,
                     memory_used: ls.memory_used,

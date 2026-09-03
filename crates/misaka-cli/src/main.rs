@@ -33,6 +33,14 @@ enum Command {
         #[arg(long, default_value_t = 0)]
         stream_port: u16,
 
+        /// Enable the TLS 1.3/mTLS stream listener.
+        #[arg(long)]
+        stream_secure: bool,
+
+        /// DER certificate of a trusted peer; may be repeated in secure mode.
+        #[arg(long, value_name = "PATH")]
+        stream_trust_cert: Vec<PathBuf>,
+
         /// Known peer address; may be repeated (manual discovery).
         #[arg(long)]
         peer: Vec<String>,
@@ -118,6 +126,8 @@ async fn main() -> Result<(), MisakaError> {
         Command::Start {
             port,
             stream_port,
+            stream_secure,
+            stream_trust_cert,
             peer,
             nickname,
             discovery,
@@ -133,6 +143,31 @@ async fn main() -> Result<(), MisakaError> {
                 IdentityStore::config_dir().map_err(|e| MisakaError::Other(e.to_string()))?;
             let identity = IdentityStore::load_or_init(nickname.clone(), port)
                 .map_err(|e| MisakaError::Other(e.to_string()))?;
+            let stream_security = if stream_secure {
+                let stream_identity =
+                    misaka_runtime::tls_identity_store::TlsIdentityStore::load_or_init(
+                        &data_dir,
+                        &format!("sister-{}", identity.id.as_u64()),
+                    )
+                    .map_err(|e| MisakaError::Other(e.to_string()))?;
+                let trusted_peer_certificates = stream_trust_cert
+                    .iter()
+                    .map(|path| {
+                        std::fs::read(path).map_err(|error| {
+                            MisakaError::Other(format!(
+                                "read trusted stream certificate {}: {error}",
+                                path.display()
+                            ))
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                misaka_runtime::config::StreamSecurity::MutualTls {
+                    identity: stream_identity,
+                    trusted_peer_certificates,
+                }
+            } else {
+                misaka_runtime::config::StreamSecurity::InsecureLoopback
+            };
             if nickname.clone().is_some() {
                 tracing::info!(
                     event = "nickname_updated",
@@ -159,6 +194,7 @@ async fn main() -> Result<(), MisakaError> {
             let config = misaka_runtime::config::RuntimeConfig {
                 listen_port: port,
                 stream_port: (stream_port != 0).then_some(stream_port),
+                stream_security,
                 data_dir,
                 heartbeat_interval: std::time::Duration::from_secs(heartbeat),
                 peer_timeout: std::time::Duration::from_secs(peer_timeout),

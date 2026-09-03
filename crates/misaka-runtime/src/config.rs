@@ -2,6 +2,23 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::time::Duration;
 
+#[derive(Debug, Clone)]
+pub enum StreamSecurity {
+    /// The development-only raw stream, restricted to loopback.
+    InsecureLoopback,
+    /// TLS 1.3/mTLS with an explicitly provisioned peer trust set.
+    MutualTls {
+        identity: misaka_network::tls::TlsIdentity,
+        trusted_peer_certificates: Vec<Vec<u8>>,
+    },
+}
+
+impl StreamSecurity {
+    pub fn is_secure(&self) -> bool {
+        matches!(self, Self::MutualTls { .. })
+    }
+}
+
 /// 发现模式
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiscoveryMode {
@@ -23,6 +40,8 @@ pub struct RuntimeConfig {
     pub listen_port: u16,
     /// 实验性 Network Stream 监听端口 (None = 禁用)
     pub stream_port: Option<u16>,
+    /// Stream security mode. Raw streams remain loopback-only by default.
+    pub stream_security: StreamSecurity,
     /// 告知 peer 的对外地址 (None = 用 listen_port 在回环/本机)
     pub advertise_host: Option<IpAddr>,
     /// 数据目录 (persistent identity/peers)
@@ -56,6 +75,7 @@ impl Default for RuntimeConfig {
         Self {
             listen_port: 31700,
             stream_port: None,
+            stream_security: StreamSecurity::InsecureLoopback,
             advertise_host: None,
             // 数据目录在 CLI 层通过 MISAKA_CONFIG_DIR 决定；这里放默认值
             data_dir: PathBuf::from("."),

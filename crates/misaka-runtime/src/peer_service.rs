@@ -64,6 +64,7 @@ impl PeerService {
         identity: &SisterIdentity,
         listen_addr: &str,
         stream_addr: Option<&str>,
+        stream_certificate: Option<Vec<u8>>,
     ) {
         self.upsert(PeerState {
             id: identity.id.as_u64(),
@@ -72,6 +73,7 @@ impl PeerService {
             platform: identity.platform.clone(),
             version: identity.version.clone(),
             stream_endpoints: stream_addr.into_iter().map(str::to_string).collect(),
+            stream_certificate,
             addr: listen_addr.to_string(),
             cpu_usage: 0.0,
             memory_total: 0,
@@ -112,6 +114,7 @@ mod tests {
             platform: "test".into(),
             version: "0.1".into(),
             stream_endpoints: vec![],
+            stream_certificate: None,
             addr: "127.0.0.1:1".into(),
             cpu_usage: 0.0,
             memory_total: 0,

@@ -1,4 +1,5 @@
 use misaka_core::SisterId;
+use misaka_network::tls::{TlsClient, TlsIdentity};
 use misaka_network::{
     DirectTcpBackend, NetworkBackend, NetworkEndpoint, NetworkError, NetworkStream,
 };
@@ -29,6 +30,8 @@ pub enum ConnectionError {
     },
     #[error("connection to Sister {0} is already being established")]
     AlreadyConnecting(SisterId),
+    #[error("Sister {0} has no pinned stream certificate")]
+    NoPeerCertificate(SisterId),
 }
 
 #[derive(Clone)]
@@ -82,6 +85,72 @@ impl SisterConnector {
             }
         }
 
+        Err(last_error.expect("non-empty endpoint candidates produce an error"))
+    }
+}
+
+#[derive(Clone)]
+pub struct SecureSisterConnector {
+    peers: PeerService,
+    identity: TlsIdentity,
+}
+
+impl SecureSisterConnector {
+    pub fn new(peers: PeerService, identity: TlsIdentity) -> Self {
+        Self { peers, identity }
+    }
+
+    pub async fn connect_to_sister(
+        &self,
+        sister: SisterId,
+    ) -> Result<NetworkStream, ConnectionError> {
+        let peer = self
+            .peers
+            .get(sister.as_u64())
+            .await
+            .ok_or_else(|| ConnectionError::UnknownSister(sister.clone()))?;
+        let certificate = peer
+            .stream_certificate
+            .ok_or_else(|| ConnectionError::NoPeerCertificate(sister.clone()))?;
+        if peer.stream_endpoints.is_empty() {
+            return Err(ConnectionError::NoStreamEndpoint(sister));
+        }
+        let client_config = self.identity.client_config(&certificate).map_err(|error| {
+            ConnectionError::Connect {
+                sister: sister.clone(),
+                source: error,
+            }
+        })?;
+        let client = TlsClient::new(client_config, format!("sister-{}", sister.as_u64())).map_err(
+            |error| ConnectionError::Connect {
+                sister: sister.clone(),
+                source: error,
+            },
+        )?;
+
+        let mut last_error = None;
+        for raw_endpoint in peer.stream_endpoints {
+            let endpoint = match raw_endpoint.parse::<NetworkEndpoint>() {
+                Ok(endpoint) => endpoint,
+                Err(reason) => {
+                    last_error = Some(ConnectionError::InvalidEndpoint {
+                        sister: sister.clone(),
+                        endpoint: raw_endpoint,
+                        reason,
+                    });
+                    continue;
+                }
+            };
+            match client.connect(endpoint).await {
+                Ok(stream) => return Ok(stream),
+                Err(error) => {
+                    last_error = Some(ConnectionError::Connect {
+                        sister: sister.clone(),
+                        source: error,
+                    })
+                }
+            }
+        }
         Err(last_error.expect("non-empty endpoint candidates produce an error"))
     }
 }
@@ -180,6 +249,7 @@ mod tests {
             platform: "test".into(),
             version: "0.1".into(),
             stream_endpoints: vec![format!("tcp://{endpoint}")],
+            stream_certificate: None,
             addr: "127.0.0.1:31700".into(),
             cpu_usage: 0.0,
             memory_total: 0,
@@ -226,6 +296,7 @@ mod tests {
             platform: "test".into(),
             version: "0.1".into(),
             stream_endpoints: vec![format!("tcp://{endpoint}")],
+            stream_certificate: None,
             addr: "127.0.0.1:31700".into(),
             cpu_usage: 0.0,
             memory_total: 0,
@@ -271,5 +342,68 @@ mod tests {
         second.read_exact(&mut second_response).await.unwrap();
         assert_eq!(&second_response, b"second");
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn secure_connector_pins_the_peer_certificate_and_identity_name() {
+        let server_dir =
+            std::env::temp_dir().join(format!("misaka-server-{}", uuid::Uuid::new_v4()));
+        let client_dir =
+            std::env::temp_dir().join(format!("misaka-client-{}", uuid::Uuid::new_v4()));
+        let server_identity =
+            crate::tls_identity_store::TlsIdentityStore::load_or_init(&server_dir, "sister-42")
+                .unwrap();
+        let client_identity =
+            crate::tls_identity_store::TlsIdentityStore::load_or_init(&client_dir, "sister-1")
+                .unwrap();
+        let server = misaka_network::tls::TlsServer::new(
+            server_identity
+                .server_config(client_identity.certificate_der())
+                .unwrap(),
+        );
+        let listener = server
+            .listen(
+                "127.0.0.1:0"
+                    .parse::<std::net::SocketAddr>()
+                    .unwrap()
+                    .into(),
+            )
+            .await
+            .unwrap();
+        let endpoint = listener.local_addr();
+        let server_task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            stream.write_all(b"secure").await.unwrap();
+        });
+
+        let peer = PeerState {
+            id: 42,
+            nickname: "peer".into(),
+            hostname: "host".into(),
+            platform: "test".into(),
+            version: "0.1".into(),
+            stream_endpoints: vec![format!("tcp://{endpoint}")],
+            stream_certificate: Some(server_identity.certificate_der().to_vec()),
+            addr: "127.0.0.1:31700".into(),
+            cpu_usage: 0.0,
+            memory_total: 0,
+            memory_used: 0,
+            running_jobs: 0,
+            queued_jobs: 0,
+            uptime_secs: 0,
+            capabilities: vec![],
+        };
+        let service = crate::peer_service::PeerService::new(
+            crate::peer_registry::PeerRegistry::new_seeded(vec![peer]),
+            std::path::PathBuf::from("."),
+        );
+        let connector = super::SecureSisterConnector::new(service, client_identity);
+        let mut stream = connector.connect_to_sister(SisterId(42)).await.unwrap();
+        let mut response = [0u8; 6];
+        stream.read_exact(&mut response).await.unwrap();
+        assert_eq!(&response, b"secure");
+        server_task.await.unwrap();
+        let _ = std::fs::remove_dir_all(server_dir);
+        let _ = std::fs::remove_dir_all(client_dir);
     }
 }

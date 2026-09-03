@@ -18,8 +18,10 @@ pub struct Envelope {
 
 The payload in `data` is bincode-encoded message-specific data:
 
-- `HelloData`: identity and peer listen address;
-- `StateData`: identity, listen address, resources, queue counters, uptime, capabilities;
+- `HelloData`: identity, peer listen address, optional stream candidate, and
+  optional DER certificate for secure stream pinning;
+- `StateData`: identity, listen address, optional stream candidate and
+  certificate, resources, queue counters, uptime, capabilities;
 - `JobData`: job ID, creator, executor, creator address, command, arguments, creation time;
 - `JobResultData`: job ID, creator, executor, output, exit code, success, timestamps;
 - `Ping`/`Pong`: empty payloads used for a read-only compatibility probe.
@@ -51,7 +53,8 @@ Transport owns connect, framing, encryption, send, and receive. Handler owns mes
 
 mDNS advertises `_misaka._tcp.local` with the Sister ID, nickname, hostname,
 platform, peer listen address, and optional loopback stream-port metadata.
-Introspection is never advertised. `manual` discovery uses configured peer
+It does not establish trust; secure stream trust must be provisioned
+separately. Introspection is never advertised. `manual` discovery uses configured peer
 addresses and is the deterministic mode for Testament; `off` disables
 discovery while retaining local execution and direct configured operations.
 

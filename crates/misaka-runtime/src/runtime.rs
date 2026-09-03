@@ -36,6 +36,7 @@ impl SisterRuntime {
         let advertise_host = config.advertise_host;
         let introspection_addr = config.introspection_addr;
         let stream_port = config.stream_port;
+        let stream_security = config.stream_security.clone();
         let shutdown = Shutdown::new();
         let mut node = SisterNode::new(identity, encryption_key, config);
         node.set_shutdown_token(shutdown.token());
@@ -54,12 +55,37 @@ impl SisterRuntime {
         let listener = node.start_listener().await?;
         let backend = misaka_network::DirectTcpBackend;
         let stream_listener = match stream_port {
-            Some(port) => Some(
-                backend
-                    .listen(NetworkEndpoint::Tcp(format!("127.0.0.1:{port}").parse()?))
-                    .await
-                    .map_err(|error| crate::Error::Network(error.to_string()))?,
-            ),
+            Some(port) => match stream_security {
+                crate::config::StreamSecurity::InsecureLoopback => Some(
+                    backend
+                        .listen(NetworkEndpoint::Tcp(format!("127.0.0.1:{port}").parse()?))
+                        .await
+                        .map_err(|error| crate::Error::Network(error.to_string()))?,
+                ),
+                crate::config::StreamSecurity::MutualTls {
+                    identity,
+                    trusted_peer_certificates,
+                } => {
+                    if trusted_peer_certificates.is_empty() {
+                        return Err(crate::Error::Network(
+                            "secure stream requires at least one trusted peer certificate"
+                                .to_string(),
+                        ));
+                    }
+                    Some(
+                        misaka_network::tls::TlsServer::new(
+                            identity
+                                .server_config_with_trusted_client_certificates(
+                                    &trusted_peer_certificates,
+                                )
+                                .map_err(|error| crate::Error::Network(error.to_string()))?,
+                        )
+                        .listen(NetworkEndpoint::Tcp(format!("0.0.0.0:{port}").parse()?))
+                        .await
+                        .map_err(|error| crate::Error::Network(error.to_string()))?,
+                    )
+                }
+            },
             None => None,
         };
 
@@ -84,7 +110,7 @@ impl SisterRuntime {
     pub fn stream_addr(&self) -> Option<SocketAddr> {
         self.stream_listener.as_ref().map(|listener| {
             let port = listener.local_addr().port();
-            format!("127.0.0.1:{port}").parse().unwrap()
+            SocketAddr::new(self.node.listen_addr.ip(), port)
         })
     }
 
@@ -332,7 +358,7 @@ pub fn default_encryption_key() -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::SisterRuntime;
-    use crate::config::{DiscoveryMode, RuntimeConfig};
+    use crate::config::{DiscoveryMode, RuntimeConfig, StreamSecurity};
     use crate::runtime::default_encryption_key;
     use misaka_core::SisterIdentity;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -381,5 +407,74 @@ mod tests {
 
         shutdown.cancel();
         task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn secure_stream_listener_accepts_only_mutually_authenticated_clients() {
+        let server_dir =
+            std::env::temp_dir().join(format!("misaka-runtime-server-{}", uuid::Uuid::new_v4()));
+        let client_dir =
+            std::env::temp_dir().join(format!("misaka-runtime-client-{}", uuid::Uuid::new_v4()));
+        let server_identity =
+            crate::tls_identity_store::TlsIdentityStore::load_or_init(&server_dir, "sister-1")
+                .unwrap();
+        let client_identity =
+            crate::tls_identity_store::TlsIdentityStore::load_or_init(&client_dir, "sister-2")
+                .unwrap();
+        let runtime = SisterRuntime::new(
+            SisterIdentity::new(
+                1,
+                "server".into(),
+                "host".into(),
+                "test".into(),
+                "0.1".into(),
+                0,
+            ),
+            default_encryption_key(),
+            RuntimeConfig {
+                listen_port: 0,
+                stream_port: Some(0),
+                stream_security: StreamSecurity::MutualTls {
+                    identity: server_identity.clone(),
+                    trusted_peer_certificates: vec![client_identity.certificate_der().to_vec()],
+                },
+                discovery: DiscoveryMode::Off,
+                data_dir: server_dir.clone(),
+                ..Default::default()
+            },
+            vec![],
+        )
+        .await
+        .unwrap();
+        assert!(runtime
+            .stream_listener
+            .as_ref()
+            .unwrap()
+            .local_addr()
+            .ip()
+            .is_unspecified());
+        let stream_addr = runtime.stream_addr().unwrap();
+        let shutdown = runtime.shutdown();
+        let task = tokio::spawn(runtime.run());
+
+        let client = misaka_network::tls::TlsClient::new(
+            client_identity
+                .client_config(server_identity.certificate_der())
+                .unwrap(),
+            "sister-1",
+        )
+        .unwrap();
+        let mut stream = client
+            .connect(misaka_network::NetworkEndpoint::Tcp(stream_addr))
+            .await
+            .unwrap();
+        let mut greeting = [0u8; 5];
+        stream.read_exact(&mut greeting).await.unwrap();
+        assert_eq!(&greeting, b"world");
+
+        shutdown.cancel();
+        task.await.unwrap().unwrap();
+        let _ = std::fs::remove_dir_all(server_dir);
+        let _ = std::fs::remove_dir_all(client_dir);
     }
 }

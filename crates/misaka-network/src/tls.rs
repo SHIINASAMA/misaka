@@ -4,6 +4,7 @@ use crate::{
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
 use rustls::{ClientConfig, RootCertStore, ServerConfig};
+use std::fmt;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
@@ -21,6 +22,16 @@ pub struct TlsIdentity {
     private_key_der: Vec<u8>,
 }
 
+impl fmt::Debug for TlsIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TlsIdentity")
+            .field("certificate_len", &self.certificate_der.len())
+            .field("private_key_len", &self.private_key_der.len())
+            .finish()
+    }
+}
+
 impl TlsIdentity {
     pub fn from_der(certificate_der: Vec<u8>, private_key_der: Vec<u8>) -> Self {
         Self {
@@ -34,7 +45,14 @@ impl TlsIdentity {
     }
 
     pub fn client_config(&self, trusted_peer_certificate: &[u8]) -> Result<Arc<ClientConfig>> {
-        let roots = root_store(trusted_peer_certificate)?;
+        self.client_config_with_trusted_peer_certificates(&[trusted_peer_certificate.to_vec()])
+    }
+
+    pub fn client_config_with_trusted_peer_certificates(
+        &self,
+        trusted_peer_certificates: &[Vec<u8>],
+    ) -> Result<Arc<ClientConfig>> {
+        let roots = root_store(trusted_peer_certificates.iter().map(Vec::as_slice))?;
         let config = ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
             .with_root_certificates(roots)
             .with_client_auth_cert(self.certificate_chain(), self.private_key())
@@ -43,7 +61,14 @@ impl TlsIdentity {
     }
 
     pub fn server_config(&self, trusted_client_certificate: &[u8]) -> Result<Arc<ServerConfig>> {
-        let roots = root_store(trusted_client_certificate)?;
+        self.server_config_with_trusted_client_certificates(&[trusted_client_certificate.to_vec()])
+    }
+
+    pub fn server_config_with_trusted_client_certificates(
+        &self,
+        trusted_client_certificates: &[Vec<u8>],
+    ) -> Result<Arc<ServerConfig>> {
+        let roots = root_store(trusted_client_certificates.iter().map(Vec::as_slice))?;
         let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
             .build()
             .map_err(|error| NetworkError::Tls(error.to_string()))?;
@@ -63,11 +88,13 @@ impl TlsIdentity {
     }
 }
 
-fn root_store(certificate_der: &[u8]) -> Result<RootCertStore> {
+fn root_store<'a>(certificates: impl IntoIterator<Item = &'a [u8]>) -> Result<RootCertStore> {
     let mut roots = RootCertStore::empty();
-    roots
-        .add(CertificateDer::from(certificate_der.to_vec()))
-        .map_err(|error| NetworkError::Tls(error.to_string()))?;
+    for certificate_der in certificates {
+        roots
+            .add(CertificateDer::from(certificate_der.to_vec()))
+            .map_err(|error| NetworkError::Tls(error.to_string()))?;
+    }
     Ok(roots)
 }
 

@@ -124,8 +124,10 @@ a protocol version.
 Secure Network Streams use TLS 1.3 with mutual certificate authentication via
 `misaka-network::tls`. A Sister pins the expected peer certificate as a trust
 root and validates the peer's certificate identity name; the TLS library owns
-the key exchange and record encryption. This secure stream primitive is not
-yet wired into the default loopback-only echo listener or LAN advertisement.
+the key exchange and record encryption. `RuntimeConfig::MutualTls` wires this
+primitive into an opt-in listener, while the default raw stream remains
+loopback-only. Trust provisioning is explicit and is never inferred from
+mDNS alone.
 
 ## Network Stream v0 boundary
 
@@ -137,8 +139,9 @@ remain compatibility wrappers. `SisterRuntime` binds its experimental stream
 listener to loopback (`127.0.0.1`) on the independent `--stream-port`, and
 server-side handshakes time out after five seconds. It does not migrate or
 unify the control-plane `PeerTransport`, or route by SisterId. Stream
-addresses are stored separately as connection candidates, and the secure TLS
-wrapper remains opt-in until LAN integration.
+addresses and peer certificates are stored separately as connection
+candidates and trust material; secure TLS is opt-in until the operator
+provisions the trust set.
 
 Endpoint Model v0 introduces `NetworkEndpoint::Tcp(SocketAddr)` at the
 backend boundary. This endpoint is a connection candidate and is deliberately

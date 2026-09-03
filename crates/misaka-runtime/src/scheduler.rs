@@ -70,6 +70,7 @@ mod tests {
             platform: "test".into(),
             version: "test".into(),
             stream_endpoints: vec![],
+            stream_certificate: None,
             addr: format!("127.0.0.1:{}", id),
             cpu_usage,
             memory_total: 0,

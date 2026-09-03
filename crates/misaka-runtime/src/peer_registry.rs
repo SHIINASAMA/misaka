@@ -82,6 +82,7 @@ mod tests {
             platform: "test".into(),
             version: "0.1".into(),
             stream_endpoints: vec![],
+            stream_certificate: None,
             addr: addr.into(),
             cpu_usage: 5.0,
             memory_total: 10,
