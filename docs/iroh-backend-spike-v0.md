@@ -53,7 +53,10 @@ lifecycle and rotation requirements.
   Iroh already authenticates the endpoint.
 - Each returned stream exposes `PathInfo` with `backend = iroh`, the selected
   route when known, optional selected-path RTT in milliseconds, and endpoint
-  metadata suitable for diagnostics.
+  metadata suitable for diagnostics. Iroh path events refresh the route and
+  RTT while the stream is active and increment `path_switches` when the
+  selected route changes; active introspection and final JSON probe reports
+  expose that counter.
 - The CLI uses an explicit 8 MiB Tokio worker stack because concurrent Iroh
   connection teardown can exceed the platform default stack on macOS. This is
   a process-lifecycle guard, not a change to the wire protocol.
@@ -90,7 +93,8 @@ lifecycle and rotation requirements.
   later logical operation.
 - One logical operation still owns one `NetworkStream`; Iroh session reuse and
   fresh-session fallback are explicit inside `ConnectionManager`, with no
-  transparent stream migration or background reconnect.
+  transparent stream migration or background reconnect. Path changes are
+  observable, but existing logical streams are not migrated by Misaka.
 - The current listener compatibility metadata remains a `SocketAddr`; relay
   acceptances report `0.0.0.0:0` because their meaningful identity is the
   authenticated Iroh endpoint ID, not a TCP peer address.

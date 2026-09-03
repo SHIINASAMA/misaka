@@ -96,6 +96,8 @@ pub struct ActiveStreamSnapshot {
     pub route: String,
     #[serde(default)]
     pub rtt_ms: Option<u64>,
+    #[serde(default)]
+    pub path_switches: u64,
     pub local_endpoint: Option<String>,
     pub remote_endpoint: Option<String>,
     pub connected_for_ms: u64,

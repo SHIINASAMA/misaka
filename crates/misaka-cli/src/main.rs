@@ -705,7 +705,7 @@ fn print_network_ps(report: &NetworkPsReport) {
         println!("────────────────────────────────");
         for stream in &report.active_streams {
             println!(
-                "  #{}  {} / {}  rtt={}  remote={}  tx={}  rx={}  age={}ms",
+                "  #{}  {} / {}  rtt={}  switches={}  remote={}  tx={}  rx={}  age={}ms",
                 stream.stream_id,
                 stream.backend,
                 stream.route,
@@ -713,6 +713,7 @@ fn print_network_ps(report: &NetworkPsReport) {
                     .rtt_ms
                     .map(|rtt| format!("{rtt}ms"))
                     .unwrap_or_else(|| "-".to_string()),
+                stream.path_switches,
                 stream.remote_endpoint.as_deref().unwrap_or("-"),
                 stream.tx_bytes,
                 stream.rx_bytes,
@@ -778,6 +779,7 @@ struct StreamProbeReport {
     backend: String,
     route: String,
     rtt_ms: Option<u64>,
+    path_switches: u64,
     local_endpoint: Option<String>,
     remote_endpoint: Option<String>,
     setup_ms: u128,
@@ -873,6 +875,7 @@ async fn run_stream_test(
 
     let connect_ms = connect_started.elapsed().as_millis();
     let path = stream.path_info();
+    let mut final_path = path.clone();
     if !json {
         println!(
             "Stream path: backend={} route={} rtt_ms={} local={} remote={} setup_ms={connect_ms}",
@@ -901,6 +904,7 @@ async fn run_stream_test(
             let started = std::time::Instant::now();
             exchange(&mut stream, b"hello").await?;
             let probe_rtt_ms = started.elapsed().as_millis();
+            final_path = stream.path_info();
             if !json {
                 println!("Stream RTT: payload_bytes=5 rtt_ms={probe_rtt_ms}");
             }
@@ -912,6 +916,7 @@ async fn run_stream_test(
         }
         "sustained" => {
             let metrics = sustained(&mut stream).await?;
+            final_path = stream.path_info();
             if !json {
                 println!(
                     "Sustained stream: exchanges={} elapsed_ms={}",
@@ -923,6 +928,7 @@ async fn run_stream_test(
             metrics
         }
         "large" => {
+            final_path = stream.path_info();
             let metrics = large_stream(stream).await?;
             if !json {
                 println!(
@@ -944,6 +950,7 @@ async fn run_stream_test(
                     backend: path.backend.clone(),
                     route: path.route.clone(),
                     rtt_ms: path.rtt_ms,
+                    path_switches: path.path_switches,
                     local_endpoint: path.local_endpoint.clone(),
                     remote_endpoint: path.remote_endpoint.clone(),
                     setup_ms: connect_ms,
@@ -974,11 +981,12 @@ async fn run_stream_test(
     if json {
         print_stream_probe_report(&StreamProbeReport {
             mode: mode.to_string(),
-            backend: path.backend.clone(),
-            route: path.route.clone(),
-            rtt_ms: path.rtt_ms,
-            local_endpoint: path.local_endpoint.clone(),
-            remote_endpoint: path.remote_endpoint.clone(),
+            backend: final_path.backend,
+            route: final_path.route,
+            rtt_ms: final_path.rtt_ms,
+            path_switches: final_path.path_switches,
+            local_endpoint: final_path.local_endpoint,
+            remote_endpoint: final_path.remote_endpoint,
             setup_ms: connect_ms,
             probe_rtt_ms: metrics.probe_rtt_ms,
             exchanges: metrics.exchanges,
@@ -2185,6 +2193,7 @@ mod stream_tests {
             backend: "direct-tcp".into(),
             route: "direct".into(),
             rtt_ms: None,
+            path_switches: 0,
             local_endpoint: Some("127.0.0.1:40000".into()),
             remote_endpoint: Some("127.0.0.1:31701".into()),
             setup_ms: 4,

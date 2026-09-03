@@ -122,9 +122,12 @@ pub trait AsyncStream: AsyncRead + AsyncWrite + Send + Unpin {}
 impl<T> AsyncStream for T where T: AsyncRead + AsyncWrite + Send + Unpin {}
 
 /// A validated, long-lived bidirectional byte stream.
+pub type PathInfoProvider = Arc<dyn Fn() -> PathInfo + Send + Sync>;
+
 pub struct NetworkStream {
     inner: Box<dyn AsyncStream>,
     path: PathInfo,
+    path_provider: Option<PathInfoProvider>,
     stats: StreamStats,
     started_at: Instant,
 }
@@ -139,6 +142,8 @@ pub struct PathInfo {
     pub backend: String,
     pub route: String,
     pub rtt_ms: Option<u64>,
+    /// Number of selected-path route changes observed after stream creation.
+    pub path_switches: u64,
     pub local_endpoint: Option<String>,
     pub remote_endpoint: Option<String>,
 }
@@ -154,6 +159,7 @@ impl PathInfo {
             backend: backend.into(),
             route: route.into(),
             rtt_ms: None,
+            path_switches: 0,
             local_endpoint,
             remote_endpoint,
         }
@@ -161,6 +167,11 @@ impl PathInfo {
 
     pub fn with_rtt_ms(mut self, rtt_ms: Option<u64>) -> Self {
         self.rtt_ms = rtt_ms;
+        self
+    }
+
+    pub fn with_path_switches(mut self, path_switches: u64) -> Self {
+        self.path_switches = path_switches;
         self
     }
 
@@ -206,13 +217,36 @@ impl NetworkStream {
         Self {
             inner: Box::new(stream),
             path,
+            path_provider: None,
+            stats: StreamStats::default(),
+            started_at: Instant::now(),
+        }
+    }
+
+    /// Wrap a stream whose backend can report changing path metadata.
+    pub fn from_stream_with_path_provider(
+        stream: impl AsyncStream + 'static,
+        path: PathInfo,
+        provider: impl Fn() -> PathInfo + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            inner: Box::new(stream),
+            path,
+            path_provider: Some(Arc::new(provider)),
             stats: StreamStats::default(),
             started_at: Instant::now(),
         }
     }
 
     pub fn path_info(&self) -> PathInfo {
-        self.path.clone()
+        self.path_provider
+            .as_ref()
+            .map(|provider| provider())
+            .unwrap_or_else(|| self.path.clone())
+    }
+
+    pub fn path_info_provider(&self) -> Option<PathInfoProvider> {
+        self.path_provider.clone()
     }
 
     pub fn stats(&self) -> StreamStats {
@@ -466,9 +500,10 @@ mod direct_tcp {
 mod tests {
     use super::{
         connect, listen, IrohBackend, ListenerFuture, NetworkBackend, NetworkEndpoint,
-        NetworkError, NetworkListener, NetworkListenerDriver, NetworkStream, IROH_ALPN,
+        NetworkError, NetworkListener, NetworkListenerDriver, NetworkStream, PathInfo, IROH_ALPN,
     };
     use std::net::{Ipv4Addr, SocketAddr};
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -508,6 +543,30 @@ mod tests {
         stream.read_exact(&mut response).await.unwrap();
         assert_eq!(stream.stats().rx_bytes(), 5);
         assert!(stream.connected_for() < Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn stream_path_provider_refreshes_transport_metadata() {
+        let (left, _right) = tokio::io::duplex(64);
+        let state = Arc::new(Mutex::new(
+            PathInfo::new("iroh", "relay", None, Some("peer".to_string())).with_rtt_ms(Some(80)),
+        ));
+        let provider_state = Arc::clone(&state);
+        let stream = NetworkStream::from_stream_with_path_provider(
+            left,
+            state.lock().unwrap().clone(),
+            move || provider_state.lock().unwrap().clone(),
+        );
+
+        assert_eq!(stream.path_info().route, "relay");
+        assert_eq!(stream.path_info().path_switches, 0);
+        *state.lock().unwrap() = PathInfo::new("iroh", "direct", None, Some("peer".to_string()))
+            .with_rtt_ms(Some(4))
+            .with_path_switches(1);
+        let path = stream.path_info();
+        assert_eq!(path.route, "direct");
+        assert_eq!(path.rtt_ms, Some(4));
+        assert_eq!(path.path_switches, 1);
     }
 
     #[tokio::test]

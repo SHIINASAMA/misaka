@@ -9,11 +9,13 @@ use crate::{
     NetworkListener, NetworkListenerDriver, NetworkStream, PathInfo, Result, HANDSHAKE_LEN,
     HANDSHAKE_TIMEOUT, IROH_ALPN, MAGIC, PROTOCOL_VERSION,
 };
+use futures_util::StreamExt;
 use iroh::endpoint::{Connection, IncomingAddr, RecvStream, SendStream};
 use iroh::{Endpoint, EndpointAddr};
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::{Arc, RwLock};
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 
@@ -82,10 +84,7 @@ impl IrohBackend {
             .connect(endpoint_addr, &self.alpn)
             .await
             .map_err(|error| NetworkError::Iroh(error.to_string()))?;
-        Ok(IrohSession {
-            endpoint: self.endpoint.clone(),
-            connection,
-        })
+        Ok(IrohSession::new(self.endpoint.clone(), connection))
     }
 
     /// Accept one long-lived Iroh connection without consuming a logical
@@ -99,10 +98,7 @@ impl IrohBackend {
             .await
             .map_err(|_| NetworkError::Iroh("Iroh connection handshake timed out".to_string()))?
             .map_err(|error| NetworkError::Iroh(error.to_string()))?;
-        Ok(IrohSession {
-            endpoint: self.endpoint.clone(),
-            connection,
-        })
+        Ok(IrohSession::new(self.endpoint.clone(), connection))
     }
 
     pub fn endpoint(&self) -> &Endpoint {
@@ -123,6 +119,7 @@ impl IrohBackend {
 pub struct IrohSession {
     endpoint: Endpoint,
     connection: Connection,
+    path_telemetry: IrohPathTelemetry,
 }
 
 impl std::fmt::Debug for IrohSession {
@@ -135,6 +132,18 @@ impl std::fmt::Debug for IrohSession {
 }
 
 impl IrohSession {
+    fn new(endpoint: Endpoint, connection: Connection) -> Self {
+        let path_telemetry = IrohPathTelemetry::new(
+            connection.clone(),
+            connection_path_info(&endpoint, &connection),
+        );
+        Self {
+            endpoint,
+            connection,
+            path_telemetry,
+        }
+    }
+
     pub fn remote_id(&self) -> iroh::EndpointId {
         self.connection.remote_id()
     }
@@ -171,6 +180,7 @@ impl IrohSession {
             recv,
             self.endpoint.clone(),
             &self.connection,
+            self.path_telemetry.clone(),
         ))
     }
 
@@ -198,6 +208,7 @@ impl IrohSession {
             recv,
             self.endpoint.clone(),
             &self.connection,
+            self.path_telemetry.clone(),
         ))
     }
 }
@@ -266,13 +277,11 @@ impl crate::NetworkBackend for IrohBackend {
             peer_id = %connection.remote_id(),
             "Iroh network stream connected"
         );
-        let (route, rtt_ms) = selected_path_metrics(&connection);
         Ok(network_stream_with_metadata(
             send,
             recv,
             self.endpoint.clone(),
-            route,
-            rtt_ms,
+            &connection,
             remote_endpoint,
         ))
     }
@@ -325,7 +334,6 @@ impl NetworkListenerDriver for IrohListener {
                     HANDSHAKE_TIMEOUT.as_secs()
                 ),
             })??;
-            let (route, rtt_ms) = selected_path_metrics(&connection);
             let peer_addr = match remote_addr {
                 IncomingAddr::Ip(addr) => addr,
                 IncomingAddr::Relay { .. } | IncomingAddr::Custom(_) => {
@@ -340,23 +348,15 @@ impl NetworkListenerDriver for IrohListener {
                 "Iroh network stream accepted"
             );
             Ok((
-                NetworkStream::from_stream_with_path(
-                    IrohStream {
-                        send,
-                        recv,
-                        _endpoint: self.endpoint.clone(),
-                    },
-                    PathInfo::new(
-                        "iroh",
-                        route,
-                        self.endpoint
-                            .bound_sockets()
-                            .into_iter()
-                            .next()
-                            .map(|addr| addr.to_string()),
-                        Some(format!("iroh://{}", connection.remote_id())),
-                    )
-                    .with_rtt_ms(rtt_ms),
+                network_stream(
+                    send,
+                    recv,
+                    self.endpoint.clone(),
+                    &connection,
+                    IrohPathTelemetry::new(
+                        connection.clone(),
+                        connection_path_info(&self.endpoint, &connection),
+                    ),
                 ),
                 peer_addr,
             ))
@@ -377,40 +377,110 @@ fn network_stream(
     recv: RecvStream,
     endpoint: Endpoint,
     connection: &Connection,
+    path_telemetry: IrohPathTelemetry,
 ) -> NetworkStream {
     let remote_endpoint = serde_json::to_string(&EndpointAddr::new(connection.remote_id()))
         .ok()
         .map(|value| format!("iroh://{value}"));
-    let (route, rtt_ms) = selected_path_metrics(connection);
-    network_stream_with_metadata(send, recv, endpoint, route, rtt_ms, remote_endpoint)
+    network_stream_with_telemetry(send, recv, endpoint, path_telemetry, remote_endpoint)
 }
 
 fn network_stream_with_metadata(
     send: SendStream,
     recv: RecvStream,
     endpoint: Endpoint,
-    route: impl Into<String>,
-    rtt_ms: Option<u64>,
+    connection: &Connection,
     remote_endpoint: Option<String>,
 ) -> NetworkStream {
-    NetworkStream::from_stream_with_path(
+    let path = connection_path_info(&endpoint, connection);
+    let path_telemetry = IrohPathTelemetry::new(connection.clone(), path);
+    network_stream_with_telemetry(send, recv, endpoint, path_telemetry, remote_endpoint)
+}
+
+fn network_stream_with_telemetry(
+    send: SendStream,
+    recv: RecvStream,
+    endpoint: Endpoint,
+    path_telemetry: IrohPathTelemetry,
+    remote_endpoint: Option<String>,
+) -> NetworkStream {
+    let mut path = path_telemetry.snapshot();
+    if remote_endpoint.is_some() {
+        path.remote_endpoint = remote_endpoint;
+    }
+    let provider = path_telemetry.clone();
+    NetworkStream::from_stream_with_path_provider(
         IrohStream {
             send,
             recv,
-            _endpoint: endpoint.clone(),
+            _endpoint: endpoint,
         },
-        PathInfo::new(
-            "iroh",
-            route,
-            endpoint
-                .bound_sockets()
-                .into_iter()
-                .next()
-                .map(|addr| addr.to_string()),
-            remote_endpoint,
-        )
-        .with_rtt_ms(rtt_ms),
+        path,
+        move || provider.snapshot(),
     )
+}
+
+#[derive(Clone)]
+struct IrohPathTelemetry {
+    state: Arc<RwLock<PathInfo>>,
+}
+
+impl IrohPathTelemetry {
+    fn new(connection: Connection, initial: PathInfo) -> Self {
+        let state = Arc::new(RwLock::new(initial));
+        let observer_state = Arc::clone(&state);
+        tokio::spawn(async move {
+            let mut events = connection.path_events();
+            while let Some(event) = events.next().await {
+                if matches!(
+                    event,
+                    iroh::endpoint::PathEvent::Selected { .. }
+                        | iroh::endpoint::PathEvent::Lagged { .. }
+                ) {
+                    let (route, rtt_ms) = selected_path_metrics(&connection);
+                    let mut path = observer_state
+                        .write()
+                        .expect("Iroh path telemetry lock poisoned");
+                    if path.route != route {
+                        path.path_switches = path.path_switches.saturating_add(1);
+                        tracing::info!(
+                            event = "iroh_path_switched",
+                            peer_id = %connection.remote_id(),
+                            from_route = %path.route,
+                            to_route = %route,
+                            path_switches = path.path_switches,
+                            "Iroh selected path changed"
+                        );
+                    }
+                    path.route = route.to_string();
+                    path.rtt_ms = rtt_ms;
+                }
+            }
+        });
+        Self { state }
+    }
+
+    fn snapshot(&self) -> PathInfo {
+        self.state
+            .read()
+            .expect("Iroh path telemetry lock poisoned")
+            .clone()
+    }
+}
+
+fn connection_path_info(endpoint: &Endpoint, connection: &Connection) -> PathInfo {
+    let (route, rtt_ms) = selected_path_metrics(connection);
+    PathInfo::new(
+        "iroh",
+        route,
+        endpoint
+            .bound_sockets()
+            .into_iter()
+            .next()
+            .map(|addr| addr.to_string()),
+        Some(format!("iroh://{}", connection.remote_id())),
+    )
+    .with_rtt_ms(rtt_ms)
 }
 
 fn selected_path_metrics(connection: &Connection) -> (&'static str, Option<u64>) {

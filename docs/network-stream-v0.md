@@ -118,6 +118,11 @@ parseable measurement record with setup, path RTT, probe RTT, and endpoint
 metadata.
 N16 verifies that the public `misaka connect #<sister-id>` command resolves
 the stored Iroh candidate and establishes a stream by Sister identity.
+Iroh streams subscribe to the native path event stream after establishment;
+their current route/RTT and route-change counter are refreshed in active
+introspection snapshots, and `misaka ps --json --introspect` exposes the
+counter as `path_switches`. The CLI stream probe includes the same field in
+its final JSON measurement.
 The `misaka-network` unit suite also verifies an Iroh-native relay path with IP
 transports disabled; this local fixture is not a substitute for external
 cross-domain or NAT measurements. The runtime unit suite verifies that
@@ -154,8 +159,10 @@ certificate pinning, and server-name identity validation; it is the LAN-style
 foundation for later transfer and tunnel work, not yet a general Internet
 transport.
 
-Multiplexing, compression, NAT traversal, and active relay path switching
-remain outside the raw insecure v0 contract. The content-addressed store is
+Multiplexing, compression, NAT traversal, and transparent stream migration
+remain outside the raw insecure v0 contract. Iroh path selection remains
+owned by Iroh; Misaka observes selected-route changes but does not migrate an
+existing logical stream itself. The content-addressed store is
 local receiver-side deduplication only: it is not advertised, authorized, or
 exposed as a public object service. Cross-domain measurements remain pending.
 The later Tunnel, SSH, Relay, and Resolver snapshots are documented separately.
