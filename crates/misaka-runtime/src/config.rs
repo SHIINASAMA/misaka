@@ -1,4 +1,4 @@
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -41,6 +41,9 @@ pub struct RuntimeConfig {
 
     /// 发现模式
     pub discovery: DiscoveryMode,
+
+    /// 只读 introspection 监听地址 (None = 禁用，默认)
+    pub introspection_addr: Option<SocketAddr>,
 }
 
 impl Default for RuntimeConfig {
@@ -57,6 +60,7 @@ impl Default for RuntimeConfig {
             executor_poll_interval: Duration::from_millis(200),
             job_timeout: Duration::from_secs(60),
             discovery: DiscoveryMode::Mdns,
+            introspection_addr: None,
         }
     }
 }

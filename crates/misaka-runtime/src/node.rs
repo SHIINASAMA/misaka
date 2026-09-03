@@ -1,5 +1,6 @@
 use crate::config::RuntimeConfig;
 use crate::crypto::Crypto;
+use crate::introspection::{IntrospectionSnapshot, JobSnapshot, PeerSnapshot, ResourceSnapshot};
 use crate::network::PeerTransport;
 use crate::peer_store::PeerStore;
 use crate::queue::JobQueue;
@@ -111,6 +112,49 @@ impl SisterNode {
 
     pub fn get_crypto(&self) -> Crypto {
         Crypto::new(&self.encryption_key).unwrap()
+    }
+
+    // ---------- introspection (只读观测面) ----------
+
+    /// 组装当前只读 snapshot (供 Testament 等外部 harness 观测)
+    pub async fn introspection_snapshot(&self) -> IntrospectionSnapshot {
+        let resources = { ResourceSnapshot::from(&*self.local_state.read().await) };
+        let peers = {
+            let p = self.peers.read().await;
+            p.all().iter().map(PeerSnapshot::from).collect()
+        };
+        let jobs = {
+            let j = self.local_jobs.read().await;
+            j.values()
+                .map(|lj| JobSnapshot {
+                    id: lj.id.clone(),
+                    command: lj.command.clone(),
+                    status: lj.status.to_string(),
+                    creator: lj.creator,
+                    started_at: lj.started_at,
+                    finished_at: lj.finished_at,
+                })
+                .collect()
+        };
+        let queue_depth = self.job_queue.len();
+        IntrospectionSnapshot {
+            identity: self.identity.as_ref().clone(),
+            resources,
+            peers,
+            jobs,
+            queue_depth,
+        }
+    }
+
+    /// 在给定地址上启动只读 introspection 服务器 (loopback)。返回实际绑定地址。
+    pub async fn spawn_introspection_server(&self, bind: SocketAddr) -> crate::Result<SocketAddr> {
+        let me = self.clone();
+        let addr = crate::introspection::spawn_server(bind, move || {
+            let me = me.clone();
+            Box::pin(async move { me.introspection_snapshot().await })
+        })
+        .await?;
+        Ok(addr)
     }
 
     // ---------- 网络层原语 ----------

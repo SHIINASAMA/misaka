@@ -29,6 +29,22 @@ enum Command {
         /// 设置昵称
         #[arg(long)]
         nickname: Option<String>,
+
+        /// 发现模式 (mdns | manual | off)
+        #[arg(long, default_value = "mdns")]
+        discovery: String,
+
+        /// 心跳/状态广播间隔 (秒)
+        #[arg(long, default_value_t = 10)]
+        heartbeat: u64,
+
+        /// 判定 peer 离线的时长 (秒)
+        #[arg(long, default_value_t = 60)]
+        peer_timeout: u64,
+
+        /// 只读 introspection 端口 (0 = 禁用)
+        #[arg(long, default_value_t = 0)]
+        introspect: u16,
     },
 
     /// 修改本机 Sister 的昵称
@@ -63,6 +79,10 @@ async fn main() -> Result<(), MisakaError> {
             port,
             peer,
             nickname,
+            discovery,
+            heartbeat,
+            peer_timeout,
+            introspect,
         } => {
             // 加载或生成身份 (持久化)
             let identity = IdentityStore::load_or_init(nickname.clone(), port)
@@ -77,11 +97,32 @@ async fn main() -> Result<(), MisakaError> {
             println!("  Version: {}", identity.version);
 
             let key = identity_key();
+            let discovery_mode = match discovery.as_str() {
+                "manual" => misaka_runtime::config::DiscoveryMode::Manual,
+                "off" => misaka_runtime::config::DiscoveryMode::Off,
+                _ => misaka_runtime::config::DiscoveryMode::Mdns,
+            };
             let config = misaka_runtime::config::RuntimeConfig {
                 listen_port: port,
+                heartbeat_interval: std::time::Duration::from_secs(heartbeat),
+                peer_timeout: std::time::Duration::from_secs(peer_timeout),
+                discovery: discovery_mode,
+                introspection_addr: if introspect != 0 {
+                    Some(format!("127.0.0.1:{}", introspect).parse().unwrap())
+                } else {
+                    None
+                },
                 ..Default::default()
             };
-            let node = SisterNode::new(identity, key, config);
+            let node = SisterNode::new(identity, key, config.clone());
+
+            // 只读 introspection 服务器 (默认禁用)
+            if let Some(addr) = config.introspection_addr {
+                match node.spawn_introspection_server(addr).await {
+                    Ok(bound) => println!("[Misaka] introspection serving on {}", bound),
+                    Err(e) => eprintln!("[Misaka] introspection failed: {}", e),
+                }
+            }
 
             // 启动监听
             let listener = node.start_listener().await?;
@@ -94,13 +135,22 @@ async fn main() -> Result<(), MisakaError> {
             }
 
             // 后台任务
+            let discovery_node = node.clone();
+            tokio::spawn(async move {
+                // 依 discovery 模式决定要不要跑 mDNS
+                if matches!(
+                    discovery_node.config.discovery,
+                    misaka_runtime::config::DiscoveryMode::Mdns
+                ) {
+                    let _ = discovery_node.mdns_loop().await;
+                } else {
+                    // mdns off/manual：挂起，避免无意义循环
+                    std::future::pending::<()>().await;
+                }
+            });
             let n1 = node.clone();
             tokio::spawn(async move {
                 let _ = n1.state_broadcast_loop().await;
-            });
-            let n0 = node.clone();
-            tokio::spawn(async move {
-                let _ = n0.mdns_loop().await;
             });
             let n2 = node.clone();
             tokio::spawn(async move {
