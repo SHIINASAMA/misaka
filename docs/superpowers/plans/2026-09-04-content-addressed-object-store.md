@@ -67,10 +67,10 @@
 **Interfaces:**
 - Adds N20, which runs two public parallel copies of identical content to different remote destinations and inspects only the resulting files and configured Sister object path.
 
-- [ ] Add N20 to the network scenario manifest and help text.
-- [ ] Start isolated Iroh Sisters with manual discovery, perform two public `cp --resume --parallel 4` operations, and assert exact bytes plus one digest-named object in the receiver data directory.
+- [x] Add N20 to the network scenario manifest and help text.
+- [x] Start isolated Iroh Sisters with manual discovery, perform two public `cp --resume --parallel 4` operations, and assert exact bytes plus one digest-named object in the receiver data directory.
 - [ ] Run `cargo run -p testament -- run N20_iroh_object_store --json` and then the complete N01–N20, T01–T13, and O01–O07 suites.
-- [ ] Document that content addressing is local deduplication and not an authorization or public object service.
+- [x] Document that content addressing is local deduplication and not an authorization or public object service.
 - [ ] Commit `test(transfer): verify object store externally`.
 
 ### Task 62: Run the full gate and update project memory

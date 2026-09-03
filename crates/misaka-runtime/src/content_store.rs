@@ -52,7 +52,7 @@ impl ContentStore {
             hex_digest(digest),
             uuid::Uuid::new_v4()
         ));
-        tokio::fs::copy(partial, &temp).await?;
+        copy_file(partial, &temp).await?;
         match tokio::fs::rename(&temp, &object).await {
             Ok(()) => {
                 tokio::fs::remove_file(partial).await?;
@@ -94,7 +94,7 @@ impl ContentStore {
             destination.display(),
             uuid::Uuid::new_v4()
         ));
-        let bytes = tokio::fs::copy(&object, &temp).await?;
+        let bytes = copy_file(&object, &temp).await?;
         match tokio::fs::rename(&temp, destination).await {
             Ok(()) => Ok(bytes),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -126,6 +126,23 @@ async fn hash_file(path: &Path) -> std::io::Result<[u8; 32]> {
         hasher.update(&buffer[..read]);
     }
     Ok(hasher.finalize().into())
+}
+
+async fn copy_file(source: &Path, destination: &Path) -> std::io::Result<u64> {
+    let mut source = tokio::fs::File::open(source).await?;
+    let mut destination = tokio::fs::File::create(destination).await?;
+    let mut buffer = [0u8; 64 * 1024];
+    let mut copied = 0u64;
+    loop {
+        let read = tokio::io::AsyncReadExt::read(&mut source, &mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        tokio::io::AsyncWriteExt::write_all(&mut destination, &buffer[..read]).await?;
+        copied += read as u64;
+    }
+    tokio::io::AsyncWriteExt::flush(&mut destination).await?;
+    Ok(copied)
 }
 
 #[cfg(test)]

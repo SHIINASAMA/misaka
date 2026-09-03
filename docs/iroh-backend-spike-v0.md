@@ -2,8 +2,11 @@
 
 This checkpoint adds one optional Iroh backend to `misaka-network`. It is a
 connectivity spike and does not change the runtime's default Direct TCP path.
-The opt-in CLI path also persists the Iroh transport key, so a Sister keeps
-the same Iroh endpoint identity across restarts.
+Sister listeners persist the Iroh transport key, so a Sister keeps the same
+Iroh endpoint identity across restarts. One-shot parallel transfer commands
+bind one temporary client endpoint per copy and reuse it for that copy's
+worker connections; this avoids concurrent endpoint-identity collisions while
+leaving the Sister identity stable.
 
 ## Contract
 
@@ -43,16 +46,23 @@ lifecycle and rotation requirements.
 - Iroh is wired into the opt-in `SisterRuntime` listener and the Testament
   black-box transfer scenario. Cross-domain measurement still requires two
   real hosts and is not claimed by the local test suite.
-- CLI `cp`, `tunnel`, and the SSH wrapper select Iroh endpoints through the
-  same backend and persisted local transport key; TLS certificate pinning is
-  rejected for Iroh endpoints because Iroh already authenticates the endpoint.
+- CLI `tunnel` and the SSH wrapper select Iroh endpoints through the same
+  backend and persisted local transport key. Parallel `cp` binds one
+  temporary client transport endpoint for the command and closes it after the
+  transfer. TLS certificate pinning is rejected for Iroh endpoints because
+  Iroh already authenticates the endpoint.
 - Each returned stream exposes `PathInfo` with `backend = iroh`, the selected
   route when known, optional selected-path RTT in milliseconds, and endpoint
   metadata suitable for diagnostics.
+- The CLI uses an explicit 8 MiB Tokio worker stack because concurrent Iroh
+  connection teardown can exceed the platform default stack on macOS. This is
+  a process-lifecycle guard, not a change to the wire protocol.
 - Transfer v1 runs above the same selected stream with no Iroh-specific
   protocol: `misaka cp --resume` can use Iroh and verifies the file-level
-  SHA-256 content digest. Parallel chunks, a content-addressed object store,
-  and cross-domain transfer measurements remain future work.
+  SHA-256 content digest. Transfer v2 adds bounded parallel chunks and a
+  receiver-local content-addressed object store; N19 and N20 cover those
+  behaviors through real Sister processes. Cross-domain transfer measurements
+  remain future work.
 - `misaka stream-test --endpoint iroh://...` is the cross-domain measurement
   entry point. It reports the selected Iroh route, setup latency, RTT for the
   bidirectional probe, and bounded large-stream throughput. Passing `--json`
@@ -100,3 +110,6 @@ Iroh in external Sister processes; N13 verifies active path, RTT, and cleanup
 telemetry; N14 verifies restart and fresh-stream behavior with the persisted
 Iroh transport identity; N15 verifies machine-readable measurements; N16
 verifies SisterId-based connection.
+N19 verifies bounded parallel Transfer v2 over real Iroh Sisters, and N20
+verifies receiver-local digest-addressed deduplication across two public copy
+commands. Neither scenario claims cross-domain or NAT reliability.

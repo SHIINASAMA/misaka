@@ -979,3 +979,19 @@ QUIC bidirectional stream, without changing the runtime's Direct TCP default.
   exists, returning a complete prepare bitmap and materializing on finalize.
 - [x] Verify the same digest can finalize to two destinations while reusing one
   canonical object.
+
+### Task 61: Verify the receiver-local object store externally
+
+- [x] Add N20 to the Testament network scenario manifest and public help text.
+- [x] Verify two public Iroh `cp --resume --parallel 4` operations reuse one
+  digest-named receiver object and materialize both destinations.
+- [x] Keep Direct TCP as the default and make Iroh the only opt-in backend;
+  no additional backend was introduced.
+
+### Task 62: Close the object-store snapshot
+
+- [ ] Run the complete formatting, Clippy, workspace, Testament, and operator
+  gates.
+- [ ] Synchronize the object-store result and remaining external-network gaps
+  to the Obsidian project notes.
+- [ ] Commit the final documentation gate snapshot.

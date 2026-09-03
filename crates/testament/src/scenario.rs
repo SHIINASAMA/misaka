@@ -735,6 +735,10 @@ pub fn network_scenarios() -> Vec<ScenarioDef> {
             name: "N19_iroh_parallel_transfer",
             run: Box::new(n19_iroh_parallel_transfer),
         },
+        ScenarioDef {
+            name: "N20_iroh_object_store",
+            run: Box::new(n20_iroh_object_store),
+        },
     ]
 }
 
@@ -1825,6 +1829,98 @@ fn n19_iroh_parallel_transfer(ctx: &mut Context) -> Result<(), ScenarioError> {
         return Err(ScenarioError::assertion(
             "parallel transfer left durable partial state after completion",
         ));
+    }
+    Ok(())
+}
+
+/// N20: repeated identical parallel transfers reuse one digest-named object
+/// on the receiving Sister and only materialize a new destination path.
+fn n20_iroh_object_store(ctx: &mut Context) -> Result<(), ScenarioError> {
+    ctx.start_iroh_pair()?;
+    let a_introspect = introspect_addr_of(ctx, "a")?;
+    let b_id = ctx.introspect("b")?.identity.id.as_u64();
+    assert::eventually(
+        a_introspect,
+        "a learns b Iroh stream candidate for object store",
+        Duration::from_secs(12),
+        |snapshot| {
+            snapshot.peers.iter().any(|peer| {
+                peer.id == b_id
+                    && peer
+                        .stream_endpoints
+                        .iter()
+                        .any(|endpoint| endpoint.starts_with("iroh://"))
+            })
+        },
+    )?;
+
+    let source = ctx.layout.root.join("iroh-object-source.bin");
+    let first_destination = ctx.layout.root.join("iroh-object-first.bin");
+    let second_destination = ctx.layout.root.join("iroh-object-second.bin");
+    let payload = (0..(2 * 64 * 1024 + 1234))
+        .map(|index| ((index * 17) % 251) as u8)
+        .collect::<Vec<_>>();
+    std::fs::write(&source, &payload)
+        .map_err(|error| ScenarioError::infra(format!("write object source: {error}")))?;
+    let source_arg = source.to_string_lossy().to_string();
+
+    for (destination, label) in [
+        (&first_destination, "first"),
+        (&second_destination, "second"),
+    ] {
+        let destination_arg = format!("#{b_id}:{}", destination.display());
+        let output = ctx.run_cli(
+            "a",
+            &[
+                "cp",
+                "--resume",
+                "--parallel",
+                "4",
+                &source_arg,
+                &destination_arg,
+            ],
+        )?;
+        assert::assert_contains(
+            &output,
+            "Parallel copy",
+            &format!("{label} object copy output"),
+        )?;
+        let received = std::fs::read(destination).map_err(|error| {
+            ScenarioError::assertion(format!("read {label} object destination: {error}"))
+        })?;
+        assert::assert_eq(received, payload.clone(), &format!("{label} object bytes"))?;
+    }
+
+    let digest = misaka_core::protocol::transfer_content_digest(&payload);
+    let digest_name = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let b_config = ctx
+        .entries
+        .get("b")
+        .ok_or_else(|| ScenarioError::infra("no object-store Sister entry"))?;
+    let object = Path::new(&b_config.config_dir)
+        .join("objects")
+        .join(digest_name);
+    if !object.is_file() {
+        return Err(ScenarioError::assertion(format!(
+            "canonical object is missing: {}",
+            object.display()
+        )));
+    }
+    let object_size = std::fs::metadata(&object)
+        .map_err(|error| ScenarioError::assertion(format!("stat canonical object: {error}")))?
+        .len();
+    assert::assert_eq(object_size, payload.len() as u64, "canonical object size")?;
+    for destination in [&first_destination, &second_destination] {
+        if PathBuf::from(format!("{}.misaka-part-v2", destination.display())).exists()
+            || PathBuf::from(format!("{}.misaka-part-v2.json", destination.display())).exists()
+        {
+            return Err(ScenarioError::assertion(
+                "object-store transfer left durable partial state",
+            ));
+        }
     }
     Ok(())
 }

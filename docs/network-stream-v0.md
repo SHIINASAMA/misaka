@@ -129,12 +129,15 @@ Transfer v1 is layered above the selected `NetworkStream`: `MTR1` uses fixed
 offset acknowledgements, and destination-side `.misaka-part` plus JSON resume
 state. The CLI opt-in is `misaka cp --resume`; Transfer v0 remains unchanged.
 A deterministic runtime test covers disconnect, resume, and finalization, and
-the protocol works over Direct TCP or opt-in Iroh. The content digest is a
-verification identifier, not a content-addressed object store or a deduplication
-index. Transfer v2 adds opt-in `misaka cp --resume --parallel 4`: `MTR2` uses
-one durable completed-chunk bitmap, bounded worker streams, out-of-order
-offset writes, and a final whole-file SHA-256 check; N19 verifies this through
-real Iroh Sister processes. Sequential v1 remains the compatibility path.
+the protocol works over Direct TCP or opt-in Iroh. Transfer v2 adds opt-in
+`misaka cp --resume --parallel 4`: `MTR2` uses one durable completed-chunk
+bitmap, bounded worker streams, out-of-order offset writes, and a final
+whole-file SHA-256 check; N19 verifies this through real Iroh Sister
+processes. Successful v2 finalization commits the verified payload to the
+receiver's local `objects/<sha256>` store and materializes the requested
+destination from that object. A later identical v2 transfer can skip payload
+streams and materialize another destination; N20 verifies this through two
+public CLI copies. Sequential v1 remains the compatibility path.
 
 When a Sister has enabled loopback introspection, `misaka ps --json
 --introspect 127.0.0.1:<port>` includes the local active stream registry,
@@ -152,6 +155,7 @@ foundation for later transfer and tunnel work, not yet a general Internet
 transport.
 
 Multiplexing, compression, NAT traversal, and active relay path switching
-remain outside the raw insecure v0 contract. Transfer v2 does not yet include
-a content-addressed object store or cross-domain measurements.
+remain outside the raw insecure v0 contract. The content-addressed store is
+local receiver-side deduplication only: it is not advertised, authorized, or
+exposed as a public object service. Cross-domain measurements remain pending.
 The later Tunnel, SSH, Relay, and Resolver snapshots are documented separately.

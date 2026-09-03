@@ -219,8 +219,15 @@ enum Command {
     },
 }
 
-#[tokio::main]
-async fn main() -> Result<(), MisakaError> {
+fn main() -> Result<(), MisakaError> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .thread_stack_size(8 * 1024 * 1024)
+        .enable_all()
+        .build()?;
+    runtime.block_on(async_main())
+}
+
+async fn async_main() -> Result<(), MisakaError> {
     let cli = Cli::parse();
     let iroh_relay = cli
         .iroh_relay
@@ -1312,15 +1319,14 @@ async fn run_copy_v2(
         len: 0,
         chunk_digest: [0; 32],
     };
-    let resume = match send_transfer_v2_control(
-        endpoint.clone(),
+    let transport = TransferV2Transport::new(
+        endpoint,
         peer_id,
-        peer.stream_certificate.as_deref(),
-        iroh_relay.clone(),
-        base_request.clone(),
+        peer.stream_certificate.clone(),
+        iroh_relay,
     )
-    .await?
-    {
+    .await?;
+    let resume = match send_transfer_v2_control(&transport, base_request.clone()).await? {
         TransferV2ResumeOrAck::Resume(resume) => resume,
         TransferV2ResumeOrAck::Ack(_) => {
             return Err("remote returned an acknowledgement for transfer v2 prepare".to_string())
@@ -1343,22 +1349,11 @@ async fn run_copy_v2(
     let mut workers = JoinSet::new();
     for index in (0..chunk_count).filter(|index| !completed.contains(index)) {
         let source = source.to_owned();
-        let endpoint = endpoint.clone();
-        let certificate = peer.stream_certificate.clone();
-        let relay = iroh_relay.clone();
+        let transport = transport.clone();
         let request = base_request.clone();
-        workers.spawn(async move {
-            send_transfer_v2_chunk(
-                &source,
-                endpoint,
-                peer_id,
-                certificate.as_deref(),
-                relay,
-                request,
-                index,
-            )
-            .await
-        });
+        workers.spawn(
+            async move { send_transfer_v2_chunk(&source, &transport, request, index).await },
+        );
         if workers.len() >= worker_count {
             match workers.join_next().await {
                 Some(Ok(Ok(()))) => {}
@@ -1389,10 +1384,7 @@ async fn run_copy_v2(
     }
 
     let finalize = match send_transfer_v2_control(
-        endpoint,
-        peer_id,
-        peer.stream_certificate.as_deref(),
-        iroh_relay,
+        &transport,
         TransferV2Request {
             operation: TransferV2Operation::Finalize,
             ..base_request
@@ -1405,6 +1397,7 @@ async fn run_copy_v2(
             return Err("remote returned a resume response for transfer v2 finalize".to_string())
         }
     };
+    transport.close().await;
     if !finalize.accepted || !finalize.complete {
         return Err(finalize
             .error
@@ -1419,13 +1412,10 @@ async fn run_copy_v2(
 }
 
 async fn send_transfer_v2_control(
-    endpoint: NetworkEndpoint,
-    peer_id: u64,
-    peer_certificate: Option<&[u8]>,
-    iroh_relay: Option<iroh::RelayUrl>,
+    transport: &TransferV2Transport,
     request: TransferV2Request,
 ) -> Result<TransferV2ResumeOrAck, String> {
-    let mut stream = connect_peer_stream(endpoint, peer_id, peer_certificate, iroh_relay).await?;
+    let mut stream = transport.open_stream().await?;
     stream
         .write_all(TRANSFER_V2_MAGIC)
         .await
@@ -1444,6 +1434,99 @@ async fn send_transfer_v2_control(
     }
 }
 
+#[derive(Clone)]
+enum TransferV2Transport {
+    Direct {
+        endpoint: NetworkEndpoint,
+        peer_id: u64,
+        peer_certificate: Option<Vec<u8>>,
+        iroh_relay: Option<iroh::RelayUrl>,
+    },
+    Iroh {
+        backend: misaka_network::IrohBackend,
+        endpoint: iroh::EndpointAddr,
+    },
+}
+
+impl TransferV2Transport {
+    async fn new(
+        endpoint: NetworkEndpoint,
+        peer_id: u64,
+        peer_certificate: Option<Vec<u8>>,
+        iroh_relay: Option<iroh::RelayUrl>,
+    ) -> Result<Self, String> {
+        match endpoint {
+            NetworkEndpoint::Iroh(endpoint_addr) => {
+                if peer_certificate.is_some() {
+                    return Err(
+                        "Iroh streams use endpoint-authenticated encryption; do not provide a TLS certificate"
+                            .to_string(),
+                    );
+                }
+                let backend = bind_iroh_client_backend(iroh_relay).await?;
+                Ok(Self::Iroh {
+                    backend,
+                    endpoint: endpoint_addr,
+                })
+            }
+            endpoint => Ok(Self::Direct {
+                endpoint,
+                peer_id,
+                peer_certificate,
+                iroh_relay,
+            }),
+        }
+    }
+
+    async fn open_stream(&self) -> Result<misaka_network::NetworkStream, String> {
+        let stream = match self {
+            Self::Direct {
+                endpoint,
+                peer_id,
+                peer_certificate,
+                iroh_relay,
+            } => {
+                connect_peer_stream(
+                    endpoint.clone(),
+                    *peer_id,
+                    peer_certificate.as_deref(),
+                    iroh_relay.clone(),
+                )
+                .await?
+            }
+            Self::Iroh { backend, endpoint } => tokio::time::timeout(
+                Duration::from_secs(10),
+                backend.connect(NetworkEndpoint::Iroh(endpoint.clone())),
+            )
+            .await
+            .map_err(|_| "Iroh transfer stream connect timed out".to_string())?
+            .map_err(|error| error.to_string())?,
+        };
+        if matches!(self, Self::Iroh { .. }) {
+            let mut stream = stream;
+            let mut greeting = [0u8; 5];
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                tokio::io::AsyncReadExt::read_exact(&mut stream, &mut greeting),
+            )
+            .await
+            .map_err(|_| "Iroh transfer greeting timed out".to_string())?
+            .map_err(|error| format!("read Iroh transfer greeting: {error}"))?;
+            if greeting != *b"world" {
+                return Err(format!("unexpected stream greeting: {greeting:?}"));
+            }
+            return Ok(stream);
+        }
+        Ok(stream)
+    }
+
+    async fn close(&self) {
+        if let Self::Iroh { backend, .. } = self {
+            backend.close().await;
+        }
+    }
+}
+
 enum TransferV2ResumeOrAck {
     Resume(TransferV2Resume),
     Ack(TransferV2Ack),
@@ -1451,10 +1534,7 @@ enum TransferV2ResumeOrAck {
 
 async fn send_transfer_v2_chunk(
     source: &Path,
-    endpoint: NetworkEndpoint,
-    peer_id: u64,
-    peer_certificate: Option<&[u8]>,
-    iroh_relay: Option<iroh::RelayUrl>,
+    transport: &TransferV2Transport,
     base_request: TransferV2Request,
     index: u64,
 ) -> Result<(), String> {
@@ -1474,7 +1554,7 @@ async fn send_transfer_v2_chunk(
         .await
         .map_err(|error| format!("read source chunk: {error}"))?;
 
-    let mut stream = connect_peer_stream(endpoint, peer_id, peer_certificate, iroh_relay).await?;
+    let mut stream = transport.open_stream().await?;
     stream
         .write_all(TRANSFER_V2_MAGIC)
         .await
@@ -1761,6 +1841,19 @@ async fn bind_iroh_backend(
 ) -> Result<misaka_network::IrohBackend, String> {
     let secret_key = misaka_runtime::iroh_identity_store::IrohIdentityStore::load_or_init(data_dir)
         .map_err(|error| error.to_string())?;
+    match iroh_relay {
+        Some(relay_url) => {
+            misaka_network::IrohBackend::bind_with_secret_key_and_relay(secret_key, relay_url).await
+        }
+        None => misaka_network::IrohBackend::bind_with_secret_key(secret_key).await,
+    }
+    .map_err(|error| error.to_string())
+}
+
+async fn bind_iroh_client_backend(
+    iroh_relay: Option<iroh::RelayUrl>,
+) -> Result<misaka_network::IrohBackend, String> {
+    let secret_key = iroh::SecretKey::generate();
     match iroh_relay {
         Some(relay_url) => {
             misaka_network::IrohBackend::bind_with_secret_key_and_relay(secret_key, relay_url).await
