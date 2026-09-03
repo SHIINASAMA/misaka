@@ -990,8 +990,8 @@ QUIC bidirectional stream, without changing the runtime's Direct TCP default.
 
 ### Task 62: Close the object-store snapshot
 
-- [ ] Run the complete formatting, Clippy, workspace, Testament, and operator
+- [x] Run the complete formatting, Clippy, workspace, Testament, and operator
   gates.
-- [ ] Synchronize the object-store result and remaining external-network gaps
+- [x] Synchronize the object-store result and remaining external-network gaps
   to the Obsidian project notes.
 - [ ] Commit the final documentation gate snapshot.

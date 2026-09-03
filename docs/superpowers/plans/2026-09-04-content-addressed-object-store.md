@@ -69,9 +69,9 @@
 
 - [x] Add N20 to the network scenario manifest and help text.
 - [x] Start isolated Iroh Sisters with manual discovery, perform two public `cp --resume --parallel 4` operations, and assert exact bytes plus one digest-named object in the receiver data directory.
-- [ ] Run `cargo run -p testament -- run N20_iroh_object_store --json` and then the complete N01–N20, T01–T13, and O01–O07 suites.
+- [x] Run `cargo run -p testament -- run N20_iroh_object_store --json` and then the complete N01–N20, T01–T13, and O01–O07 suites.
 - [x] Document that content addressing is local deduplication and not an authorization or public object service.
-- [ ] Commit `test(transfer): verify object store externally`.
+- [x] Commit `test(transfer): verify object store externally`.
 
 ### Task 62: Run the full gate and update project memory
 
@@ -79,6 +79,6 @@
 - Modify: `/Users/kaoru/Documents/Obsidian Vault/Misaka Network — Network Stream v0.md`
 - Modify: `/Users/kaoru/Documents/Obsidian Vault/项目履历.md`
 
-- [ ] Run formatting, Clippy, workspace tests, `cargo build -p misaka`, Testament verify, and operator verify.
-- [ ] Record the object-store commits, test counts, N20 result, and remaining cross-domain/path-switch gaps in Obsidian.
+- [x] Run formatting, Clippy, workspace tests, `cargo build -p misaka`, Testament verify, and operator verify.
+- [x] Record the object-store commits, test counts, N20 result, and remaining cross-domain/path-switch gaps in Obsidian.
 - [ ] Commit the final documentation gate snapshot.
