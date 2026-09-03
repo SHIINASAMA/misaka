@@ -2042,6 +2042,7 @@ fn n13_iroh_active_path_observability(ctx: &mut Context) -> Result<(), ScenarioE
             .as_deref()
             .is_some_and(|endpoint| endpoint.starts_with("iroh://"))
         || active.rtt_ms.is_none()
+        || active.path_switches != 0
         || active.rx_bytes == 0
     {
         return Err(ScenarioError::assertion(format!(
@@ -2067,6 +2068,15 @@ fn n13_iroh_active_path_observability(ctx: &mut Context) -> Result<(), ScenarioE
         Some("direct"),
         "misaka ps active Iroh route",
     )?;
+    if ps_active
+        .get("path_switches")
+        .and_then(serde_json::Value::as_u64)
+        != Some(0)
+    {
+        return Err(ScenarioError::assertion(
+            "misaka ps did not report initial Iroh path switch count",
+        ));
+    }
 
     client.terminate();
     let _ = client
@@ -2187,6 +2197,10 @@ fn n15_iroh_json_measurement(ctx: &mut Context) -> Result<(), ScenarioError> {
         .is_none()
         || report
             .get("rtt_ms")
+            .and_then(serde_json::Value::as_u64)
+            .is_none()
+        || report
+            .get("path_switches")
             .and_then(serde_json::Value::as_u64)
             .is_none()
         || report
