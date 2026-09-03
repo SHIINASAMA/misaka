@@ -40,6 +40,41 @@ MISAKA_CONFIG_DIR=.misaka-b cargo run -p misaka -- start \
 
 `--introspect` enables a read-only JSON snapshot endpoint on loopback. It is disabled by default. See [docs/architecture.md](docs/architecture.md) and [docs/protocol.md](docs/protocol.md).
 
+## Operator UX
+
+Testament can launch a deterministic full-mesh experiment without making
+itself a Network peer. Every Sister is a real `misaka` OS process with its own
+identity, ports, configuration directory, and persisted restart topology:
+
+```bash
+cargo build --workspace
+cargo run -p testament -- up -n 5
+cargo run -p testament -- ps
+cargo run -p testament -- kill s3
+cargo run -p testament -- ps
+cargo run -p testament -- restart s3
+cargo run -p testament -- logs s3
+cargo run -p testament -- down
+```
+
+A successful `up` stores the active run in `.testament/current`. `ps`,
+`kill`, `stop`, `restart`, `logs`, and `down` use that run by default; pass
+`--run <run-id>` to select another run explicitly. `testament ps` reports
+`online`, `unresponsive`, or `dead` from OS process state and loopback
+introspection, never from log grep. `misaka ps` is independent of Testament:
+it reads the local identity and PeerStore, then concurrently probes known
+Sisters with the Misaka handshake:
+
+```bash
+MISAKA_CONFIG_DIR=.testament/runs/<run-id>/sisters/s1/config \
+  cargo run -p misaka -- ps
+MISAKA_CONFIG_DIR=.testament/runs/<run-id>/sisters/s1/config \
+  cargo run -p misaka -- ps --json
+```
+
+Run the black-box operator checks with `testament operator-verify`.
+
+
 ## Verification
 
 ```bash

@@ -121,11 +121,43 @@ impl Context {
         cmd: std::process::Command,
         restart: crate::supervisor::RestartSpec,
     ) -> Result<(), ScenarioError> {
+        self.spawn_only(alias, entry, cmd, restart)?;
+        self.wait_until_ready(alias)
+    }
+
+    fn spawn_only(
+        &mut self,
+        alias: &str,
+        entry: SisterEntry,
+        cmd: std::process::Command,
+        restart: crate::supervisor::RestartSpec,
+    ) -> Result<(), ScenarioError> {
         let mut proc = SisterProcess::with_restart(entry.clone(), restart);
         proc.spawn(cmd, &entry.stdout_log, &entry.stderr_log)
             .map_err(|e| ScenarioError::infra(format!("spawn {alias}: {}", e)))?;
+        let mut entry = entry;
+        entry.pid = proc.pid();
+        self.entries.insert(alias.to_string(), entry.clone());
+        self.sisters.insert(alias.to_string(), proc);
+        self.manifest.sisters.push(entry);
+        Ok(())
+    }
 
-        // 等待 introspection 就绪 (wait_ready)
+    fn remove_failed_process(&mut self, alias: &str) {
+        if let Some(mut process) = self.sisters.remove(alias) {
+            process.terminate();
+            let _ = process.wait();
+        }
+        self.entries.remove(alias);
+        self.manifest.sisters.retain(|entry| entry.alias != alias);
+    }
+
+    fn wait_until_ready(&mut self, alias: &str) -> Result<(), ScenarioError> {
+        let entry = self
+            .entries
+            .get(alias)
+            .cloned()
+            .ok_or_else(|| ScenarioError::infra(format!("no entry for {alias}")))?;
         let ia: SocketAddr = entry
             .introspection_addr
             .as_ref()
@@ -133,7 +165,7 @@ impl Context {
             .parse()
             .map_err(|e| ScenarioError::infra(format!("{alias} introspection address: {e}")))?;
         if observer::wait_until(ia, Duration::from_secs(15), |_| true).is_none() {
-            proc.terminate();
+            self.remove_failed_process(alias);
             return Err(ScenarioError::infra(format!(
                 "{alias} never became ready (introspect {}); stderr tail: {}",
                 ia,
@@ -141,23 +173,113 @@ impl Context {
             )));
         }
 
-        // 读取真实 SisterId
         let snap = match observer::fetch(ia, Duration::from_millis(500)) {
             Ok(snapshot) => snapshot,
             Err(e) => {
-                proc.terminate();
-                let _ = proc.wait();
+                self.remove_failed_process(alias);
                 return Err(ScenarioError::infra(format!("introspect {alias}: {}", e)));
             }
         };
-        let mut entry = entry;
-        entry.id = Some(snap.identity.id.as_u64());
-        entry.pid = proc.pid();
-
-        self.entries.insert(alias.to_string(), entry.clone());
-        self.sisters.insert(alias.to_string(), proc);
-        self.manifest.sisters.push(entry);
+        let id = snap.identity.id.as_u64();
+        if let Some(entry) = self.entries.get_mut(alias) {
+            entry.id = Some(id);
+            entry.pid = self.sisters.get(alias).and_then(SisterProcess::pid);
+        }
+        if let Some(entry) = self
+            .manifest
+            .sisters
+            .iter_mut()
+            .find(|entry| entry.alias == alias)
+        {
+            entry.id = Some(id);
+            entry.pid = self.sisters.get(alias).and_then(SisterProcess::pid);
+        }
+        if let Some(process) = self.sisters.get_mut(alias) {
+            process.entry.id = Some(id);
+        }
         Ok(())
+    }
+
+    /// Prepare every endpoint and launch all Sisters with a deterministic
+    /// full-mesh topology. Existing scenario `start_sister` remains the
+    /// one-node-at-a-time API used by the Foundation scenarios.
+    pub fn start_full_mesh(&mut self, count: u32) -> Result<(), ScenarioError> {
+        if count == 0 {
+            return Err(ScenarioError::infra("number of sisters must be at least 1"));
+        }
+        let mut ports = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            let listen = alloc_port()
+                .map_err(|e| ScenarioError::infra(format!("alloc listen port: {e}")))?;
+            let introspect = alloc_port()
+                .map_err(|e| ScenarioError::infra(format!("alloc introspection port: {e}")))?;
+            ports.push((listen, introspect));
+        }
+        let addresses: Vec<SocketAddr> = ports
+            .iter()
+            .map(|(listen, _)| format!("127.0.0.1:{listen}").parse().unwrap())
+            .collect();
+
+        let mut prepared = Vec::with_capacity(count as usize);
+        for (i, (listen_port, introspect_port)) in ports.iter().copied().enumerate() {
+            let alias = format!("s{}", i + 1);
+            let peers: Vec<SocketAddr> = addresses
+                .iter()
+                .enumerate()
+                .filter_map(|(j, addr)| (i != j).then_some(*addr))
+                .collect();
+            let (entry, command, restart) = build_spawn(SpawnConfig {
+                layout: &self.layout,
+                alias: &alias,
+                nickname: &alias,
+                listen_port,
+                introspect_port,
+                binary: &self.binary,
+                peers: &peers,
+                discovery: "manual",
+                heartbeat: self.heartbeat,
+                peer_timeout: self.peer_timeout,
+            });
+            prepared.push((alias, entry, command, restart));
+        }
+
+        for (alias, entry, command, restart) in prepared {
+            if let Err(error) = self.spawn_only(&alias, entry, command, restart) {
+                self.teardown();
+                return Err(error);
+            }
+        }
+        let aliases: Vec<String> = self.entries.keys().cloned().collect();
+        for alias in &aliases {
+            if let Err(error) = self.wait_until_ready(alias) {
+                self.teardown();
+                return Err(error);
+            }
+        }
+
+        // Readiness only proves the local endpoints are up. Confirm the
+        // network itself converged before reporting `up` success.
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let complete = aliases.iter().all(|alias| {
+                self.entries
+                    .get(alias)
+                    .and_then(|entry| entry.introspection_addr.as_deref())
+                    .and_then(|addr| addr.parse().ok())
+                    .and_then(|addr| observer::fetch(addr, Duration::from_millis(300)).ok())
+                    .is_some_and(|snapshot| snapshot.peers.len() == count as usize - 1)
+            });
+            if complete {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(ScenarioError::infra(format!(
+                    "full mesh did not converge: expected {} peers per Sister",
+                    count - 1
+                )));
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
     }
 
     pub fn introspect(&self, alias: &str) -> Result<IntrospectionSnapshot, ScenarioError> {

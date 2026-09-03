@@ -7,7 +7,84 @@ pub fn runs_dir() -> PathBuf {
     PathBuf::from(crate::types::TESTAMENT_ROOT).join("runs")
 }
 
+/// Pointer to the run selected by the last successful interactive `up`.
+pub fn current_path() -> PathBuf {
+    PathBuf::from(crate::types::TESTAMENT_ROOT).join("current")
+}
+
+/// Read the active run pointer without falling back to a historical run.
+pub fn load_current_run() -> std::io::Result<String> {
+    let run_id = std::fs::read_to_string(current_path())
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::NotFound, "no current run"))?;
+    let run_id = run_id.trim();
+    if run_id.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no current run",
+        ));
+    }
+    Ok(run_id.to_string())
+}
+
+/// Select a run for commands that operate on a live network.
+/// An explicit id always wins over the persisted current pointer.
+pub fn resolve_run_id(explicit: Option<&str>) -> std::io::Result<String> {
+    if let Some(run_id) = explicit {
+        if run_id.trim().is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "run id cannot be empty",
+            ));
+        }
+        return Ok(run_id.to_string());
+    }
+
+    load_current_run()
+}
+
+/// Point future live-operator commands at `run_id`.
+pub fn set_current_run(run_id: &str) -> std::io::Result<()> {
+    let path = current_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, format!("{}\n", run_id))?;
+    std::fs::rename(tmp, path)
+}
+
+/// Remove the current pointer only when it still refers to `run_id`.
+pub fn clear_current_run(run_id: &str) -> std::io::Result<()> {
+    let path = current_path();
+    let current = match std::fs::read_to_string(&path) {
+        Ok(current) => current,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if current.trim() != run_id {
+        return Ok(());
+    }
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 /// 直接定位某 run 的根目录 (供 CLI status/logs/down) —— 不强制存在。
+///
+/// The layout is reconstructed without creating any files.
+pub fn layout_for_run(run_id: &str) -> RunLayout {
+    let root = run_root(run_id);
+    RunLayout {
+        root: root.clone(),
+        manifest_path: root.join("manifest.json"),
+        report_path: root.join("report.json"),
+        events_path: root.join("events.jsonl"),
+        sisters_dir: root.join("sisters"),
+    }
+}
+
 pub fn run_root(run_id: &str) -> PathBuf {
     runs_dir().join(run_id)
 }

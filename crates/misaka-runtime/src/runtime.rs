@@ -8,6 +8,7 @@ use crate::config::RuntimeConfig;
 use crate::node::SisterNode;
 use crate::shutdown::Shutdown;
 use misaka_core::SisterIdentity;
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tokio::task::{JoinHandle, JoinSet};
@@ -17,10 +18,12 @@ pub struct SisterRuntime {
     node: SisterNode,
     listener: TcpListener,
     shutdown: Shutdown,
+    configured_peers: Vec<SocketAddr>,
 }
 
 impl SisterRuntime {
-    /// Construct the runtime, bind its listeners, and connect configured peers.
+    /// Construct the runtime and bind its listeners. Configured peers are
+    /// connected by a cancellable retry task once `run` starts.
     pub async fn new(
         identity: SisterIdentity,
         encryption_key: [u8; 32],
@@ -46,16 +49,14 @@ impl SisterRuntime {
         }
         let listener = node.start_listener().await?;
 
-        for peer in peers {
-            // A configured peer may be temporarily unavailable. The normal
-            // state/discovery loops can learn it later, so startup continues.
-            let _ = node.add_known_peer(peer).await;
-        }
-
+        // Configured peers are connected after `run` starts accepting inbound
+        // sockets. Connecting synchronously here can deadlock when two fresh
+        // Sisters simultaneously wait for each other's Hello response.
         Ok(Self {
             node,
             listener,
             shutdown,
+            configured_peers: peers,
         })
     }
 
@@ -71,8 +72,9 @@ impl SisterRuntime {
             node,
             listener,
             shutdown: _shutdown,
+            configured_peers,
         } = self;
-        let background = spawn_background_tasks(&node);
+        let background = spawn_background_tasks(&node, configured_peers);
         let mut inbound = JoinSet::new();
         let mut runtime_error = None;
 
@@ -132,7 +134,74 @@ impl SisterRuntime {
     }
 }
 
-fn spawn_background_tasks(node: &SisterNode) -> Vec<JoinHandle<()>> {
+async fn configured_peer_loop(node: SisterNode, peers: Vec<SocketAddr>) {
+    tracing::info!(
+        event = "configured_peer_retry_started",
+        sister_id = node.identity.id.as_u64(),
+        peer_count = peers.len(),
+        "configured peer retry loop started"
+    );
+    let mut reported_failures = HashSet::new();
+    let mut connected = HashSet::new();
+    let mut interval = tokio::time::interval(std::time::Duration::from_millis(250));
+    loop {
+        tokio::select! {
+            _ = node.shutdown.cancelled() => break,
+            _ = interval.tick() => {
+                for peer in &peers {
+                    if connected.contains(peer) {
+                        continue;
+                    }
+                    let result = tokio::time::timeout(
+                        std::time::Duration::from_millis(500),
+                        node.add_known_peer(*peer),
+                    )
+                    .await;
+                    match result {
+                        Ok(Ok(())) => {
+                            connected.insert(*peer);
+                        }
+                        Ok(Err(error)) => {
+                            if reported_failures.insert(*peer) {
+                                tracing::warn!(
+                                    event = "configured_peer_connect_failed",
+                                    sister_id = node.identity.id.as_u64(),
+                                    peer_addr = %peer,
+                                    error = %error,
+                                    "configured peer connection failed; retrying"
+                                );
+                            }
+                        }
+                        Err(_) => {
+                            if reported_failures.insert(*peer) {
+                                tracing::warn!(
+                                    event = "configured_peer_connect_failed",
+                                    sister_id = node.identity.id.as_u64(),
+                                    peer_addr = %peer,
+                                    error = "timeout",
+                                    "configured peer connection failed; retrying"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn spawn_background_tasks(
+    node: &SisterNode,
+    configured_peers: Vec<SocketAddr>,
+) -> Vec<JoinHandle<()>> {
+    let mut tasks = Vec::new();
+    if !configured_peers.is_empty() {
+        let peer_node = node.clone();
+        tasks.push(tokio::spawn(async move {
+            configured_peer_loop(peer_node, configured_peers).await;
+        }));
+    }
+
     let discovery_node = node.clone();
     let discovery = tokio::spawn(async move {
         if matches!(
@@ -165,7 +234,8 @@ fn spawn_background_tasks(node: &SisterNode) -> Vec<JoinHandle<()>> {
         let _ = stealing_node.work_stealing_loop(1).await;
     });
 
-    vec![discovery, state, cleanup, executor, stealing]
+    tasks.extend([discovery, state, cleanup, executor, stealing]);
+    tasks
 }
 
 /// Default development encryption key shared by the current toy protocol.

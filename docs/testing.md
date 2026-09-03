@@ -36,15 +36,70 @@ cargo run -p testament -- run T05_work_stealing --json
 
 ## Interactive run controls
 
-`up` starts real Sister processes and records their PIDs in the manifest. `down` terminates those PIDs before removing the run directory. The supervisor's `terminate` path sends SIGTERM and exercises cooperative runtime shutdown; its `kill` path sends SIGKILL and exercises sudden failure (T08/T09).
+`testament up -n N` prepares all listen and introspection endpoints before it
+launches the real Sister processes. It records a deterministic full-mesh
+peer list, per-Sister config directory, identity, PID, and restart arguments
+in `manifest.json`. The Testament process exits after launch; the Sisters
+continue independently.
 
 ```bash
-cargo run -p testament -- up --sisters 2 --json
-cargo run -p testament -- status <run-id> --json
-cargo run -p testament -- logs <run-id>
-cargo run -p testament -- down <run-id>
-cargo run -p testament -- clean
+cargo run -p testament -- up -n 5
+cargo run -p testament -- ps
+cargo run -p testament -- kill s3
+cargo run -p testament -- ps
+cargo run -p testament -- stop s2
+cargo run -p testament -- restart s3
+cargo run -p testament -- logs s3
+cargo run -p testament -- down
 ```
+
+A successful `up` writes `.testament/current`. Commands that operate on live
+runs (`ps`, `kill`, `stop`, `restart`, `logs`, and `down`) resolve that pointer
+when no `--run <run-id>` is supplied. An explicit `--run` always wins. A
+pointer to a removed run fails with `testament: current run no longer exists`
+rather than silently selecting an older run. `status` remains the static
+manifest view; `ps` is the live view.
+
+`testament ps` combines three observations:
+
+- `online`: the recorded PID exists and the expected Sister introspection
+  endpoint returns a snapshot;
+- `unresponsive`: the PID exists but introspection fails (including an
+  identity mismatch);
+- `dead`: the recorded PID no longer exists.
+
+The human and `--json` renderers consume the same `PsReport` model. Neither
+uses stdout/stderr logs for state assertions. Logs are available only for
+operator diagnosis.
+
+`testament kill` sends SIGKILL and leaves the manifest entry so `ps` can show
+`dead`. `testament stop` sends SIGTERM and waits for graceful exit. `restart`
+reconstructs the process from the persisted manifest, retaining Sister ID,
+listen port, introspection port, config directory, and peer topology.
+
+`misaka ps` is a separate Network Knowledge view. It reads the local
+IdentityStore and PeerStore, includes self, and concurrently probes known
+peer addresses with the existing Misaka Hello handshake. It has no Testament
+or introspection dependency:
+
+```bash
+MISAKA_CONFIG_DIR=.testament/runs/<run-id>/sisters/s1/config \
+  cargo run -p misaka -- ps --json
+```
+
+The operator black-box smoke suite crosses CLI invocation boundaries and
+covers O01-O07:
+
+```bash
+cargo build --workspace
+cargo run -p testament -- operator-verify
+```
+
+O01 prepares a full mesh; O02 checks all nodes online; O03 checks sudden kill
+and `dead`; O04 checks persisted restart invariants; O05 checks graceful stop;
+O06 checks current-run resolution and default down; O07 checks independent
+`misaka ps` output.
+
 
 ## Artifacts
 

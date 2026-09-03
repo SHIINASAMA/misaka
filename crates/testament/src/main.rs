@@ -1,7 +1,11 @@
 use clap::{Parser, Subcommand};
-use testament::run_manager::{create_run, run_root, runs_dir};
+use std::time::Duration;
+use testament::run_manager::{
+    clear_current_run, create_run, layout_for_run, resolve_run_id, run_root, runs_dir,
+    set_current_run,
+};
 use testament::scenario::{scenarios, Context};
-use testament::types::Manifest;
+use testament::types::{Manifest, RunLayout, SisterEntry};
 
 #[derive(Parser)]
 #[command(name = "testament")]
@@ -13,35 +17,77 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// 启动 N 个 Sister (v0 工具)
+    /// Start N interconnected Sisters.
     Up {
-        #[arg(long, default_value_t = 1)]
+        /// Number of Sisters (`-n 5` / `--sisters 5`).
+        #[arg(short = 'n', long = "sisters", default_value_t = 1)]
         sisters: u32,
         #[arg(long)]
         json: bool,
     },
-    /// 查看某 run 的 manifest
+    /// Show static manifest metadata for a run.
     Status {
-        run_id: String,
+        /// Optional legacy positional run ID; defaults to the current run.
+        run_id: Option<String>,
+        #[arg(long)]
+        run: Option<String>,
         #[arg(long)]
         json: bool,
     },
-    /// 查看某 run 的日志
-    Logs { run_id: String },
-    /// 停止某 run
-    Down { run_id: String },
-    /// 运行一个场景
+    /// Show live process and network state for the current run.
+    Ps {
+        #[arg(long)]
+        run: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show Sister logs; omit the alias to show the whole current run.
+    Logs {
+        /// Sister alias (for example, s3), or a legacy run ID.
+        target: Option<String>,
+        #[arg(long)]
+        run: Option<String>,
+    },
+    /// Gracefully stop one Sister.
+    Stop {
+        alias: String,
+        #[arg(long)]
+        run: Option<String>,
+    },
+    /// Immediately kill one Sister.
+    Kill {
+        alias: String,
+        #[arg(long)]
+        run: Option<String>,
+    },
+    /// Restart one Sister using persisted identity, ports, and topology.
+    Restart {
+        alias: String,
+        #[arg(long)]
+        run: Option<String>,
+    },
+    /// Stop and remove a run; omit the run ID to use the current run.
+    Down {
+        run_id: Option<String>,
+        #[arg(long)]
+        run: Option<String>,
+    },
+    /// Run one built-in scenario.
     Run {
         scenario: String,
         #[arg(long)]
         json: bool,
     },
-    /// 运行所有内置场景 (T01-T04)
+    /// Run all built-in scenarios.
     Verify {
         #[arg(long)]
         json: bool,
     },
-    /// 清理所有运行目录
+    /// Run the Operator UX v1 black-box smoke suite (O01-O07).
+    #[command(name = "operator-verify")]
+    OperatorVerify,
+
+    /// Remove all run directories.
     Clean,
 }
 
@@ -51,9 +97,14 @@ fn main() {
         Command::Verify { json } => verify(json),
         Command::Run { scenario, json } => run_one(&scenario, json),
         Command::Up { sisters, json } => up(sisters, json),
-        Command::Status { run_id, json } => status(&run_id, json),
-        Command::Logs { run_id } => logs(&run_id),
-        Command::Down { run_id } => down(&run_id),
+        Command::Status { run_id, run, json } => status(run.as_deref().or(run_id.as_deref()), json),
+        Command::Ps { run, json } => ps(run.as_deref(), json),
+        Command::Logs { target, run } => logs(target.as_deref(), run.as_deref()),
+        Command::Stop { alias, run } => stop_one(&alias, run.as_deref()),
+        Command::Kill { alias, run } => kill_one(&alias, run.as_deref()),
+        Command::Restart { alias, run } => restart_one(&alias, run.as_deref()),
+        Command::Down { run_id, run } => down(run.as_deref().or(run_id.as_deref())),
+        Command::OperatorVerify => operator_verify(),
         Command::Clean => clean(),
     };
     std::process::exit(code);
@@ -95,7 +146,6 @@ fn verify(json: bool) -> i32 {
         let result = (def.run)(&mut ctx);
         let report = ctx.report(def.name, result);
 
-        // 每个场景单独写到自己的 report 文件里
         let scenario_report_path = layout.sisters_dir.join(def.name).join("report.json");
         let _ = testament::reporter::write_report(&scenario_report_path, &report);
 
@@ -114,9 +164,7 @@ fn verify(json: bool) -> i32 {
                 }
             );
         }
-        if code > worst {
-            worst = code;
-        }
+        worst = worst.max(code);
         if code != 0 && !json {
             eprintln!("  {}", report.assertion.clone().unwrap_or_default());
         }
@@ -126,7 +174,6 @@ fn verify(json: bool) -> i32 {
     }
     suite.exit_code = worst;
 
-    // 写聚合 suite report 到 run 根目录的 report.json (保留向后兼容的 §21 路径)
     if let Err(e) = testament::reporter::write_suite_report(&layout.report_path, &suite) {
         eprintln!("testament: write suite report: {}", e);
         worst = worst.max(2);
@@ -193,7 +240,7 @@ fn run_one(scenario: &str, json: bool) -> i32 {
     code
 }
 
-fn up(sisters: u32, _json: bool) -> i32 {
+fn up(sisters: u32, json: bool) -> i32 {
     let (run_id, layout) = match create_run() {
         Ok(x) => x,
         Err(e) => {
@@ -202,94 +249,318 @@ fn up(sisters: u32, _json: bool) -> i32 {
         }
     };
     let mut ctx = Context::new(run_id.clone(), layout.clone());
-    for i in 1..=sisters {
-        let alias = format!("s{}", i);
-        if let Err(e) = ctx.start_sister(&alias, &alias, &[]) {
-            eprintln!("testament: {}: {}", alias, e);
-            ctx.teardown();
-            return 3;
-        }
+    if let Err(error) = ctx.start_full_mesh(sisters) {
+        eprintln!("testament: up: {}", error);
+        ctx.teardown();
+        return 3;
     }
     if let Err(e) = testament::run_manager::write_manifest(&layout, &ctx.manifest) {
         eprintln!("testament: write manifest: {}", e);
         ctx.teardown();
         return 2;
     }
-    if _json {
-        let m = serde_json::to_string_pretty(&ctx.manifest).unwrap_or_default();
-        println!("{}", m);
+    if let Err(e) = set_current_run(&run_id) {
+        eprintln!("testament: set current run: {}", e);
+        ctx.teardown();
+        return 2;
+    }
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&ctx.manifest).unwrap_or_default()
+        );
     } else {
         println!("[testament] run {} up with {} sisters", run_id, sisters);
-        for e in &ctx.manifest.sisters {
+        for entry in &ctx.manifest.sisters {
             println!(
                 "  {}  id={:?}  pid={:?}  listen={}",
-                e.alias, e.id, e.pid, e.listen_addr
+                entry.alias, entry.id, entry.pid, entry.listen_addr
             );
         }
     }
-    // v0: up 启动独立进程；通过 manifest 中的 PID 由 down 负责停止。
     0
 }
 
-fn status(run_id: &str, _json: bool) -> i32 {
-    let path = run_root(run_id).join("manifest.json");
-    match std::fs::read_to_string(&path) {
-        Ok(s) => {
-            println!("{}", s);
+fn selected_manifest(explicit: Option<&str>) -> Result<(String, RunLayout, Manifest), String> {
+    let run_id = resolve_run_id(explicit).map_err(|error| {
+        if explicit.is_none() && error.kind() == std::io::ErrorKind::NotFound {
+            "no current run; run `testament up` first".to_string()
+        } else {
+            format!("cannot resolve run: {error}")
+        }
+    })?;
+    let layout = layout_for_run(&run_id);
+    let manifest = match testament::run_manager::load_manifest(&layout) {
+        Ok(manifest) => manifest,
+        Err(error) if explicit.is_none() && error.kind() == std::io::ErrorKind::NotFound => {
+            return Err("current run no longer exists".to_string())
+        }
+        Err(error) => return Err(format!("no run {:?} (or no manifest): {}", run_id, error)),
+    };
+    Ok((run_id, layout, manifest))
+}
+
+fn status(explicit: Option<&str>, _json: bool) -> i32 {
+    let (_, layout, _) = match selected_manifest(explicit) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("testament: {error}");
+            return 2;
+        }
+    };
+    match std::fs::read_to_string(&layout.manifest_path) {
+        Ok(contents) => {
+            println!("{}", contents);
             0
         }
-        Err(_) => {
-            eprintln!("testament: no run {:?} (or no manifest)", run_id);
+        Err(error) => {
+            eprintln!("testament: read manifest: {error}");
             2
         }
     }
 }
 
-fn logs(run_id: &str) -> i32 {
-    let sisters_dir = run_root(run_id).join("sisters");
-    if !sisters_dir.exists() {
-        eprintln!("testament: no run {:?}", run_id);
-        return 2;
-    }
-    if let Ok(rd) = std::fs::read_dir(&sisters_dir) {
-        for entry in rd.flatten() {
-            let dir = entry.path();
-            let name = dir
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
-            println!("=== {} stdout ===", name);
-            println!(
-                "{}",
-                std::fs::read_to_string(dir.join("stdout.log")).unwrap_or_default()
-            );
-            println!("=== {} stderr ===", name);
-            println!(
-                "{}",
-                std::fs::read_to_string(dir.join("stderr.log")).unwrap_or_default()
-            );
+fn ps(explicit: Option<&str>, json: bool) -> i32 {
+    let (_, _, manifest) = match selected_manifest(explicit) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("testament: {error}");
+            return 2;
         }
+    };
+    let report = testament::operator::collect(&manifest);
+    if json {
+        match serde_json::to_string_pretty(&report) {
+            Ok(json) => println!("{json}"),
+            Err(error) => {
+                eprintln!("testament: encode ps: {error}");
+                return 2;
+            }
+        }
+    } else {
+        print!("{}", testament::operator::render_human(&report));
     }
     0
 }
 
-fn down(run_id: &str) -> i32 {
-    let root = run_root(run_id);
-    if !root.exists() {
-        eprintln!("testament: no run {:?}", run_id);
+fn logs(target: Option<&str>, explicit_run: Option<&str>) -> i32 {
+    let (run_id, _, manifest, alias) = if explicit_run.is_some() {
+        let selected = match selected_manifest(explicit_run) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("testament: {error}");
+                return 2;
+            }
+        };
+        (selected.0, selected.1, selected.2, target)
+    } else if let Some(target) = target {
+        // Preserve `logs <run-id>` while making `logs s3` the convenient
+        // current-run form.
+        if layout_for_run(target).manifest_path.exists() {
+            let selected = match selected_manifest(Some(target)) {
+                Ok(value) => value,
+                Err(error) => {
+                    eprintln!("testament: {error}");
+                    return 2;
+                }
+            };
+            (selected.0, selected.1, selected.2, None)
+        } else {
+            let selected = match selected_manifest(None) {
+                Ok(value) => value,
+                Err(error) => {
+                    eprintln!("testament: {error}");
+                    return 2;
+                }
+            };
+            (selected.0, selected.1, selected.2, Some(target))
+        }
+    } else {
+        let selected = match selected_manifest(None) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("testament: {error}");
+                return 2;
+            }
+        };
+        (selected.0, selected.1, selected.2, None)
+    };
+
+    let entries: Vec<&SisterEntry> = manifest
+        .sisters
+        .iter()
+        .filter(|entry| alias.is_none_or(|alias| alias == entry.alias))
+        .collect();
+    if let Some(alias) = alias.filter(|_| entries.is_empty()) {
+        eprintln!("testament: no sister {:?} in run {}", alias, run_id);
         return 2;
     }
+    for entry in entries {
+        println!("=== {} stdout ===", entry.alias);
+        println!(
+            "{}",
+            std::fs::read_to_string(&entry.stdout_log).unwrap_or_default()
+        );
+        println!("=== {} stderr ===", entry.alias);
+        println!(
+            "{}",
+            std::fs::read_to_string(&entry.stderr_log).unwrap_or_default()
+        );
+    }
+    0
+}
 
-    let manifest_path = root.join("manifest.json");
-    if let Ok(contents) = std::fs::read_to_string(&manifest_path) {
-        if let Ok(manifest) = serde_json::from_str::<Manifest>(&contents) {
-            stop_manifest_sisters(&manifest);
+fn stop_one(alias: &str, explicit: Option<&str>) -> i32 {
+    signal_one(alias, explicit, "TERM", "stop")
+}
+
+fn kill_one(alias: &str, explicit: Option<&str>) -> i32 {
+    signal_one(alias, explicit, "KILL", "kill")
+}
+
+fn signal_one(alias: &str, explicit: Option<&str>, signal: &str, operation: &str) -> i32 {
+    let (run_id, layout, manifest) = match selected_manifest(explicit) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("testament: {error}");
+            return 2;
+        }
+    };
+    let Some(entry) = manifest.sisters.iter().find(|entry| entry.alias == alias) else {
+        eprintln!("testament: no sister {:?} in run {}", alias, run_id);
+        return 2;
+    };
+    let Some(pid) = entry.pid else {
+        eprintln!("testament: sister {} has no recorded pid", alias);
+        return 2;
+    };
+    if !testament::supervisor::pid_alive(pid) {
+        println!(
+            "[testament] {} {} already dead (pid {})",
+            operation, alias, pid
+        );
+        return 0;
+    }
+    if let Err(error) = testament::supervisor::signal_process(pid, signal) {
+        eprintln!(
+            "testament: {} {} (pid {}): {}",
+            operation, alias, pid, error
+        );
+        return 3;
+    }
+    let exited = testament::supervisor::wait_pid_exit(pid, Duration::from_secs(5));
+    if !exited {
+        eprintln!("testament: {} {} timed out (pid {})", operation, alias, pid);
+        return 3;
+    }
+    if let Err(error) = testament::run_manager::write_manifest(&layout, &manifest) {
+        eprintln!("testament: write manifest: {}", error);
+        return 2;
+    }
+    println!("[testament] {} {} (pid {})", operation, alias, pid);
+    0
+}
+
+fn restart_one(alias: &str, explicit: Option<&str>) -> i32 {
+    let (run_id, layout, mut manifest) = match selected_manifest(explicit) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("testament: {error}");
+            return 2;
+        }
+    };
+    let Some(index) = manifest
+        .sisters
+        .iter()
+        .position(|entry| entry.alias == alias)
+    else {
+        eprintln!("testament: no sister {:?} in run {}", alias, run_id);
+        return 2;
+    };
+    let entry = manifest.sisters[index].clone();
+    if let Some(pid) = entry
+        .pid
+        .filter(|pid| testament::supervisor::pid_alive(*pid))
+    {
+        if let Err(error) = testament::supervisor::signal_process(pid, "TERM") {
+            eprintln!("testament: restart {}: {}", alias, error);
+            return 3;
+        }
+        if !testament::supervisor::wait_pid_exit(pid, Duration::from_secs(5)) {
+            let _ = testament::supervisor::signal_process(pid, "KILL");
+            if !testament::supervisor::wait_pid_exit(pid, Duration::from_secs(2)) {
+                eprintln!("testament: restart {}: old process did not exit", alias);
+                return 3;
+            }
         }
     }
 
-    match std::fs::remove_dir_all(&root) {
+    let binary = testament::run_manager::misaka_binary();
+    let mut process = match testament::supervisor::spawn_from_entry(entry.clone(), &binary) {
+        Ok(process) => process,
+        Err(error) => {
+            eprintln!("testament: restart {}: {}", alias, error);
+            return 3;
+        }
+    };
+    let Some(introspection) = entry
+        .introspection_addr
+        .as_deref()
+        .and_then(|addr| addr.parse().ok())
+    else {
+        eprintln!(
+            "testament: restart {}: missing introspection address",
+            alias
+        );
+        process.kill();
+        return 3;
+    };
+    let Some(snapshot) =
+        testament::observer::wait_until(introspection, Duration::from_secs(15), |_| true)
+    else {
+        eprintln!("testament: restart {}: Sister did not become ready", alias);
+        process.kill();
+        return 3;
+    };
+    if entry
+        .id
+        .is_some_and(|id| id != snapshot.identity.id.as_u64())
+    {
+        eprintln!("testament: restart {}: identity changed", alias);
+        process.kill();
+        return 3;
+    }
+    manifest.sisters[index].pid = process.pid();
+    manifest.sisters[index].id = Some(snapshot.identity.id.as_u64());
+    if let Err(error) = testament::run_manager::write_manifest(&layout, &manifest) {
+        eprintln!("testament: write manifest: {}", error);
+        process.kill();
+        return 2;
+    }
+    println!(
+        "[testament] restarted {} in run {} (pid {})",
+        alias,
+        run_id,
+        process.pid().unwrap_or_default()
+    );
+    0
+}
+
+fn down(explicit: Option<&str>) -> i32 {
+    let (run_id, _, manifest) = match selected_manifest(explicit) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("testament: {error}");
+            return 2;
+        }
+    };
+    stop_manifest_sisters(&manifest);
+    match std::fs::remove_dir_all(run_root(&run_id)) {
         Ok(()) => {
+            if let Err(error) = clear_current_run(&run_id) {
+                eprintln!("testament: clear current run: {}", error);
+                return 2;
+            }
             println!("[testament] removed run {}", run_id);
             0
         }
@@ -303,19 +574,28 @@ fn down(run_id: &str) -> i32 {
 fn stop_manifest_sisters(manifest: &Manifest) {
     for sister in &manifest.sisters {
         let Some(pid) = sister.pid else { continue };
-        match std::process::Command::new("kill")
-            .args(["-TERM", &pid.to_string()])
-            .status()
-        {
-            Ok(status) if !status.success() => eprintln!(
-                "[testament] sister {} (pid {}) already exited or could not be stopped",
-                sister.alias, pid
-            ),
-            Err(e) => eprintln!(
-                "[testament] stop sister {} (pid {}): {}",
-                sister.alias, pid, e
-            ),
-            Ok(_) => {}
+        if !testament::supervisor::pid_alive(pid) {
+            continue;
+        }
+        let _ = testament::supervisor::signal_process(pid, "TERM");
+        if !testament::supervisor::wait_pid_exit(pid, Duration::from_secs(5)) {
+            let _ = testament::supervisor::signal_process(pid, "KILL");
+            let _ = testament::supervisor::wait_pid_exit(pid, Duration::from_secs(2));
+        }
+    }
+}
+
+fn operator_verify() -> i32 {
+    match testament::smoke::run() {
+        Ok(checks) => {
+            for check in checks {
+                println!("[testament] {} -> passed", check);
+            }
+            0
+        }
+        Err(error) => {
+            eprintln!("[testament] operator smoke failed: {}", error);
+            3
         }
     }
 }

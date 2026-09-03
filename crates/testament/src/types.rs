@@ -108,6 +108,20 @@ pub struct SisterEntry {
     pub config_dir: String,
     pub stdout_log: String,
     pub stderr_log: String,
+    /// The launch identity and topology are persisted so another Testament
+    /// invocation can rebuild the exact same process.
+    #[serde(default)]
+    pub nickname: String,
+    #[serde(default)]
+    pub discovery: String,
+    #[serde(default)]
+    pub peer_addrs: Vec<String>,
+    #[serde(default)]
+    pub heartbeat: u64,
+    #[serde(default)]
+    pub peer_timeout: u64,
+    #[serde(default)]
+    pub binary: String,
 }
 
 /// 一个 run 在磁盘上的位置

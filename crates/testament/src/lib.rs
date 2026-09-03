@@ -13,8 +13,10 @@
 
 pub mod assertion;
 pub mod observer;
+pub mod operator;
 pub mod reporter;
 pub mod run_manager;
 pub mod scenario;
+pub mod smoke;
 pub mod supervisor;
 pub mod types;

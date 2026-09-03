@@ -184,6 +184,12 @@ pub fn build_spawn(config: SpawnConfig<'_>) -> (SisterEntry, Command, RestartSpe
         config_dir: config_dir.to_string_lossy().to_string(),
         stdout_log: stdout_log.to_string_lossy().to_string(),
         stderr_log: stderr_log.to_string_lossy().to_string(),
+        nickname: nickname.to_string(),
+        discovery: discovery.to_string(),
+        peer_addrs: peers.iter().map(ToString::to_string).collect(),
+        heartbeat,
+        peer_timeout,
+        binary: binary.to_string_lossy().to_string(),
     };
     let spec = RestartSpec {
         program: binary.to_path_buf(),
@@ -191,6 +197,172 @@ pub fn build_spawn(config: SpawnConfig<'_>) -> (SisterEntry, Command, RestartSpe
         config_dir,
     };
     (entry, cmd, spec)
+}
+
+/// Rebuild the exact command recorded in a manifest entry.
+///
+/// This is deliberately a pure process-construction helper: Testament does
+/// not link against `misaka-runtime` and never turns the manifest into a
+/// network control plane.
+pub fn command_for_entry(entry: &SisterEntry, fallback_binary: &Path) -> std::io::Result<Command> {
+    let binary = if !entry.binary.is_empty() {
+        let configured = PathBuf::from(&entry.binary);
+        if configured.exists() {
+            configured
+        } else {
+            fallback_binary.to_path_buf()
+        }
+    } else {
+        fallback_binary.to_path_buf()
+    };
+    let listen_port = entry
+        .listen_addr
+        .parse::<SocketAddr>()
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?
+        .port();
+    let introspect_port = entry
+        .introspection_addr
+        .as_deref()
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "missing introspection address",
+            )
+        })?
+        .parse::<SocketAddr>()
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?
+        .port();
+    let nickname = if entry.nickname.is_empty() {
+        entry.alias.as_str()
+    } else {
+        entry.nickname.as_str()
+    };
+    let discovery = if entry.discovery.is_empty() {
+        "manual"
+    } else {
+        entry.discovery.as_str()
+    };
+    let heartbeat = if entry.heartbeat == 0 {
+        2
+    } else {
+        entry.heartbeat
+    };
+    let peer_timeout = if entry.peer_timeout == 0 {
+        8
+    } else {
+        entry.peer_timeout
+    };
+    let mut args = vec![
+        "start".to_string(),
+        "--port".to_string(),
+        listen_port.to_string(),
+        "--nickname".to_string(),
+        nickname.to_string(),
+        "--log-format".to_string(),
+        "json".to_string(),
+        "--discovery".to_string(),
+        discovery.to_string(),
+        "--heartbeat".to_string(),
+        heartbeat.to_string(),
+        "--peer-timeout".to_string(),
+        peer_timeout.to_string(),
+        "--introspect".to_string(),
+        introspect_port.to_string(),
+    ];
+    for peer in &entry.peer_addrs {
+        args.push("--peer".to_string());
+        args.push(peer.clone());
+    }
+    let mut command = Command::new(&binary);
+    command
+        .args(&args)
+        .env("MISAKA_CONFIG_DIR", &entry.config_dir);
+    Ok(command)
+}
+
+/// Construct a process whose launch specification comes entirely from a
+/// persisted manifest entry.
+pub fn spawn_from_entry(
+    entry: SisterEntry,
+    fallback_binary: &Path,
+) -> std::io::Result<SisterProcess> {
+    let command = command_for_entry(&entry, fallback_binary)?;
+    let binary = if !entry.binary.is_empty() && Path::new(&entry.binary).exists() {
+        PathBuf::from(&entry.binary)
+    } else {
+        fallback_binary.to_path_buf()
+    };
+    let args = command_args_for_entry(&entry)?;
+    let restart = RestartSpec {
+        program: binary,
+        args,
+        config_dir: PathBuf::from(&entry.config_dir),
+    };
+    let mut process = SisterProcess::with_restart(entry.clone(), restart);
+    process.spawn(command, &entry.stdout_log, &entry.stderr_log)?;
+    Ok(process)
+}
+
+fn command_args_for_entry(entry: &SisterEntry) -> std::io::Result<Vec<String>> {
+    let listen_port = entry
+        .listen_addr
+        .parse::<SocketAddr>()
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?
+        .port();
+    let introspect_port = entry
+        .introspection_addr
+        .as_deref()
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "missing introspection address",
+            )
+        })?
+        .parse::<SocketAddr>()
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?
+        .port();
+    let nickname = if entry.nickname.is_empty() {
+        entry.alias.as_str()
+    } else {
+        entry.nickname.as_str()
+    };
+    let discovery = if entry.discovery.is_empty() {
+        "manual"
+    } else {
+        entry.discovery.as_str()
+    };
+    let heartbeat = if entry.heartbeat == 0 {
+        2
+    } else {
+        entry.heartbeat
+    };
+    let peer_timeout = if entry.peer_timeout == 0 {
+        8
+    } else {
+        entry.peer_timeout
+    };
+    let mut args = vec![
+        "start".into(),
+        "--port".into(),
+        listen_port.to_string(),
+        "--nickname".into(),
+        nickname.into(),
+        "--log-format".into(),
+        "json".into(),
+        "--discovery".into(),
+        discovery.into(),
+        "--heartbeat".into(),
+        heartbeat.to_string(),
+        "--peer-timeout".into(),
+        peer_timeout.to_string(),
+        "--introspect".into(),
+        introspect_port.to_string(),
+    ];
+    for peer in &entry.peer_addrs {
+        args.push("--peer".into());
+        args.push(peer.clone());
+    }
+    Ok(args)
 }
 
 impl SisterProcess {
@@ -322,6 +494,8 @@ impl SisterProcess {
 fn signal_pid(pid: u32, sig: &str) -> std::io::Result<()> {
     let status = std::process::Command::new("kill")
         .args([format!("-{}", sig), pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()?;
     if status.success() {
         Ok(())
@@ -333,9 +507,49 @@ fn signal_pid(pid: u32, sig: &str) -> std::io::Result<()> {
     }
 }
 
+/// Test whether a PID currently exists without owning or reaping its child.
+pub fn pid_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(Stdio::null())
+            .stdout(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+/// Send a signal to a process started by a previous Testament invocation.
+pub fn signal_process(pid: u32, signal: &str) -> std::io::Result<()> {
+    signal_pid(pid, signal)
+}
+
+/// Wait until an externally-owned process disappears. Returns whether it did.
+pub fn wait_pid_exit(pid: u32, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while pid_alive(pid) {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(40));
+    }
+    true
+}
+
 #[cfg(not(unix))]
-fn signal_pid(_pid: u32, _sig: &str) -> std::io::Result<()> {
-    Ok(())
+fn signal_pid(pid: u32, sig: &str) -> std::io::Result<()> {
+    let _ = (pid, sig);
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "signals are unsupported on this platform",
+    ))
 }
 
 /// 请求子进程优雅停止。Unix 用 SIGTERM；其它平台回退到 kill。

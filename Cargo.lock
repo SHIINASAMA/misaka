@@ -440,9 +440,11 @@ dependencies = [
 name = "misaka"
 version = "0.1.0"
 dependencies = [
+ "bincode",
  "clap",
  "misaka-core",
  "misaka-runtime",
+ "serde",
  "serde_json",
  "sysinfo",
  "tokio",

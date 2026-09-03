@@ -73,9 +73,11 @@ Foundation v1 deliberately keeps `SisterIdentity` (machine identity) separate fr
 ## Runtime lifecycle
 
 `SisterRuntime::new` creates a `Shutdown` sender, injects a cloneable
-`ShutdownToken` into the node, binds listeners, and performs configured peer
-handshakes. `run` starts cancellable background tasks and selects between
-listener acceptance and shutdown.
+`ShutdownToken` into the node, and binds listeners. Configured peer handshakes
+run after `run` starts accepting inbound sockets; this avoids a startup
+deadlock when two fresh Sisters simultaneously wait for each other's Hello.
+`run` starts cancellable background tasks and selects between listener
+acceptance and shutdown.
 
 The same token is selected by discovery, state broadcast, cleanup, executor,
 work stealing, response-listener, and accept loops. On cancellation, the
@@ -145,11 +147,18 @@ or discovery.
 ## Testament boundary
 
 Testament launches the built `misaka` executable as an OS process. It assigns
-each Sister an isolated config directory, ports, and logs, then observes
-introspection and command results. `terminate` sends SIGTERM and exercises the
-graceful path; `kill` sends SIGKILL and exercises sudden termination. T13
-asserts graceful exit status and the diagnostic stop event, while T08/T09
-exercise sudden failure behavior.
+each Sister an isolated config directory, ports, deterministic peer topology,
+and persisted launch metadata, then observes introspection and command
+results. `testament up -n N` prepares a full mesh before reporting success;
+`testament ps` combines recorded PID state with loopback introspection and
+never greps logs. `terminate`/`stop` sends SIGTERM and exercises the graceful
+path; `kill` sends SIGKILL and exercises sudden termination. T13 and O05
+assert the graceful path, while T08/T09 and O03 exercise sudden failure.
+
+The `.testament/current` pointer is an operator convenience for selecting a
+run, not Network state. `testament` commands manage processes and artifacts;
+`misaka ps` independently reads IdentityStore/PeerStore and probes known
+Sisters with the Misaka Hello protocol.
 
 Testament never instantiates `SisterRuntime`, acts as a peer, joins discovery,
 or executes Misaka jobs in-process. Killing the harness must not be required
