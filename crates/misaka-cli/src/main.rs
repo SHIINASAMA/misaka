@@ -87,6 +87,18 @@ enum Command {
         /// Write this marker after the stream handshake and mode setup succeed.
         #[arg(long)]
         ready_file: Option<PathBuf>,
+
+        /// Use the local persisted TLS identity and mutual authentication.
+        #[arg(long)]
+        secure: bool,
+
+        /// DER certificate of the server to trust in secure mode.
+        #[arg(long, value_name = "PATH")]
+        trust_cert: Option<PathBuf>,
+
+        /// TLS server name to validate, for example sister-42.
+        #[arg(long)]
+        server_name: Option<String>,
     },
 
     /// Update the local Sister nickname.
@@ -227,10 +239,20 @@ async fn main() -> Result<(), MisakaError> {
             addr,
             mode,
             ready_file,
+            secure,
+            trust_cert,
+            server_name,
         } => {
-            run_stream_test(addr, &mode, ready_file.as_deref())
-                .await
-                .map_err(MisakaError::Other)?;
+            run_stream_test(
+                addr,
+                &mode,
+                ready_file.as_deref(),
+                secure,
+                trust_cert.as_deref(),
+                server_name.as_deref(),
+            )
+            .await
+            .map_err(MisakaError::Other)?;
         }
 
         Command::Nickname { nickname } => {
@@ -486,15 +508,41 @@ async fn run_stream_test(
     addr: SocketAddr,
     mode: &str,
     ready_file: Option<&Path>,
+    secure: bool,
+    trust_cert: Option<&Path>,
+    server_name: Option<&str>,
 ) -> Result<(), String> {
-    let backend = misaka_network::DirectTcpBackend;
-    let mut stream = tokio::time::timeout(
-        Duration::from_secs(5),
-        backend.connect(NetworkEndpoint::Tcp(addr)),
-    )
-    .await
-    .map_err(|_| "stream connect timed out".to_string())?
-    .map_err(|error| error.to_string())?;
+    let mut stream = if secure {
+        let trust_cert = trust_cert.ok_or("--trust-cert is required with --secure")?;
+        let server_name = server_name.ok_or("--server-name is required with --secure")?;
+        let data_dir = IdentityStore::config_dir().map_err(|error| error.to_string())?;
+        let identity = misaka_runtime::tls_identity_store::TlsIdentityStore::load(&data_dir)
+            .map_err(|error| error.to_string())?
+            .ok_or("no persisted TLS identity in MISAKA_CONFIG_DIR")?;
+        let trusted_certificate = std::fs::read(trust_cert)
+            .map_err(|error| format!("read trusted certificate: {error}"))?;
+        let config = identity
+            .client_config(&trusted_certificate)
+            .map_err(|error| error.to_string())?;
+        let client = misaka_network::tls::TlsClient::new(config, server_name)
+            .map_err(|error| error.to_string())?;
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            client.connect(NetworkEndpoint::Tcp(addr)),
+        )
+        .await
+        .map_err(|_| "secure stream connect timed out".to_string())?
+        .map_err(|error| error.to_string())?
+    } else {
+        let backend = misaka_network::DirectTcpBackend;
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            backend.connect(NetworkEndpoint::Tcp(addr)),
+        )
+        .await
+        .map_err(|_| "stream connect timed out".to_string())?
+        .map_err(|error| error.to_string())?
+    };
 
     let mut greeting = [0u8; 5];
     read_exact_timeout(&mut stream, &mut greeting).await?;

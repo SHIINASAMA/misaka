@@ -81,9 +81,10 @@ cargo run -p testament -- network-verify
 cargo run -p testament -- network-verify --json
 ```
 
-N01–N06 cover connection, bidirectional exchange, sustained reuse of one
+N01–N07 cover connection, bidirectional exchange, sustained reuse of one
 connection, a 64 MiB bounded-buffer stream, remote disconnect, and restart
-followed by a new stream. The large-stream client uses concurrent reader and
+followed by a new stream, plus an opt-in TLS 1.3/mTLS LAN-style connection.
+The large-stream client uses concurrent reader and
 writer halves and deterministic incremental hashing; it never buffers the
 complete payload. N05 and N06 use `stream-test --ready-file` and bounded
 condition polling, so process teardown begins only after the handshake and
@@ -91,9 +92,12 @@ initial echo have completed.
 
 ## Security and non-goals
 
-Network Stream v0 is **not secure**. It is for loopback and deterministic test
-environments only. It must not carry real credentials, sensitive files, SSH,
-or Internet traffic.
+The default raw Network Stream v0 path is **not secure**. It remains for
+loopback and deterministic test environments only. The separate opt-in secure
+path uses rustls TLS 1.3/mTLS with persisted Sister certificates, explicit
+certificate pinning, and server-name identity validation; it is the LAN-style
+foundation for later transfer and tunnel work, not yet a general Internet
+transport.
 
 Authentication, encryption, identity binding, authorization, SisterId
 routing, peer discovery integration, multiplexing, resume, compression, NAT

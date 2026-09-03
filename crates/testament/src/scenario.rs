@@ -7,6 +7,7 @@ use crate::observer;
 use crate::run_manager::{alloc_port, misaka_binary};
 use crate::supervisor::{build_spawn, CliProcess, SisterProcess, SpawnConfig};
 use crate::types::{Artifacts, Manifest, Report, RunLayout, ScenarioError, SisterEntry};
+use misaka_core::identity::SisterIdentity;
 use misaka_core::introspection::IntrospectionSnapshot;
 use std::collections::HashMap;
 use std::fs::OpenOptions;
@@ -289,6 +290,64 @@ impl Context {
             }
             std::thread::sleep(Duration::from_millis(100));
         }
+    }
+
+    /// Start two real Sisters with pre-provisioned mutually trusted TLS
+    /// identities. The harness only provisions files and launches processes;
+    /// the TLS handshake and stream exchange are performed by `misaka`.
+    pub fn start_secure_pair(&mut self) -> Result<(), ScenarioError> {
+        let a_ports = allocate_ports()?;
+        let b_ports = allocate_ports()?;
+        let a_addr: SocketAddr = format!("127.0.0.1:{}", a_ports.0).parse().unwrap();
+        let b_addr: SocketAddr = format!("127.0.0.1:{}", b_ports.0).parse().unwrap();
+
+        let (a_entry, mut a_command, a_restart) = build_spawn(SpawnConfig {
+            layout: &self.layout,
+            alias: "a",
+            nickname: "alpha",
+            listen_port: a_ports.0,
+            stream_port: a_ports.1,
+            introspect_port: a_ports.2,
+            binary: &self.binary,
+            peers: &[b_addr],
+            discovery: "manual",
+            heartbeat: self.heartbeat,
+            peer_timeout: self.peer_timeout,
+        });
+        let (b_entry, mut b_command, b_restart) = build_spawn(SpawnConfig {
+            layout: &self.layout,
+            alias: "b",
+            nickname: "beta",
+            listen_port: b_ports.0,
+            stream_port: b_ports.1,
+            introspect_port: b_ports.2,
+            binary: &self.binary,
+            peers: &[a_addr],
+            discovery: "manual",
+            heartbeat: self.heartbeat,
+            peer_timeout: self.peer_timeout,
+        });
+
+        let a_cert = provision_tls_identity(&a_entry.config_dir, 10001, "alpha", a_ports.0)?;
+        let b_cert = provision_tls_identity(&b_entry.config_dir, 10002, "beta", b_ports.0)?;
+        a_command
+            .arg("--stream-secure")
+            .arg("--stream-trust-cert")
+            .arg(&b_cert);
+        b_command
+            .arg("--stream-secure")
+            .arg("--stream-trust-cert")
+            .arg(&a_cert);
+
+        self.spawn_only("a", a_entry, a_command, a_restart)?;
+        self.spawn_only("b", b_entry, b_command, b_restart)?;
+        for alias in ["a", "b"] {
+            if let Err(error) = self.wait_until_ready(alias) {
+                self.teardown();
+                return Err(error);
+            }
+        }
+        Ok(())
     }
 
     pub fn introspect(&self, alias: &str) -> Result<IntrospectionSnapshot, ScenarioError> {
@@ -576,7 +635,58 @@ pub fn network_scenarios() -> Vec<ScenarioDef> {
             name: "N06_restart_new_stream",
             run: Box::new(n06_restart_new_stream),
         },
+        ScenarioDef {
+            name: "N07_secure_lan_stream",
+            run: Box::new(n07_secure_lan_stream),
+        },
     ]
+}
+
+fn allocate_ports() -> Result<(u16, u16, u16), ScenarioError> {
+    Ok((
+        alloc_port().map_err(|e| ScenarioError::infra(format!("alloc listen port: {e}")))?,
+        alloc_port().map_err(|e| ScenarioError::infra(format!("alloc stream port: {e}")))?,
+        alloc_port().map_err(|e| ScenarioError::infra(format!("alloc introspection port: {e}")))?,
+    ))
+}
+
+fn provision_tls_identity(
+    config_dir: &str,
+    id: u64,
+    nickname: &str,
+    listen_port: u16,
+) -> Result<PathBuf, ScenarioError> {
+    let directory = Path::new(config_dir);
+    std::fs::create_dir_all(directory)
+        .map_err(|e| ScenarioError::infra(format!("create TLS config directory: {e}")))?;
+    let generated = rcgen::generate_simple_self_signed(vec![format!("sister-{id}")])
+        .map_err(|e| ScenarioError::infra(format!("generate TLS identity: {e}")))?;
+    let certificate_path = directory.join("stream-cert.der");
+    let key_path = directory.join("stream-key.der");
+    std::fs::write(&certificate_path, generated.cert.der())
+        .map_err(|e| ScenarioError::infra(format!("write TLS certificate: {e}")))?;
+    std::fs::write(&key_path, generated.key_pair.serialize_der())
+        .map_err(|e| ScenarioError::infra(format!("write TLS private key: {e}")))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| ScenarioError::infra(format!("protect TLS private key: {e}")))?;
+    }
+    let identity = SisterIdentity::new(
+        id,
+        nickname.to_string(),
+        "testament-secure-host".to_string(),
+        "testament".to_string(),
+        env!("CARGO_PKG_VERSION").to_string(),
+        listen_port,
+    );
+    let identity_path = directory.join("identity.json");
+    let json = serde_json::to_vec_pretty(&identity)
+        .map_err(|e| ScenarioError::infra(format!("serialize identity: {e}")))?;
+    std::fs::write(identity_path, json)
+        .map_err(|e| ScenarioError::infra(format!("write identity: {e}")))?;
+    Ok(certificate_path)
 }
 
 fn t01_standalone(ctx: &mut Context) -> Result<(), ScenarioError> {
@@ -1186,4 +1296,53 @@ fn n06_restart_new_stream(ctx: &mut Context) -> Result<(), ScenarioError> {
     }
     ctx.restart_sister("b")?;
     stream_client(ctx, "a", "b", "bidirectional")
+}
+
+/// N07: a secure stream is established between two real Sister processes.
+/// Certificates are provisioned as test fixtures, while both the listener
+/// and the client TLS handshake run inside `misaka` processes.
+fn n07_secure_lan_stream(ctx: &mut Context) -> Result<(), ScenarioError> {
+    ctx.start_secure_pair()?;
+    let address = ctx.stream_addr("b")?.to_string();
+    let b_config = Path::new(
+        &ctx.entries
+            .get("b")
+            .ok_or_else(|| ScenarioError::infra("no secure peer entry"))?
+            .config_dir,
+    )
+    .to_path_buf();
+    let a_config = Path::new(
+        &ctx.entries
+            .get("a")
+            .ok_or_else(|| ScenarioError::infra("no secure client entry"))?
+            .config_dir,
+    )
+    .to_path_buf();
+    let trusted_certificate = b_config.join("stream-cert.der");
+    let trusted_certificate = trusted_certificate.to_string_lossy().to_string();
+    let output = ctx
+        .spawn_cli_with_config(
+            &a_config,
+            &[
+                "stream-test",
+                "--addr",
+                &address,
+                "--mode",
+                "bidirectional",
+                "--secure",
+                "--trust-cert",
+                &trusted_certificate,
+                "--server-name",
+                "sister-10002",
+            ],
+        )?
+        .wait_timeout(Duration::from_secs(20))
+        .map_err(|error| ScenarioError::infra(format!("wait secure stream client: {error}")))?;
+    if !output.status.success() {
+        return Err(ScenarioError::assertion(format!(
+            "secure stream failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(())
 }

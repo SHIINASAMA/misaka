@@ -421,4 +421,4 @@ loopback-only while those pieces are being integrated.
 - [x] Bind non-loopback stream listeners only in secure mode.
 - [x] Route SisterId connections through the secure backend and retain mDNS
   discovery as candidate metadata only.
-- [ ] Add black-box LAN-style secure connection coverage.
+- [x] Add black-box LAN-style secure connection coverage (`N07_secure_lan_stream`).
