@@ -60,6 +60,7 @@ impl StreamRegistry {
                 stream_id,
                 backend: stream.path.backend.clone(),
                 route: stream.path.route.clone(),
+                rtt_ms: stream.path.rtt_ms,
                 local_endpoint: stream.path.local_endpoint.clone(),
                 remote_endpoint: stream
                     .path

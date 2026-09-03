@@ -111,9 +111,10 @@ test covers disconnect, resume, and finalization, and the protocol works over
 Direct TCP or opt-in Iroh.
 
 When a Sister has enabled loopback introspection, `misaka ps --json
---introspect 127.0.0.1:<port>` includes the local active stream registry. The
-default `misaka ps` output intentionally remains a Network Knowledge view and
-only reports persisted candidates.
+--introspect 127.0.0.1:<port>` includes the local active stream registry,
+including optional selected-path RTT in milliseconds. The default `misaka ps`
+output intentionally remains a Network Knowledge view and only reports
+persisted candidates.
 
 ## Security and non-goals
 
@@ -124,7 +125,7 @@ certificate pinning, and server-name identity validation; it is the LAN-style
 foundation for later transfer and tunnel work, not yet a general Internet
 transport.
 
-Multiplexing, compression, NAT traversal, and active relay path selection
+Multiplexing, compression, NAT traversal, and active relay path switching
 remain outside the raw insecure v0 contract. Transfer v1 does not yet include
 parallel chunks, content addressing, or cross-domain measurements. The later
 Tunnel, SSH, Relay, and Resolver snapshots are documented separately.

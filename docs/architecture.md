@@ -157,8 +157,11 @@ authentication, or own a long-lived session.
 
 The v0 runtime echo loop exists only to validate long-lived bidirectional
 streams and uses bounded buffers. The stream is intentionally insecure and is
-restricted to loopback/deterministic test use. Security, transfer, tunnel,
-discovery, multiplexing, and cross-domain connectivity are later checkpoints.
+restricted to loopback/deterministic test use. Active stream introspection
+reports backend, selected route, optional RTT, endpoints, age, and byte
+counters through the loopback-only diagnostic surface. Security, transfer,
+tunnel, discovery, multiplexing, and cross-domain connectivity are later
+checkpoints.
 
 ## Jobs
 

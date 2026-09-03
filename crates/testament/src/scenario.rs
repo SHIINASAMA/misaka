@@ -1760,6 +1760,7 @@ fn n13_iroh_active_path_observability(ctx: &mut Context) -> Result<(), ScenarioE
             .remote_endpoint
             .as_deref()
             .is_some_and(|endpoint| endpoint.starts_with("iroh://"))
+        || active.rtt_ms.is_none()
         || active.rx_bytes == 0
     {
         return Err(ScenarioError::assertion(format!(

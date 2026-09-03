@@ -138,6 +138,7 @@ pub struct NetworkStream {
 pub struct PathInfo {
     pub backend: String,
     pub route: String,
+    pub rtt_ms: Option<u64>,
     pub local_endpoint: Option<String>,
     pub remote_endpoint: Option<String>,
 }
@@ -152,9 +153,15 @@ impl PathInfo {
         Self {
             backend: backend.into(),
             route: route.into(),
+            rtt_ms: None,
             local_endpoint,
             remote_endpoint,
         }
+    }
+
+    pub fn with_rtt_ms(mut self, rtt_ms: Option<u64>) -> Self {
+        self.rtt_ms = rtt_ms;
+        self
     }
 
     fn unknown() -> Self {
@@ -540,6 +547,7 @@ mod tests {
         let path = outgoing.path_info();
         assert_eq!(path.backend, "iroh");
         assert_eq!(path.route, "direct");
+        assert!(path.rtt_ms.is_some());
         assert!(path.remote_endpoint.is_some());
         let (mut incoming, _) = accept_task.await.unwrap();
 

@@ -77,6 +77,8 @@ pub struct ActiveStreamSnapshot {
     pub stream_id: u64,
     pub backend: String,
     pub route: String,
+    #[serde(default)]
+    pub rtt_ms: Option<u64>,
     pub local_endpoint: Option<String>,
     pub remote_endpoint: Option<String>,
     pub connected_for_ms: u64,

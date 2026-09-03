@@ -211,11 +211,13 @@ impl crate::NetworkBackend for IrohBackend {
             peer_id = %connection.remote_id(),
             "Iroh network stream connected"
         );
+        let (route, rtt_ms) = selected_path_metrics(&connection);
         Ok(network_stream_with_metadata(
             send,
             recv,
             self.endpoint.clone(),
-            selected_route(&connection),
+            route,
+            rtt_ms,
             remote_endpoint,
         ))
     }
@@ -259,7 +261,7 @@ impl NetworkListenerDriver for IrohListener {
                     .map_err(|error| NetworkError::Iroh(error.to_string()))?;
             read_and_validate_handshake(&mut recv).await?;
             write_handshake(&mut send).await?;
-            let route = selected_route(&connection);
+            let (route, rtt_ms) = selected_path_metrics(&connection);
             let peer_addr = match remote_addr {
                 IncomingAddr::Ip(addr) => addr,
                 IncomingAddr::Relay { .. } | IncomingAddr::Custom(_) => {
@@ -289,7 +291,8 @@ impl NetworkListenerDriver for IrohListener {
                             .next()
                             .map(|addr| addr.to_string()),
                         Some(format!("iroh://{}", connection.remote_id())),
-                    ),
+                    )
+                    .with_rtt_ms(rtt_ms),
                 ),
                 peer_addr,
             ))
@@ -314,13 +317,8 @@ fn network_stream(
     let remote_endpoint = serde_json::to_string(&EndpointAddr::new(connection.remote_id()))
         .ok()
         .map(|value| format!("iroh://{value}"));
-    network_stream_with_metadata(
-        send,
-        recv,
-        endpoint,
-        selected_route(connection),
-        remote_endpoint,
-    )
+    let (route, rtt_ms) = selected_path_metrics(connection);
+    network_stream_with_metadata(send, recv, endpoint, route, rtt_ms, remote_endpoint)
 }
 
 fn network_stream_with_metadata(
@@ -328,6 +326,7 @@ fn network_stream_with_metadata(
     recv: RecvStream,
     endpoint: Endpoint,
     route: impl Into<String>,
+    rtt_ms: Option<u64>,
     remote_endpoint: Option<String>,
 ) -> NetworkStream {
     NetworkStream::from_stream_with_path(
@@ -345,25 +344,27 @@ fn network_stream_with_metadata(
                 .next()
                 .map(|addr| addr.to_string()),
             remote_endpoint,
-        ),
+        )
+        .with_rtt_ms(rtt_ms),
     )
 }
 
-fn selected_route(connection: &Connection) -> &'static str {
+fn selected_path_metrics(connection: &Connection) -> (&'static str, Option<u64>) {
     connection
         .paths()
         .iter()
         .find(|path| path.is_selected())
         .map(|path| {
-            if path.is_ip() {
+            let route = if path.is_ip() {
                 "direct"
             } else if path.is_relay() {
                 "relay"
             } else {
                 "custom"
-            }
+            };
+            (route, Some(path.rtt().as_millis() as u64))
         })
-        .unwrap_or("unknown")
+        .unwrap_or(("unknown", None))
 }
 
 impl AsyncRead for IrohStream {

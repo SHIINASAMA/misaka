@@ -653,10 +653,14 @@ fn print_network_ps(report: &NetworkPsReport) {
         println!("────────────────────────────────");
         for stream in &report.active_streams {
             println!(
-                "  #{}  {} / {}  remote={}  tx={}  rx={}  age={}ms",
+                "  #{}  {} / {}  rtt={}  remote={}  tx={}  rx={}  age={}ms",
                 stream.stream_id,
                 stream.backend,
                 stream.route,
+                stream
+                    .rtt_ms
+                    .map(|rtt| format!("{rtt}ms"))
+                    .unwrap_or_else(|| "-".to_string()),
                 stream.remote_endpoint.as_deref().unwrap_or("-"),
                 stream.tx_bytes,
                 stream.rx_bytes,
@@ -773,9 +777,12 @@ async fn run_stream_test(
     let connect_ms = connect_started.elapsed().as_millis();
     let path = stream.path_info();
     println!(
-        "Stream path: backend={} route={} local={} remote={} setup_ms={connect_ms}",
+        "Stream path: backend={} route={} rtt_ms={} local={} remote={} setup_ms={connect_ms}",
         path.backend,
         path.route,
+        path.rtt_ms
+            .map(|rtt| rtt.to_string())
+            .unwrap_or_else(|| "-".to_string()),
         path.local_endpoint.as_deref().unwrap_or("-"),
         path.remote_endpoint.as_deref().unwrap_or("-"),
     );
