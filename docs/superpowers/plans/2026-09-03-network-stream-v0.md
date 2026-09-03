@@ -914,3 +914,14 @@ QUIC bidirectional stream, without changing the runtime's Direct TCP default.
 - [x] Make duplicate chunks idempotent, reject bad per-chunk digests, and
   serialize final SHA-256 verification plus destination finalization.
 - [x] Verify the behavior with runtime unit coverage; 44 runtime tests pass.
+
+### Task 56: Add the opt-in parallel CLI sender
+
+**Files:**
+- Modify: `crates/misaka-cli/src/main.rs`
+
+- [x] Add `cp --parallel` with a bounded 1–8 worker count; preserve
+  sequential Transfer v1 when the value is 1.
+- [x] Implement v2 prepare, bounded worker streams, per-chunk ack validation,
+  and finalize using the existing Direct TCP/Iroh endpoint selection.
+- [x] Cover CLI parsing and default compatibility with 11 CLI tests.

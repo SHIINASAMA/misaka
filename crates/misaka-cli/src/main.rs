@@ -5,7 +5,8 @@ use misaka_core::introspection::{
 use misaka_core::protocol::{
     finalize_transfer_digest, transfer_digest, update_transfer_digest, Envelope, MessageType,
     TransferRequest, TransferResult, TransferV1Ack, TransferV1Chunk, TransferV1Request,
-    TransferV1Resume, TunnelRequest, TRANSFER_MAGIC, TRANSFER_V1_CHUNK_SIZE, TRANSFER_V1_MAGIC,
+    TransferV1Resume, TransferV2Ack, TransferV2Operation, TransferV2Request, TransferV2Resume,
+    TunnelRequest, TRANSFER_MAGIC, TRANSFER_V1_CHUNK_SIZE, TRANSFER_V1_MAGIC, TRANSFER_V2_MAGIC,
     TUNNEL_MAGIC,
 };
 use misaka_network::{NetworkBackend, NetworkEndpoint};
@@ -18,10 +19,12 @@ use misaka_runtime::node::SisterNode;
 use misaka_runtime::peer_store::PeerStore;
 use misaka_runtime::resources::{ResourceProvider, SysinfoResourceProvider};
 use misaka_runtime::runtime::{default_encryption_key, SisterRuntime};
+use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
+use tokio::task::JoinSet;
 
 #[derive(Parser)]
 #[command(name = "misaka")]
@@ -148,6 +151,10 @@ enum Command {
         /// Resume from the remote Sister's durable chunk boundary.
         #[arg(long)]
         resume: bool,
+
+        /// Number of concurrent Transfer v2 chunk workers (1 keeps v1).
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=8))]
+        parallel: u8,
     },
 
     /// Forward a local TCP port to a remote Sister-local TCP endpoint.
@@ -393,8 +400,9 @@ async fn main() -> Result<(), MisakaError> {
             source,
             destination,
             resume,
+            parallel,
         } => {
-            run_copy(&source, &destination, resume, iroh_relay.clone())
+            run_copy(&source, &destination, resume, parallel, iroh_relay.clone())
                 .await
                 .map_err(MisakaError::Other)?;
         }
@@ -1037,8 +1045,15 @@ async fn run_copy(
     source: &Path,
     destination: &str,
     resume: bool,
+    parallel: u8,
     iroh_relay: Option<iroh::RelayUrl>,
 ) -> Result<(), String> {
+    if parallel > 1 {
+        if !resume {
+            return Err("--parallel requires --resume".to_string());
+        }
+        return run_copy_v2(source, destination, parallel, iroh_relay).await;
+    }
     if resume {
         return run_copy_v1(source, destination, iroh_relay).await;
     }
@@ -1254,6 +1269,243 @@ async fn run_copy_v1(
     }
 
     finish_copy_v1(&mut stream, peer_id, &remote_path, size, digest).await
+}
+
+async fn run_copy_v2(
+    source: &Path,
+    destination: &str,
+    parallel: u8,
+    iroh_relay: Option<iroh::RelayUrl>,
+) -> Result<(), String> {
+    let (peer_id, remote_path) = parse_copy_destination(destination)?;
+    let peer = PeerStore::load_from_file()
+        .into_iter()
+        .find(|peer| peer.id == peer_id)
+        .ok_or_else(|| format!("Sister #{peer_id} is not in the local peer store"))?;
+    let endpoint = peer
+        .stream_endpoints
+        .first()
+        .ok_or_else(|| format!("Sister #{peer_id} has no stream endpoint"))?
+        .parse::<NetworkEndpoint>()
+        .map_err(|error| error.to_string())?;
+
+    let mut file = tokio::fs::File::open(source)
+        .await
+        .map_err(|error| format!("open source {}: {error}", source.display()))?;
+    let size = file
+        .metadata()
+        .await
+        .map_err(|error| format!("stat source {}: {error}", source.display()))?
+        .len();
+    let digest = hash_file_v1(&mut file).await?;
+    let chunk_size = u64::from(TRANSFER_V1_CHUNK_SIZE);
+    let chunk_count = size.div_ceil(chunk_size);
+    let base_request = TransferV2Request {
+        operation: TransferV2Operation::Prepare,
+        destination: remote_path.display().to_string(),
+        size,
+        digest,
+        chunk_size: TRANSFER_V1_CHUNK_SIZE,
+        chunk_count,
+        index: 0,
+        offset: 0,
+        len: 0,
+        chunk_digest: [0; 32],
+    };
+    let resume = match send_transfer_v2_control(
+        endpoint.clone(),
+        peer_id,
+        peer.stream_certificate.as_deref(),
+        iroh_relay.clone(),
+        base_request.clone(),
+    )
+    .await?
+    {
+        TransferV2ResumeOrAck::Resume(resume) => resume,
+        TransferV2ResumeOrAck::Ack(_) => {
+            return Err("remote returned an acknowledgement for transfer v2 prepare".to_string())
+        }
+    };
+    if let Some(error) = resume.error {
+        return Err(format!(
+            "remote parallel transfer prepare rejected: {error}"
+        ));
+    }
+    if resume
+        .completed_indices
+        .iter()
+        .any(|index| *index >= chunk_count)
+    {
+        return Err("remote returned an invalid completed chunk index".to_string());
+    }
+    let completed: HashSet<u64> = resume.completed_indices.into_iter().collect();
+    let worker_count = usize::from(parallel);
+    let mut workers = JoinSet::new();
+    for index in (0..chunk_count).filter(|index| !completed.contains(index)) {
+        let source = source.to_owned();
+        let endpoint = endpoint.clone();
+        let certificate = peer.stream_certificate.clone();
+        let relay = iroh_relay.clone();
+        let request = base_request.clone();
+        workers.spawn(async move {
+            send_transfer_v2_chunk(
+                &source,
+                endpoint,
+                peer_id,
+                certificate.as_deref(),
+                relay,
+                request,
+                index,
+            )
+            .await
+        });
+        if workers.len() >= worker_count {
+            match workers.join_next().await {
+                Some(Ok(Ok(()))) => {}
+                Some(Ok(Err(error))) => {
+                    workers.abort_all();
+                    return Err(error);
+                }
+                Some(Err(error)) => {
+                    workers.abort_all();
+                    return Err(format!("parallel transfer worker failed: {error}"));
+                }
+                None => return Err("parallel transfer worker set ended unexpectedly".to_string()),
+            }
+        }
+    }
+    while let Some(result) = workers.join_next().await {
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                workers.abort_all();
+                return Err(error);
+            }
+            Err(error) => {
+                workers.abort_all();
+                return Err(format!("parallel transfer worker failed: {error}"));
+            }
+        }
+    }
+
+    let finalize = match send_transfer_v2_control(
+        endpoint,
+        peer_id,
+        peer.stream_certificate.as_deref(),
+        iroh_relay,
+        TransferV2Request {
+            operation: TransferV2Operation::Finalize,
+            ..base_request
+        },
+    )
+    .await?
+    {
+        TransferV2ResumeOrAck::Ack(ack) => ack,
+        TransferV2ResumeOrAck::Resume(_) => {
+            return Err("remote returned a resume response for transfer v2 finalize".to_string())
+        }
+    };
+    if !finalize.accepted || !finalize.complete {
+        return Err(finalize
+            .error
+            .unwrap_or_else(|| "remote parallel transfer finalization failed".to_string()));
+    }
+    println!(
+        "Parallel copy of {} bytes to Sister #{peer_id}:{} (workers={worker_count})",
+        size,
+        remote_path.display()
+    );
+    Ok(())
+}
+
+async fn send_transfer_v2_control(
+    endpoint: NetworkEndpoint,
+    peer_id: u64,
+    peer_certificate: Option<&[u8]>,
+    iroh_relay: Option<iroh::RelayUrl>,
+    request: TransferV2Request,
+) -> Result<TransferV2ResumeOrAck, String> {
+    let mut stream = connect_peer_stream(endpoint, peer_id, peer_certificate, iroh_relay).await?;
+    stream
+        .write_all(TRANSFER_V2_MAGIC)
+        .await
+        .map_err(|error| format!("write transfer v2 preamble: {error}"))?;
+    write_cli_bincode_frame(&mut stream, &request).await?;
+    match request.operation {
+        TransferV2Operation::Prepare => read_cli_bincode_frame(&mut stream, 1024 * 1024)
+            .await
+            .map(TransferV2ResumeOrAck::Resume),
+        TransferV2Operation::Finalize => read_cli_bincode_frame(&mut stream, 1024 * 1024)
+            .await
+            .map(TransferV2ResumeOrAck::Ack),
+        TransferV2Operation::Chunk => {
+            Err("transfer v2 control helper received chunk operation".to_string())
+        }
+    }
+}
+
+enum TransferV2ResumeOrAck {
+    Resume(TransferV2Resume),
+    Ack(TransferV2Ack),
+}
+
+async fn send_transfer_v2_chunk(
+    source: &Path,
+    endpoint: NetworkEndpoint,
+    peer_id: u64,
+    peer_certificate: Option<&[u8]>,
+    iroh_relay: Option<iroh::RelayUrl>,
+    base_request: TransferV2Request,
+    index: u64,
+) -> Result<(), String> {
+    let offset = index * u64::from(base_request.chunk_size);
+    let len = base_request
+        .size
+        .saturating_sub(offset)
+        .min(u64::from(base_request.chunk_size)) as usize;
+    let mut file = tokio::fs::File::open(source)
+        .await
+        .map_err(|error| format!("open source chunk: {error}"))?;
+    tokio::io::AsyncSeekExt::seek(&mut file, std::io::SeekFrom::Start(offset))
+        .await
+        .map_err(|error| format!("seek source chunk: {error}"))?;
+    let mut payload = vec![0u8; len];
+    tokio::io::AsyncReadExt::read_exact(&mut file, &mut payload)
+        .await
+        .map_err(|error| format!("read source chunk: {error}"))?;
+
+    let mut stream = connect_peer_stream(endpoint, peer_id, peer_certificate, iroh_relay).await?;
+    stream
+        .write_all(TRANSFER_V2_MAGIC)
+        .await
+        .map_err(|error| format!("write transfer v2 chunk preamble: {error}"))?;
+    write_cli_bincode_frame(
+        &mut stream,
+        &TransferV2Request {
+            operation: TransferV2Operation::Chunk,
+            index,
+            offset,
+            len: len as u32,
+            chunk_digest: transfer_digest(&payload),
+            ..base_request
+        },
+    )
+    .await?;
+    stream
+        .write_all(&payload)
+        .await
+        .map_err(|error| format!("write transfer v2 chunk: {error}"))?;
+    stream
+        .flush()
+        .await
+        .map_err(|error| format!("flush transfer v2 chunk: {error}"))?;
+    let ack: TransferV2Ack = read_cli_bincode_frame(&mut stream, 1024 * 1024).await?;
+    if ack.index != index || !ack.accepted {
+        return Err(ack
+            .error
+            .unwrap_or_else(|| format!("remote rejected transfer v2 chunk {index}")));
+    }
+    Ok(())
 }
 
 async fn finish_copy_v1(
@@ -1873,5 +2125,60 @@ mod stream_tests {
     fn sister_id_accepts_display_prefix() {
         assert_eq!(super::parse_sister_id("#10032").unwrap(), 10032);
         assert_eq!(super::parse_sister_id("10032").unwrap(), 10032);
+    }
+
+    #[test]
+    fn parallel_copy_accepts_bounded_worker_count() {
+        let cli = Cli::try_parse_from([
+            "misaka",
+            "cp",
+            "source",
+            "#10032:/tmp/result",
+            "--resume",
+            "--parallel",
+            "4",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Cp {
+                resume: true,
+                parallel: 4,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parallel_copy_rejects_zero_workers() {
+        assert!(Cli::try_parse_from([
+            "misaka",
+            "cp",
+            "source",
+            "#10032:/tmp/result",
+            "--parallel",
+            "0",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn resumable_copy_defaults_to_sequential_v1() {
+        let cli = Cli::try_parse_from([
+            "misaka",
+            "cp",
+            "source",
+            "#10032:/tmp/result",
+            "--resume",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Cp {
+                resume: true,
+                parallel: 1,
+                ..
+            }
+        ));
     }
 }

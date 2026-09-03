@@ -62,11 +62,11 @@
 - Adds `misaka cp --resume --parallel <N>` with a bounded worker count.
 - Uses the existing endpoint parser and `connect_peer_stream`; no transport-specific protocol code is added outside the current stream selection helpers.
 
-- [ ] Add failing CLI parser/helper tests for rejecting `--parallel 0`, keeping sequential v1 for `--parallel 1`, and selecting v2 only when the value is greater than one.
-- [ ] Implement manifest preparation, concurrent source-range reads, per-worker stream requests, ack validation, and finalize result validation using `FuturesUnordered` or `buffer_unordered` with a maximum of eight workers.
-- [ ] Keep source reads bounded to one chunk per worker and abort remaining workers on the first error.
-- [ ] Run CLI and workspace tests, then build `misaka`.
-- [ ] Commit `feat(transfer): send chunks concurrently`.
+- [x] Add failing CLI parser/helper tests for rejecting `--parallel 0`, keeping sequential v1 for `--parallel 1`, and selecting v2 only when the value is greater than one.
+- [x] Implement manifest preparation, concurrent source-range reads, per-worker stream requests, ack validation, and finalize result validation using a bounded `JoinSet` with a maximum of eight workers.
+- [x] Keep source reads bounded to one chunk per worker and abort remaining workers on the first error.
+- [x] Run CLI tests and build `misaka`.
+- [x] Commit `feat(transfer): send chunks concurrently`.
 
 ### Task 57: Verify the public path through Testament
 
