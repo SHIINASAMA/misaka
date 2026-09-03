@@ -707,6 +707,10 @@ pub fn network_scenarios() -> Vec<ScenarioDef> {
             name: "N12_iroh_transfer_v1",
             run: Box::new(n12_iroh_transfer_v1),
         },
+        ScenarioDef {
+            name: "N13_iroh_active_path_observability",
+            run: Box::new(n13_iroh_active_path_observability),
+        },
     ]
 }
 
@@ -1667,6 +1671,125 @@ fn n12_iroh_transfer_v1(ctx: &mut Context) -> Result<(), ScenarioError> {
     let received = std::fs::read(&destination)
         .map_err(|error| ScenarioError::assertion(format!("read Iroh destination: {error}")))?;
     assert::assert_eq(received, payload, "Iroh transfer bytes")?;
+    Ok(())
+}
+
+/// N13: verify Iroh path metadata through real Sister processes while the
+/// logical stream is still open, including the public ps view and cleanup.
+fn n13_iroh_active_path_observability(ctx: &mut Context) -> Result<(), ScenarioError> {
+    ctx.start_iroh_pair()?;
+    let a_introspect = introspect_addr_of(ctx, "a")?;
+    let b_introspect = introspect_addr_of(ctx, "b")?;
+    let b_id = ctx.introspect("b")?.identity.id.as_u64();
+    assert::eventually(
+        a_introspect,
+        "a learns b Iroh stream candidate",
+        Duration::from_secs(12),
+        |snapshot| {
+            snapshot.peers.iter().any(|peer| {
+                peer.id == b_id
+                    && peer
+                        .stream_endpoints
+                        .iter()
+                        .any(|endpoint| endpoint.starts_with("iroh://"))
+            })
+        },
+    )?;
+    let snapshot = observer::fetch(a_introspect, Duration::from_millis(500))
+        .map_err(|error| ScenarioError::infra(format!("fetch Iroh candidate: {error}")))?;
+    let endpoint = snapshot
+        .peers
+        .iter()
+        .find(|peer| peer.id == b_id)
+        .and_then(|peer| {
+            peer.stream_endpoints
+                .iter()
+                .find(|endpoint| endpoint.starts_with("iroh://"))
+        })
+        .cloned()
+        .ok_or_else(|| ScenarioError::assertion("Iroh candidate disappeared unexpectedly"))?;
+
+    let ready_file = ctx.layout.root.join("n13-iroh-stream-ready");
+    let ready_file_arg = ready_file.to_string_lossy().to_string();
+    let mut client = ctx.spawn_cli(
+        "a",
+        &[
+            "stream-test",
+            "--endpoint",
+            &endpoint,
+            "--mode",
+            "hold",
+            "--ready-file",
+            &ready_file_arg,
+        ],
+    )?;
+    wait_for_stream_ready(&mut client, &ready_file, Duration::from_secs(12))?;
+    assert::eventually(
+        b_introspect,
+        "b reports an active Iroh stream",
+        Duration::from_secs(8),
+        |snapshot| {
+            snapshot
+                .active_streams
+                .iter()
+                .any(|stream| stream.backend == "iroh")
+        },
+    )?;
+    let snapshot = observer::fetch(b_introspect, Duration::from_millis(500))
+        .map_err(|error| ScenarioError::infra(format!("fetch active Iroh stream: {error}")))?;
+    let active = snapshot
+        .active_streams
+        .iter()
+        .find(|stream| stream.backend == "iroh")
+        .ok_or_else(|| ScenarioError::assertion("active Iroh stream disappeared unexpectedly"))?;
+    assert::assert_eq(
+        active.route.clone(),
+        "direct".to_string(),
+        "active Iroh route on loopback",
+    )?;
+    if active.local_endpoint.is_none()
+        || !active
+            .remote_endpoint
+            .as_deref()
+            .is_some_and(|endpoint| endpoint.starts_with("iroh://"))
+        || active.rx_bytes == 0
+    {
+        return Err(ScenarioError::assertion(format!(
+            "active Iroh path telemetry incomplete: {active:?}"
+        )));
+    }
+
+    let introspect_arg = b_introspect.to_string();
+    let ps_output = ctx.run_cli("b", &["ps", "--json", "--introspect", &introspect_arg])?;
+    let ps: serde_json::Value = serde_json::from_str(&ps_output)
+        .map_err(|error| ScenarioError::assertion(format!("decode Iroh ps JSON: {error}")))?;
+    let ps_active = ps
+        .get("active_streams")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|streams| {
+            streams.iter().find(|stream| {
+                stream.get("backend").and_then(serde_json::Value::as_str) == Some("iroh")
+            })
+        })
+        .ok_or_else(|| ScenarioError::assertion("misaka ps did not report active Iroh stream"))?;
+    assert::assert_eq(
+        ps_active.get("route").and_then(serde_json::Value::as_str),
+        Some("direct"),
+        "misaka ps active Iroh route",
+    )?;
+
+    client.terminate();
+    let _ = client
+        .wait_timeout(Duration::from_secs(8))
+        .map_err(|error| {
+            ScenarioError::infra(format!("wait Iroh observability client: {error}"))
+        })?;
+    assert::eventually(
+        b_introspect,
+        "b removes the closed active Iroh stream",
+        Duration::from_secs(8),
+        |snapshot| snapshot.active_streams.is_empty(),
+    )?;
     Ok(())
 }
 

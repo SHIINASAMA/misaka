@@ -83,7 +83,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Run the Network Stream, Transfer, Tunnel, Iroh, and observability scenarios (N01-N12).
+    /// Run the Network Stream, Transfer, Tunnel, Iroh, and observability scenarios (N01-N13).
     #[command(name = "network-verify")]
     NetworkVerify {
         #[arg(long)]
@@ -220,7 +220,11 @@ fn run_one(scenario: &str, json: bool) -> i32 {
         }
     };
     let mut ctx = Context::new(run_id, layout.clone());
-    let Some(def) = scenarios().into_iter().find(|d| d.name == scenario) else {
+    let Some(def) = scenarios()
+        .into_iter()
+        .chain(network_scenarios())
+        .find(|d| d.name == scenario)
+    else {
         eprintln!("testament: unknown scenario {:?}", scenario);
         return 2;
     };
