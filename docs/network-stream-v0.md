@@ -45,8 +45,10 @@ control-plane address and exposes `SisterConnector::connect_to_sister(SisterId)`
 in `misaka-runtime`. It tries stored TCP candidates in order. mDNS now carries
 the stream port as metadata and feeds the same peer state, but does not open a
 stream itself; non-loopback stream candidates are withheld while the stream is
-insecure and loopback-only. Reconnection policy, session ownership, and
-authentication are not part of this layer.
+insecure and loopback-only. `ConnectionManager` adds explicit per-Sister
+lifecycle state and fresh-stream reconnect after callers mark a previous
+stream disconnected; it does not transparently recover sessions or retry in
+the background. Authentication remains a separate phase.
 
 The handshake contains only the `MISAKA_STREAM` magic and protocol version 1.
 It carries no Sister identity, credentials, permissions, service metadata, or

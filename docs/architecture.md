@@ -106,8 +106,10 @@ loopback-only listener and is never sent in Hello, State, or mDNS records.
 
 `PeerStateTable` is in-memory knowledge. `PeerStore` serializes the minimal
 peer blueprint needed by the standalone CLI to reconnect to known peers.
-Hello exchanges identity and listen address; State exchanges resource and
-queue metadata. Peer timeout cleanup removes stale entries.
+Hello exchanges identity, listen address, and an optional loopback stream
+candidate; State exchanges resource, queue, and stream-candidate metadata.
+The mDNS record carries the same optional stream candidate metadata. Peer
+timeout cleanup removes stale entries.
 
 The current transport uses short-lived TCP connections. Each message is
 encoded with bincode, encrypted with AES-256-GCM, and framed as:

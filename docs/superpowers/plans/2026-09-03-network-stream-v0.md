@@ -313,3 +313,35 @@ follow-up phases.
   metadata-only mDNS stream advertisement boundary.
 - [x] Run the complete Rust and Testament verification gates.
 - [x] Record the addressing result and the next ConnectionManager lifecycle phase.
+
+## Phase 4: ConnectionManager v0
+
+ConnectionManager v0 owns only the lifecycle state around a Sister stream
+connection. It does not multiplex streams, recover an existing stream, or
+perform background retry; callers explicitly open a new stream after marking
+the previous one disconnected.
+
+### Task 19: Add explicit connection lifecycle state
+
+**Files:**
+- Modify: `crates/misaka-runtime/src/connection.rs`
+
+- [x] Add `Disconnected`, `Connecting`, and `Connected` states per Sister.
+- [x] Add `open_stream(SisterId)` to transition through connecting and return a
+  fresh stream, resetting failed attempts to disconnected.
+- [x] Add `mark_disconnected(SisterId)` so session owners can report EOF/I/O
+  failure without pretending an old stream was recovered.
+- [x] Add state and reconnect tests.
+
+### Task 20: Verify and document ConnectionManager v0
+
+**Files:**
+- Modify: `docs/architecture.md`
+- Modify: `docs/network-stream-v0.md`
+- Modify: `docs/superpowers/plans/2026-09-03-network-stream-v0.md`
+- Modify: `'/Users/kaoru/Documents/Obsidian Vault/Misaka Network — Network Stream v0.md'`
+
+- [x] Document explicit reconnect and the absence of transparent session
+  recovery.
+- [x] Run the complete Rust and Testament verification gates.
+- [x] Create a snapshot commit for ConnectionManager v0.
