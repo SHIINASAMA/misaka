@@ -2,6 +2,40 @@ use serde::{Deserialize, Serialize};
 
 /// Current version of the encrypted wire envelope.
 pub const PROTOCOL_VERSION: u16 = 2;
+/// Service preamble for the v0 file-transfer stream.
+pub const TRANSFER_MAGIC: &[u8; 4] = b"MTR0";
+
+const TRANSFER_DIGEST_PRIME: u64 = 0x100000001b3;
+
+/// Update the v0 transfer integrity digest. This is an integrity checksum,
+/// not cryptographic authentication; secure streams rely on TLS for that.
+pub fn update_transfer_digest(state: &mut [u64; 4], bytes: &[u8]) {
+    for byte in bytes.iter().copied() {
+        for lane in state.iter_mut() {
+            *lane ^= u64::from(byte);
+            *lane = (*lane).wrapping_mul(TRANSFER_DIGEST_PRIME);
+        }
+    }
+}
+
+pub fn finalize_transfer_digest(state: [u64; 4]) -> [u8; 32] {
+    let mut digest = [0u8; 32];
+    for (index, lane) in state.iter().enumerate() {
+        digest[index * 8..(index + 1) * 8].copy_from_slice(&lane.to_le_bytes());
+    }
+    digest
+}
+
+pub fn transfer_digest(bytes: &[u8]) -> [u8; 32] {
+    let mut state = [
+        0xcbf29ce484222325,
+        0x84222325cbf29ce4,
+        0x9e3779b185ebca87,
+        0xd6e8feb86659fd93,
+    ];
+    update_transfer_digest(&mut state, bytes);
+    finalize_transfer_digest(state)
+}
 
 /// 消息类型枚举 (对等网络，无主从之分)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,6 +144,23 @@ pub struct JobResultData {
     pub finished_at: u64,
 }
 
+/// Header for the v0 file-transfer service carried over a NetworkStream.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TransferRequest {
+    pub destination: String,
+    pub size: u64,
+    pub digest: [u8; 32],
+}
+
+/// Completion result for a v0 file-transfer service.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TransferResult {
+    pub success: bool,
+    pub bytes_written: u64,
+    pub digest: [u8; 32],
+    pub error: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,5 +188,32 @@ mod tests {
             created_at: 0,
         };
         assert_eq!(j.full_command(), "echo a b");
+    }
+
+    #[test]
+    fn transfer_contract_roundtrips_bincode() {
+        let request = TransferRequest {
+            destination: "/tmp/result.bin".into(),
+            size: 3,
+            digest: [7; 32],
+        };
+        let encoded = bincode::serialize(&request).unwrap();
+        let decoded: TransferRequest = bincode::deserialize(&encoded).unwrap();
+        assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn transfer_digest_is_independent_of_chunking() {
+        let input = b"chunk-safe transfer digest";
+        let whole = transfer_digest(input);
+        let mut state = [
+            0xcbf29ce484222325,
+            0x84222325cbf29ce4,
+            0x9e3779b185ebca87,
+            0xd6e8feb86659fd93,
+        ];
+        update_transfer_digest(&mut state, &input[..7]);
+        update_transfer_digest(&mut state, &input[7..]);
+        assert_eq!(finalize_transfer_digest(state), whole);
     }
 }

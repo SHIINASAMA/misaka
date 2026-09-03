@@ -7,6 +7,10 @@
 use crate::config::RuntimeConfig;
 use crate::node::SisterNode;
 use crate::shutdown::Shutdown;
+use misaka_core::protocol::{
+    finalize_transfer_digest, update_transfer_digest, TransferRequest, TransferResult,
+    TRANSFER_MAGIC,
+};
 use misaka_core::SisterIdentity;
 use misaka_network::{NetworkBackend, NetworkEndpoint};
 use std::collections::HashSet;
@@ -334,6 +338,14 @@ async fn stream_accept_loop(node: SisterNode, listener: misaka_network::NetworkL
 
 async fn echo_stream(mut stream: misaka_network::NetworkStream) -> std::io::Result<()> {
     stream.write_all(b"world").await?;
+    let mut preamble = [0u8; TRANSFER_MAGIC.len()];
+    if stream.read_exact(&mut preamble).await.is_err() {
+        return Ok(());
+    }
+    if preamble == *TRANSFER_MAGIC {
+        return receive_transfer(stream).await;
+    }
+    stream.write_all(&preamble).await?;
     let mut buffer = [0u8; 64 * 1024];
     loop {
         let read = stream.read(&mut buffer).await?;
@@ -342,6 +354,68 @@ async fn echo_stream(mut stream: misaka_network::NetworkStream) -> std::io::Resu
         }
         stream.write_all(&buffer[..read]).await?;
     }
+}
+
+async fn receive_transfer(mut stream: misaka_network::NetworkStream) -> std::io::Result<()> {
+    let mut length = [0u8; 4];
+    stream.read_exact(&mut length).await?;
+    let header_len = u32::from_be_bytes(length) as usize;
+    if header_len > 1024 * 1024 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "transfer header exceeds 1 MiB",
+        ));
+    }
+    let mut header = vec![0u8; header_len];
+    stream.read_exact(&mut header).await?;
+    let request: TransferRequest = bincode::deserialize(&header)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let destination = std::path::PathBuf::from(&request.destination);
+    if let Some(parent) = destination.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let mut file = tokio::fs::File::create(&destination).await?;
+    let mut remaining = request.size;
+    let mut written = 0u64;
+    let mut digest = [
+        0xcbf29ce484222325,
+        0x84222325cbf29ce4,
+        0x9e3779b185ebca87,
+        0xd6e8feb86659fd93,
+    ];
+    let mut buffer = [0u8; 64 * 1024];
+    while remaining > 0 {
+        let read_limit = remaining.min(buffer.len() as u64) as usize;
+        let read = stream.read(&mut buffer[..read_limit]).await?;
+        if read == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "transfer ended before declared size",
+            ));
+        }
+        file.write_all(&buffer[..read]).await?;
+        update_transfer_digest(&mut digest, &buffer[..read]);
+        remaining -= read as u64;
+        written += read as u64;
+    }
+    file.flush().await?;
+    let digest = finalize_transfer_digest(digest);
+    let result = TransferResult {
+        success: written == request.size && digest == request.digest,
+        bytes_written: written,
+        digest,
+        error: (digest != request.digest).then(|| "SHA-256 digest mismatch".to_string()),
+    };
+    if !result.success {
+        let _ = tokio::fs::remove_file(&destination).await;
+    }
+    let encoded = bincode::serialize(&result)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    stream
+        .write_all(&(encoded.len() as u32).to_be_bytes())
+        .await?;
+    stream.write_all(&encoded).await?;
+    stream.flush().await
 }
 
 /// Default development encryption key shared by the current toy protocol.

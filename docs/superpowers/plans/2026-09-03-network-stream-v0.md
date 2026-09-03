@@ -422,3 +422,24 @@ loopback-only while those pieces are being integrated.
 - [x] Route SisterId connections through the secure backend and retain mDNS
   discovery as candidate metadata only.
 - [x] Add black-box LAN-style secure connection coverage (`N07_secure_lan_stream`).
+
+## Phase 7: Transfer v0
+
+Transfer v0 is intentionally a single bounded stream service. It resolves a
+peer from local `PeerStore` knowledge, opens its stored stream candidate, sends
+metadata followed by fixed-size chunks, and verifies the receiver's result.
+
+### Task 25: Add a minimal file-transfer service
+
+**Files:**
+- Modify: `crates/misaka-core/src/protocol.rs`
+- Modify: `crates/misaka-runtime/src/runtime.rs`
+- Modify: `crates/misaka-cli/src/main.rs`
+- Modify: `crates/testament/src/scenario.rs`
+- Create: `docs/transfer-v0.md`
+
+- [x] Add a versioned transfer preamble and serializable request/result.
+- [x] Stream files with bounded buffers and an integrity check.
+- [x] Add `misaka cp <source> #<sister-id>:/<path>` using PeerStore endpoint
+  resolution and secure peer certificates when available.
+- [x] Add black-box coverage for a real Sister-to-Sister transfer.

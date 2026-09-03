@@ -24,6 +24,8 @@ The payload in `data` is bincode-encoded message-specific data:
   certificate, resources, queue counters, uptime, capabilities;
 - `JobData`: job ID, creator, executor, creator address, command, arguments, creation time;
 - `JobResultData`: job ID, creator, executor, output, exit code, success, timestamps;
+- `TransferRequest`/`TransferResult`: bounded file metadata, integrity digest,
+  and completion status for the `MTR0` stream service;
 - `Ping`/`Pong`: empty payloads used for a read-only compatibility probe.
 
 ## Wire framing and encryption

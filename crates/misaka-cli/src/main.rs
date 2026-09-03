@@ -1,5 +1,8 @@
 use clap::{Parser, Subcommand};
-use misaka_core::protocol::{Envelope, MessageType};
+use misaka_core::protocol::{
+    finalize_transfer_digest, update_transfer_digest, Envelope, MessageType, TransferRequest,
+    TransferResult, TRANSFER_MAGIC,
+};
 use misaka_network::{NetworkBackend, NetworkEndpoint};
 use serde::Serialize;
 
@@ -12,6 +15,7 @@ use misaka_runtime::runtime::{default_encryption_key, SisterRuntime};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use tokio::io::AsyncWriteExt;
 
 #[derive(Parser)]
 #[command(name = "misaka")]
@@ -99,6 +103,15 @@ enum Command {
         /// TLS server name to validate, for example sister-42.
         #[arg(long)]
         server_name: Option<String>,
+    },
+
+    /// Copy one local file to a known Sister over its stream endpoint.
+    Cp {
+        /// Local source file.
+        source: PathBuf,
+
+        /// Remote target in the form #<sister-id>:/absolute/path.
+        destination: String,
     },
 
     /// Update the local Sister nickname.
@@ -253,6 +266,15 @@ async fn main() -> Result<(), MisakaError> {
             )
             .await
             .map_err(MisakaError::Other)?;
+        }
+
+        Command::Cp {
+            source,
+            destination,
+        } => {
+            run_copy(&source, &destination)
+                .await
+                .map_err(MisakaError::Other)?;
         }
 
         Command::Nickname { nickname } => {
@@ -585,6 +607,171 @@ async fn run_stream_test(
     }
 }
 
+async fn run_copy(source: &Path, destination: &str) -> Result<(), String> {
+    let (peer_id, remote_path) = parse_copy_destination(destination)?;
+    let peer = PeerStore::load_from_file()
+        .into_iter()
+        .find(|peer| peer.id == peer_id)
+        .ok_or_else(|| format!("Sister #{peer_id} is not in the local peer store"))?;
+    let endpoint = peer
+        .stream_endpoints
+        .first()
+        .ok_or_else(|| format!("Sister #{peer_id} has no stream endpoint"))?
+        .parse::<NetworkEndpoint>()
+        .map_err(|error| error.to_string())?;
+    let mut stream =
+        connect_peer_stream(endpoint, peer_id, peer.stream_certificate.as_deref()).await?;
+
+    let mut file = tokio::fs::File::open(source)
+        .await
+        .map_err(|error| format!("open source {}: {error}", source.display()))?;
+    let size = file
+        .metadata()
+        .await
+        .map_err(|error| format!("stat source {}: {error}", source.display()))?
+        .len();
+    let digest = hash_file(&mut file).await?;
+    tokio::io::AsyncSeekExt::seek(&mut file, std::io::SeekFrom::Start(0))
+        .await
+        .map_err(|error| format!("rewind source: {error}"))?;
+
+    stream
+        .write_all(TRANSFER_MAGIC)
+        .await
+        .map_err(|error| format!("write transfer preamble: {error}"))?;
+    let request = TransferRequest {
+        destination: remote_path.display().to_string(),
+        size,
+        digest,
+    };
+    let encoded = bincode::serialize(&request).map_err(|error| error.to_string())?;
+    stream
+        .write_all(&(encoded.len() as u32).to_be_bytes())
+        .await
+        .map_err(|error| format!("write transfer header: {error}"))?;
+    stream
+        .write_all(&encoded)
+        .await
+        .map_err(|error| format!("write transfer metadata: {error}"))?;
+
+    let mut sent = 0u64;
+    let mut buffer = vec![0u8; 64 * 1024];
+    while sent < size {
+        let read = tokio::io::AsyncReadExt::read(&mut file, &mut buffer)
+            .await
+            .map_err(|error| format!("read source: {error}"))?;
+        if read == 0 {
+            return Err("source changed while it was being copied".to_string());
+        }
+        stream
+            .write_all(&buffer[..read])
+            .await
+            .map_err(|error| format!("write transfer payload: {error}"))?;
+        sent += read as u64;
+    }
+    stream
+        .flush()
+        .await
+        .map_err(|error| format!("flush transfer payload: {error}"))?;
+
+    let mut length = [0u8; 4];
+    tokio::io::AsyncReadExt::read_exact(&mut stream, &mut length)
+        .await
+        .map_err(|error| format!("read transfer result: {error}"))?;
+    let result_len = u32::from_be_bytes(length) as usize;
+    if result_len > 1024 * 1024 {
+        return Err("transfer result exceeds 1 MiB".to_string());
+    }
+    let mut encoded_result = vec![0u8; result_len];
+    tokio::io::AsyncReadExt::read_exact(&mut stream, &mut encoded_result)
+        .await
+        .map_err(|error| format!("read transfer result body: {error}"))?;
+    let result: TransferResult = bincode::deserialize(&encoded_result)
+        .map_err(|error| format!("decode transfer result: {error}"))?;
+    if !result.success || result.bytes_written != size || result.digest != digest {
+        return Err(result
+            .error
+            .unwrap_or_else(|| "remote transfer integrity check failed".to_string()));
+    }
+    println!(
+        "Copied {} bytes to Sister #{peer_id}:{}",
+        size,
+        remote_path.display()
+    );
+    Ok(())
+}
+
+fn parse_copy_destination(value: &str) -> Result<(u64, PathBuf), String> {
+    let (id, path) = value
+        .strip_prefix('#')
+        .and_then(|value| value.split_once(':'))
+        .ok_or("destination must be #<sister-id>:/path")?;
+    let id = id
+        .parse::<u64>()
+        .map_err(|error| format!("invalid Sister ID: {error}"))?;
+    if path.is_empty() {
+        return Err("destination path must not be empty".to_string());
+    }
+    Ok((id, PathBuf::from(path)))
+}
+
+async fn connect_peer_stream(
+    endpoint: NetworkEndpoint,
+    peer_id: u64,
+    peer_certificate: Option<&[u8]>,
+) -> Result<misaka_network::NetworkStream, String> {
+    let stream = if let Some(peer_certificate) = peer_certificate {
+        let data_dir = IdentityStore::config_dir().map_err(|error| error.to_string())?;
+        let identity = misaka_runtime::tls_identity_store::TlsIdentityStore::load(&data_dir)
+            .map_err(|error| error.to_string())?
+            .ok_or("secure peer requires a local persisted TLS identity")?;
+        let config = identity
+            .client_config(peer_certificate)
+            .map_err(|error| error.to_string())?;
+        let client = misaka_network::tls::TlsClient::new(config, format!("sister-{peer_id}"))
+            .map_err(|error| error.to_string())?;
+        tokio::time::timeout(Duration::from_secs(10), client.connect(endpoint))
+            .await
+            .map_err(|_| "secure stream connect timed out".to_string())?
+            .map_err(|error| error.to_string())?
+    } else {
+        let backend = misaka_network::DirectTcpBackend;
+        tokio::time::timeout(Duration::from_secs(10), backend.connect(endpoint))
+            .await
+            .map_err(|_| "stream connect timed out".to_string())?
+            .map_err(|error| error.to_string())?
+    };
+    let mut stream = stream;
+    let mut greeting = [0u8; 5];
+    tokio::io::AsyncReadExt::read_exact(&mut stream, &mut greeting)
+        .await
+        .map_err(|error| format!("read stream greeting: {error}"))?;
+    if greeting != *b"world" {
+        return Err(format!("unexpected stream greeting: {greeting:?}"));
+    }
+    Ok(stream)
+}
+
+async fn hash_file(file: &mut tokio::fs::File) -> Result<[u8; 32], String> {
+    let mut hasher = [
+        0xcbf29ce484222325,
+        0x84222325cbf29ce4,
+        0x9e3779b185ebca87,
+        0xd6e8feb86659fd93,
+    ];
+    let mut buffer = vec![0u8; 64 * 1024];
+    loop {
+        let read = tokio::io::AsyncReadExt::read(file, &mut buffer)
+            .await
+            .map_err(|error| format!("hash source: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        update_transfer_digest(&mut hasher, &buffer[..read]);
+    }
+    Ok(finalize_transfer_digest(hasher))
+}
+
 fn mark_ready(path: Option<&Path>) -> Result<(), String> {
     if let Some(path) = path {
         std::fs::write(path, b"ready")
@@ -745,7 +932,8 @@ mod stream_tests {
             Command::StreamTest {
                 addr,
                 mode,
-                ready_file
+                ready_file,
+                ..
             } if addr == "127.0.0.1:31701".parse::<SocketAddr>().unwrap()
                 && mode == "large"
                 && ready_file.as_deref().is_some_and(|path| path == std::path::Path::new("/tmp/misaka-stream-ready"))

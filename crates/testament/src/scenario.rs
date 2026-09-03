@@ -639,6 +639,10 @@ pub fn network_scenarios() -> Vec<ScenarioDef> {
             name: "N07_secure_lan_stream",
             run: Box::new(n07_secure_lan_stream),
         },
+        ScenarioDef {
+            name: "N08_transfer_v0",
+            run: Box::new(n08_transfer_v0),
+        },
     ]
 }
 
@@ -1344,5 +1348,33 @@ fn n07_secure_lan_stream(ctx: &mut Context) -> Result<(), ScenarioError> {
             String::from_utf8_lossy(&output.stderr).trim()
         )));
     }
+    Ok(())
+}
+
+/// N08: resolve a peer by SisterId and transfer a file through the stream
+/// service, asserting the external result and the receiver's exact bytes.
+fn n08_transfer_v0(ctx: &mut Context) -> Result<(), ScenarioError> {
+    start_stream_pair(ctx)?;
+    let a_introspect = introspect_addr_of(ctx, "a")?;
+    let b_id = ctx.introspect("b")?.identity.id.as_u64();
+    assert::eventually(
+        a_introspect,
+        "a learns b stream candidate",
+        Duration::from_secs(8),
+        |s| s.peers.iter().any(|peer| peer.id == b_id),
+    )?;
+
+    let source = ctx.layout.root.join("transfer-source.bin");
+    let destination = ctx.layout.root.join("transfer-destination.bin");
+    let payload = b"transfer-v0-integrity-check".repeat(4096);
+    std::fs::write(&source, &payload)
+        .map_err(|error| ScenarioError::infra(format!("write transfer source: {error}")))?;
+    let source_arg = source.to_string_lossy().to_string();
+    let destination_arg = format!("#{b_id}:{}", destination.display());
+    let output = ctx.run_cli("a", &["cp", &source_arg, &destination_arg])?;
+    assert::assert_contains(&output, "Copied", "transfer completion output")?;
+    let received = std::fs::read(&destination)
+        .map_err(|error| ScenarioError::assertion(format!("read received file: {error}")))?;
+    assert::assert_eq(received, payload, "transferred bytes")?;
     Ok(())
 }
