@@ -148,7 +148,11 @@ async fn main() -> Result<(), MisakaError> {
                     .collect(),
             )
             .await?;
-            runtime.run().await?;
+            let shutdown = runtime.shutdown();
+            let signal_task = shutdown.install_signal_handler();
+            let result = runtime.run().await;
+            signal_task.abort();
+            result?;
         }
 
         Command::Nickname { nickname } => {

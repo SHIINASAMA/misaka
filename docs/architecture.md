@@ -1,69 +1,157 @@
 # Runtime architecture
 
-## Sister model
+## Foundation v1 completion boundary
 
-A running `SisterRuntime` is one complete Misaka node. It owns a `SisterNode` and a TCP listener, then starts the node's services. Nodes have equal capabilities; peer IDs identify nodes but do not confer authority.
+Foundation v1 establishes explicit ownership for all mutable peer/job state and
+unifies runtime shutdown. It deliberately does not introduce the next-round
+identity and authorization model (Ability, Tag, JobRequirements,
+HumanIdentity, Principal, Trust, Permission, or Authorization).
+
+## Sister model and ownership graph
+
+A running `SisterRuntime` is one complete Misaka node. Every node has equal
+capabilities; peer IDs identify nodes but do not confer authority. There is no
+master/slave role.
 
 ```text
-                    ┌──────────────────────────────┐
-                    │        SisterRuntime          │
-                    │ listener + service lifecycle  │
-                    └──────────────┬───────────────┘
-                                   │
-                    ┌──────────────▼───────────────┐
-                    │          SisterNode           │
-                    │ identity, knowledge, jobs,    │
-                    │ transport, scheduler         │
-                    └──────┬───────┬───────┬────────┘
-                           │       │       │
-                 ┌─────────▼─┐ ┌───▼────┐ ┌▼──────────┐
-                 │ PeerStore │ │ Handler│ │ Job queue │
-                 │ persistence│ │ protocol│ │ + services│
-                 └───────────┘ └────────┘ └───────────┘
+SisterRuntime
+├── node: SisterNode
+├── listener: TcpListener
+└── shutdown: Shutdown                 # watch sender; coordinator-owned
+
+SisterNode
+├── identity: Arc<SisterIdentity>       # immutable identity
+├── config: RuntimeConfig               # immutable runtime settings
+├── bind_addr / listen_addr             # immutable after assembly
+├── peers: PeerService                  # peer-state service handle
+│   └── PeerRegistry                    # Arc<RwLock<PeerStateTable>>
+│       └── PeerStateTable              # sole in-memory peer-state owner
+├── jobs: JobManager                    # job-state service handle
+│   ├── JobQueue                        # sole queue owner
+│   ├── job metadata                    # sole LocalJob map owner
+│   └── pending results                 # sole oneshot waiter owner
+├── local_state: Arc<RwLock<LocalState>># resource observation handle
+├── scheduler: Arc<Scheduler>           # stateless policy
+├── transport: PeerTransport             # wire/framing/encryption
+└── shutdown: ShutdownToken              # task cancellation receiver
+
+handler ────────> PeerService / JobManager ────────> mutable state
+executor ───────> JobManager ──────────────────────> mutable state
+stealing ───────> PeerService / JobManager ────────> mutable state
 ```
 
-`SisterRuntime` starts:
+`SisterNode` is now an assembler/facade for immutable identity/config,
+transport operations, local resource observation, and service handles. It no
+longer exposes raw `PeerStateTable`, `JobQueue`, local-job map, or pending
+result map fields. `SisterRuntime` owns orchestration and cancellation, not
+peer/job state.
 
-- TCP accept and protocol handling;
-- optional mDNS discovery;
-- periodic state broadcast;
-- peer timeout cleanup;
-- queue executor;
-- idle-aware work stealing;
-- optional loopback introspection.
+### Service boundaries
 
-Each service receives a clone of the node's shared handles. Runtime loops are independent: an unavailable discovery service must not prevent local execution or manually configured peers from working.
+- **`PeerRegistry`**: async façade over in-memory `PeerStateTable`. Owns
+  upsert, lookup, address resolution, enumeration, and offline pruning. It
+  knows nothing about disk or transport.
+- **`PeerService`**: coordinates `PeerRegistry` with `PeerStore` persistence
+  and identity-derived peer recording. It does not own network transport;
+  `SisterNode` keeps the wire operation boundary.
+- **`JobManager`**: owns `JobQueue`, `LocalJob` metadata, status transitions,
+  and pending remote-result waiters. `enqueue`, `mark_running`,
+  `mark_transferred`, `mark_finished`, and pending-result methods are the only
+  state operations used by protocol and worker services.
+- **`Scheduler`**: remains stateless. It receives snapshots and returns an
+  optional executor ID; it does not read system resources itself.
+- **`Executor`**: consumes jobs from `JobManager`, runs commands on Tokio's
+  blocking pool, records transitions through `JobManager`, and routes remote
+  results through node transport.
+- **`WorkStealing`**: reads peer/job service views, requests work when idle,
+  and relies on handler + JobManager for transfer bookkeeping.
+- **`Handler`**: interprets wire messages and calls service methods. It does
+  not lock or mutate raw state containers.
+
+Foundation v1 deliberately keeps `SisterIdentity` (machine identity) separate from job and peer state. Future `HumanIdentity`/`Principal` data can be associated at an authorization boundary without changing transport ownership. `JobManager` is the future seam for adding job requirements/tags, while `PeerService` is the future seam for trust and capability observations. No current peer ID or nickname is treated as a permission or authority decision.
+
+## Runtime lifecycle
+
+`SisterRuntime::new` creates a `Shutdown` sender, injects a cloneable
+`ShutdownToken` into the node, binds listeners, and performs configured peer
+handshakes. `run` starts cancellable background tasks and selects between
+listener acceptance and shutdown.
+
+The same token is selected by discovery, state broadcast, cleanup, executor,
+work stealing, response-listener, and accept loops. On cancellation, the
+accept loop stops, in-flight request tasks are aborted, service tasks are
+joined within `RuntimeConfig.shutdown_timeout`, and `sister_stopped` is
+emitted. A currently running `spawn_blocking` command is allowed to finish;
+shutdown waits only up to the configured bound and then detaches if necessary.
+
+The CLI installs SIGTERM/SIGINT handling on `Start`. A signal requests this
+cooperative shutdown and the process exits successfully after `run` returns.
+A sudden SIGKILL bypasses the handler and produces no graceful-stop event.
 
 ## Configuration and identity
 
-`RuntimeConfig` centralizes listen port, advertised host, data directory, timer intervals, discovery mode, and introspection address. `IdentityStore` persists a Sister identity in the configured data directory. `MISAKA_CONFIG_DIR` overrides the default configuration location and is required for isolated multi-process tests.
+`RuntimeConfig` centralizes listen port, advertised host, data directory,
+timer intervals, discovery mode, introspection address, and shutdown timeout.
+`IdentityStore` persists a Sister identity in the configured data directory.
+`MISAKA_CONFIG_DIR` overrides the default configuration location and is used
+for isolated multi-process tests.
 
-A node binds `0.0.0.0:<port>` for peer traffic and advertises either loopback or the configured `advertise_host`. Introspection is a separate, optional loopback-only listener and is never sent in Hello, State, or mDNS records.
+A node binds `0.0.0.0:<port>` for peer traffic and advertises either loopback
+or the configured `advertise_host`. Introspection is a separate optional
+loopback-only listener and is never sent in Hello, State, or mDNS records.
 
 ## Network knowledge
 
-`PeerStateTable` is in-memory knowledge. `PeerStore` serializes the minimal peer blueprint needed by the standalone CLI to reconnect to known peers. Hello exchanges identity and listen address; State exchanges resource and queue metadata. Peer timeout cleanup removes stale entries.
+`PeerStateTable` is in-memory knowledge. `PeerStore` serializes the minimal
+peer blueprint needed by the standalone CLI to reconnect to known peers.
+Hello exchanges identity and listen address; State exchanges resource and
+queue metadata. Peer timeout cleanup removes stale entries.
 
-The current transport uses short-lived TCP connections. Each message is encoded with bincode, encrypted with AES-256-GCM, and framed as:
+The current transport uses short-lived TCP connections. Each message is
+encoded with bincode, encrypted with AES-256-GCM, and framed as:
 
 ```text
 [u32 big-endian encrypted-frame length][encrypted payload]
 ```
 
-The maximum frame length is bounded before allocation. Every envelope carries a protocol version.
+The maximum frame length is bounded before allocation. Every envelope carries
+a protocol version.
 
 ## Jobs
 
-The scheduler is a small policy component that chooses a peer from snapshots. The executor consumes queued local jobs and executes commands on Tokio's blocking pool, so command execution does not block network or introspection tasks. Work stealing is an independent loop: an idle Sister asks a peer with queued work for one job. A successful transfer changes the source metadata to `transferred` and removes the job from the source queue; a failed send requeues it.
+The scheduler is a small pure policy component. The executor consumes queued
+local jobs and executes commands on Tokio's blocking pool, so command
+execution does not block network or introspection tasks. Work stealing asks a
+peer with queued work for one job. A successful transfer changes source
+metadata to `transferred` and removes the job from its source queue; failed
+sends requeue it.
 
-Remote results return to the creator using the creator's advertised address. The standalone `misaka run` command is a short-lived client: it reconstructs peer addresses from `PeerStore`, submits a job, and waits for a response. It is not a second runtime or a network authority.
+Remote results return to the creator using the creator's advertised address.
+The standalone `misaka run` command is a short-lived client: it reconstructs
+peer addresses from persisted peer knowledge, submits a job, and waits for a
+response. It is not a second runtime or a network authority.
 
 ## Observability
 
-Runtime events use `tracing`, with human output by default and JSON output for Testament. Stable event fields include `event`, `sister_id`, `peer_id`, and `job_id` where applicable. Logs are diagnostic only.
+Runtime events use `tracing`, with human output by default and JSON output for
+Testament. Stable event fields include `event`, `sister_id`, `peer_id`, and
+`job_id` where applicable. Logs are diagnostic only.
 
-Introspection returns a read-only JSON snapshot containing identity, resource counters, peer snapshots, job metadata, and queue depth. It has no mutation endpoints and does not participate in peer protocol or discovery.
+Introspection returns a read-only JSON snapshot containing identity, resource
+counters, peer snapshots, job metadata, and queue depth. It has no mutation
+endpoints, binds only to loopback, and does not participate in peer protocol
+or discovery.
 
 ## Testament boundary
 
-Testament launches the built `misaka` executable as an OS process. It assigns each Sister an isolated config directory, ports, and logs, then observes introspection and CLI results. Killing the harness must not be required for the network to continue operating; Sisters never connect back to Testament.
+Testament launches the built `misaka` executable as an OS process. It assigns
+each Sister an isolated config directory, ports, and logs, then observes
+introspection and command results. `terminate` sends SIGTERM and exercises the
+graceful path; `kill` sends SIGKILL and exercises sudden termination. T13
+asserts graceful exit status and the diagnostic stop event, while T08/T09
+exercise sudden failure behavior.
+
+Testament never instantiates `SisterRuntime`, acts as a peer, joins discovery,
+or executes Misaka jobs in-process. Killing the harness must not be required
+for the network to continue operating; Sisters never connect back to
+Testament.

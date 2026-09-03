@@ -6,7 +6,6 @@
 
 use crate::node::{now_secs, SisterNode};
 use misaka_core::protocol::JobResultData;
-use misaka_core::JobStatus;
 use std::net::SocketAddr;
 
 pub(crate) async fn execute_blocking(command: String) -> crate::commands::CommandResult {
@@ -30,13 +29,12 @@ pub(crate) async fn execute_blocking(command: String) -> crate::commands::Comman
 /// Consume local work until the runtime is shut down.
 pub(crate) async fn run(node: &SisterNode) -> crate::Result<()> {
     loop {
-        if let Some(job) = node.job_queue.pop() {
-            let mut jobs = node.local_jobs.write().await;
-            if let Some(local_job) = jobs.get_mut(&job.id) {
-                local_job.status = JobStatus::Running;
-                local_job.started_at = Some(now_secs());
-            }
-            drop(jobs);
+        if node.shutdown.is_cancelled() {
+            break;
+        }
+        if let Some(job) = node.jobs.pop() {
+            let started = now_secs();
+            node.jobs.mark_running(&job.id, started).await;
 
             tracing::info!(
                 event = "job_started",
@@ -45,6 +43,8 @@ pub(crate) async fn run(node: &SisterNode) -> crate::Result<()> {
                 command = %job.command,
                 "queued job execution started"
             );
+            // Do not select away from a running blocking command: finish and
+            // record it before the executor exits on cancellation.
             let result = execute_blocking(job.command.clone()).await;
 
             let finished = now_secs();
@@ -55,34 +55,24 @@ pub(crate) async fn run(node: &SisterNode) -> crate::Result<()> {
                 output: result.full_output(),
                 exit_code: result.exit_code,
                 success: result.success(),
-                started_at: job.started_at.unwrap_or(finished),
+                started_at: job.started_at.unwrap_or(started),
                 finished_at: finished,
             };
 
-            let mut jobs = node.local_jobs.write().await;
-            if let Some(local_job) = jobs.get_mut(&job.id) {
-                local_job.status = if result.success() {
-                    JobStatus::Completed
+            node.jobs.mark_finished(&job.id, &job_result).await;
+            tracing::info!(
+                event = if result.success() {
+                    "job_completed"
                 } else {
-                    JobStatus::Failed
-                };
-                local_job.finished_at = Some(finished);
-                local_job.result_output = Some(result.full_output());
-                tracing::info!(
-                    event = if result.success() {
-                        "job_completed"
-                    } else {
-                        "job_failed"
-                    },
-                    sister_id = node.identity.id.as_u64(),
-                    job_id = %job.id,
-                    success = result.success(),
-                    exit_code = result.exit_code,
-                    output = %result.full_output(),
-                    "queued job execution finished"
-                );
-            }
-            drop(jobs);
+                    "job_failed"
+                },
+                sister_id = node.identity.id.as_u64(),
+                job_id = %job.id,
+                success = result.success(),
+                exit_code = result.exit_code,
+                output = %result.full_output(),
+                "queued job execution finished"
+            );
 
             // 远端委派来的任务：回送结果给 creator
             if job.creator != node.identity.id.as_u64() {
@@ -99,7 +89,11 @@ pub(crate) async fn run(node: &SisterNode) -> crate::Result<()> {
                 }
             }
         } else {
-            tokio::time::sleep(node.config.executor_poll_interval).await;
+            tokio::select! {
+                _ = node.shutdown.cancelled() => break,
+                _ = tokio::time::sleep(node.config.executor_poll_interval) => {}
+            }
         }
     }
+    Ok(())
 }

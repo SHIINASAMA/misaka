@@ -178,18 +178,29 @@ impl Context {
     }
 
     /// 强杀一个 Sister (模拟崩溃)，不移除条目，供 peer-offline 观察。
-    pub fn kill_sister(&mut self, alias: &str) -> Result<(), ScenarioError> {
+    pub fn kill_sister(&mut self, alias: &str) -> Result<std::process::ExitStatus, ScenarioError> {
         let process = self
             .sisters
             .get_mut(alias)
             .ok_or_else(|| ScenarioError::infra(format!("no running sister {alias}")))?;
-        process.kill();
         process
-            .wait()
-            .map_err(|e| ScenarioError::infra(format!("wait {alias}: {e}")))?;
-        Ok(())
+            .kill_status()
+            .map_err(|e| ScenarioError::infra(format!("kill {alias}: {e}")))
     }
 
+    /// 温和停止一个 Sister，并返回 OS 的真实退出状态。
+    pub fn terminate_sister(
+        &mut self,
+        alias: &str,
+    ) -> Result<std::process::ExitStatus, ScenarioError> {
+        let process = self
+            .sisters
+            .get_mut(alias)
+            .ok_or_else(|| ScenarioError::infra(format!("no running sister {alias}")))?;
+        process
+            .terminate_status()
+            .map_err(|e| ScenarioError::infra(format!("terminate {alias}: {e}")))
+    }
     /// 从场景状态移除一个已结束的 Sister (停止+清理条目)。
     pub fn stop_and_forget(&mut self, alias: &str) -> Result<(), ScenarioError> {
         self.stop_sister(alias)
@@ -393,6 +404,10 @@ pub fn scenarios() -> Vec<ScenarioDef> {
         ScenarioDef {
             name: "T12_mdns_discovery",
             run: Box::new(t12_mdns_discovery),
+        },
+        ScenarioDef {
+            name: "T13_graceful_stop",
+            run: Box::new(t13_graceful_stop),
         },
     ]
 }
@@ -746,8 +761,9 @@ fn t08_peer_failure_detection(ctx: &mut Context) -> Result<(), ScenarioError> {
         s.peers.iter().any(|p| p.id == a_id)
     })?;
 
-    // kill B (强杀，模拟崩溃)。
-    ctx.kill_sister("b")?;
+    // kill B (强杀，模拟崩溃)，其退出不应被当作 graceful 成功。
+    let status = ctx.kill_sister("b")?;
+    assert::assert_eq(status.success(), false, "sudden SIGKILL is not graceful")?;
 
     // A 应在超时后移除 B。peer_timeout 由 Context 控制 (短间隔)。
     assert::eventually(
@@ -840,5 +856,25 @@ fn t12_mdns_discovery(ctx: &mut Context) -> Result<(), ScenarioError> {
     if discovered.is_none() {
         return Err(ScenarioError::skipped("mDNS multicast not available"));
     }
+    Ok(())
+}
+
+/// T13: graceful stop —— SIGTERM is handled by the runtime and exits 0.
+fn t13_graceful_stop(ctx: &mut Context) -> Result<(), ScenarioError> {
+    ctx.start_sister("s1", "railgun", &[])?;
+    let status = ctx.terminate_sister("s1")?;
+    assert::assert_eq(status.code(), Some(0), "graceful SIGTERM exit code")?;
+
+    // Logs are diagnostic corroboration only; exit code is the authoritative
+    // graceful-stop contract because introspection is unavailable after exit.
+    let entry = ctx
+        .entries
+        .get("s1")
+        .ok_or_else(|| ScenarioError::infra("missing s1 entry after stop"))?;
+    let stdout = std::fs::read_to_string(&entry.stdout_log).unwrap_or_default();
+    let stderr = std::fs::read_to_string(&entry.stderr_log).unwrap_or_default();
+    let logs = format!("{stdout}\n{stderr}");
+    assert::assert_contains(&logs, "sister_stopped", "graceful stop diagnostic event")?;
+    ctx.stop_and_forget("s1")?;
     Ok(())
 }

@@ -39,6 +39,9 @@ pub struct RuntimeConfig {
     /// 远端任务等待结果的最大时长
     pub job_timeout: Duration,
 
+    /// 运行时优雅停止的最大等待时间
+    pub shutdown_timeout: Duration,
+
     /// 发现模式
     pub discovery: DiscoveryMode,
 
@@ -59,6 +62,7 @@ impl Default for RuntimeConfig {
             cleanup_interval: Duration::from_secs(15),
             executor_poll_interval: Duration::from_millis(200),
             job_timeout: Duration::from_secs(60),
+            shutdown_timeout: Duration::from_secs(3),
             discovery: DiscoveryMode::Mdns,
             introspection_addr: None,
         }

@@ -15,6 +15,7 @@
 //! The snapshot data types live in misaka-core so external harnesses can
 //! deserialize them without depending on this crate.
 
+use crate::shutdown::ShutdownToken;
 use misaka_core::introspection::IntrospectionSnapshot;
 use std::net::{IpAddr, SocketAddr};
 use tokio::io::AsyncWriteExt;
@@ -38,6 +39,7 @@ pub fn is_loopback(addr: SocketAddr) -> bool {
 pub async fn spawn_server(
     bind: SocketAddr,
     snapshot: impl Fn() -> BoxFuture<IntrospectionSnapshot> + Send + Sync + 'static,
+    shutdown: ShutdownToken,
 ) -> std::io::Result<SocketAddr> {
     if !is_loopback(bind) {
         return Err(std::io::Error::new(
@@ -49,11 +51,17 @@ pub async fn spawn_server(
     let addr = listener.local_addr()?;
     let snapshot = std::sync::Arc::new(snapshot);
     tokio::spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
-            let snapshot = snapshot.clone();
-            tokio::spawn(async move {
-                let _ = handle(stream, snapshot).await;
-            });
+        loop {
+            tokio::select! {
+                _ = shutdown.cancelled() => break,
+                accepted = listener.accept() => {
+                    let Ok((stream, _)) = accepted else { break };
+                    let snapshot = snapshot.clone();
+                    tokio::spawn(async move {
+                        let _ = handle(stream, snapshot).await;
+                    });
+                }
+            }
         }
     });
     Ok(addr)

@@ -26,6 +26,7 @@ The suite currently contains:
 - `T10_no_master_invariant`: removing a node does not block the survivors.
 - `T11_testament_independence`: Sisters are independent OS processes.
 - `T12_mdns_discovery`: environment-sensitive; skipped when multicast is unavailable.
+- `T13_graceful_stop`: SIGTERM is handled by the runtime and exits with code 0; the stop event is diagnostic corroboration.
 
 Run one scenario while debugging:
 
@@ -35,7 +36,7 @@ cargo run -p testament -- run T05_work_stealing --json
 
 ## Interactive run controls
 
-`up` starts real Sister processes and records their PIDs in the manifest. `down` terminates those PIDs before removing the run directory:
+`up` starts real Sister processes and records their PIDs in the manifest. `down` terminates those PIDs before removing the run directory. The supervisor's `terminate` path sends SIGTERM and exercises cooperative runtime shutdown; its `kill` path sends SIGKILL and exercises sudden failure (T08/T09).
 
 ```bash
 cargo run -p testament -- up --sisters 2 --json

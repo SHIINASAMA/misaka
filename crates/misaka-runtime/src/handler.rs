@@ -6,7 +6,6 @@
 
 use crate::node::{now_secs, SisterNode};
 use misaka_core::protocol::*;
-use misaka_core::JobStatus;
 use tokio::net::TcpStream;
 
 pub(crate) async fn dispatch(
@@ -45,22 +44,23 @@ pub(crate) async fn dispatch(
                 queued_jobs = state.queued_jobs,
                 "peer state updated"
             );
-            let mut peers = node.peers.write().await;
-            peers.upsert(misaka_core::PeerState {
-                id: state.identity.id.as_u64(),
-                nickname: state.identity.nickname.as_str().to_string(),
-                hostname: state.identity.hostname,
-                platform: state.identity.platform,
-                version: state.identity.version,
-                addr: state.listen_addr,
-                cpu_usage: state.cpu_usage,
-                memory_total: state.memory_total,
-                memory_used: state.memory_used,
-                running_jobs: state.running_jobs,
-                queued_jobs: state.queued_jobs,
-                uptime_secs: state.uptime_secs,
-                capabilities: state.capabilities,
-            });
+            node.peers
+                .upsert(misaka_core::PeerState {
+                    id: state.identity.id.as_u64(),
+                    nickname: state.identity.nickname.as_str().to_string(),
+                    hostname: state.identity.hostname,
+                    platform: state.identity.platform,
+                    version: state.identity.version,
+                    addr: state.listen_addr,
+                    cpu_usage: state.cpu_usage,
+                    memory_total: state.memory_total,
+                    memory_used: state.memory_used,
+                    running_jobs: state.running_jobs,
+                    queued_jobs: state.queued_jobs,
+                    uptime_secs: state.uptime_secs,
+                    capabilities: state.capabilities,
+                })
+                .await;
         }
 
         MessageType::Job => {
@@ -89,9 +89,7 @@ pub(crate) async fn dispatch(
             let mut local_job = crate::state::LocalJob::new(job_id.clone(), full_cmd.clone());
             local_job.creator = job.creator;
             local_job.creator_addr = Some(job.creator_addr.clone());
-            let mut jobs = node.local_jobs.write().await;
-            jobs.insert(job_id.clone(), local_job.clone());
-            node.job_queue.push(local_job);
+            node.jobs.enqueue(local_job).await;
             tracing::info!(
                 event = "job_queued",
                 sister_id = node.identity.id.as_u64(),
@@ -113,7 +111,7 @@ pub(crate) async fn dispatch(
                 "job result received"
             );
             // 唤醒等结果的提交方
-            if let Some(tx) = node.pending_jobs.lock().unwrap().remove(&result.job_id) {
+            if let Some(tx) = node.jobs.resolve_pending(&result.job_id) {
                 let _ = tx.send(result);
             }
         }
@@ -121,8 +119,8 @@ pub(crate) async fn dispatch(
         MessageType::JobRequest => {
             // Work Stealing: 有人来要活。给一个本地排队中的任务。
             let requester = env.from;
-            let peer_addr = node.peer_addr(requester).await;
-            if let Some(job) = node.job_queue.pop() {
+            let peer_addr = node.peers.addr_of(requester).await;
+            if let Some(job) = node.jobs.pop() {
                 if let Some(addr) = peer_addr {
                     let job_data = JobData {
                         id: job.id.clone(),
@@ -150,16 +148,13 @@ pub(crate) async fn dispatch(
                             peer_id = requester,
                             "job transferred"
                         );
-                        let mut jobs = node.local_jobs.write().await;
-                        if let Some(local_job) = jobs.get_mut(&job.id) {
-                            local_job.status = JobStatus::Transferred;
-                        }
+                        node.jobs.mark_transferred(&job.id).await;
                     } else {
                         // 保留任务，等待下一次请求重试。
-                        node.job_queue.push(job);
+                        node.jobs.push_back(job);
                     }
                 } else {
-                    node.job_queue.push(job);
+                    node.jobs.push_back(job);
                 }
             } else if let Some(addr) = peer_addr {
                 // 没有 → 回 Ack 表示无活

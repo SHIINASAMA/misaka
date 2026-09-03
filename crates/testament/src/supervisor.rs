@@ -233,28 +233,42 @@ impl SisterProcess {
     }
 
     /// 温和停止 (Unix SIGTERM)；若等待窗口内未退出则升级为 SIGKILL。
-    /// 等待进程真正退出后返回。
-    pub fn terminate(&mut self) {
-        let Some(child) = &mut self.child else { return };
+    /// 返回真实退出状态，供 graceful-stop 场景断言。
+    pub fn terminate_status(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        let child = self
+            .child
+            .as_mut()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no child"))?;
         request_stop(child);
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             match child.try_wait() {
-                Ok(Some(_)) => return,
+                Ok(Some(status)) => return Ok(status),
                 Ok(None) => {
                     if Instant::now() >= deadline {
                         let _ = child.kill();
-                        let _ = child.wait();
-                        return;
+                        return child.wait();
                     }
                     std::thread::sleep(Duration::from_millis(40));
                 }
-                Err(_) => {
-                    let _ = child.kill();
-                    return;
-                }
+                Err(error) => return Err(error),
             }
         }
+    }
+
+    /// 温和停止；调用者不需要关心退出状态时使用。
+    pub fn terminate(&mut self) {
+        let _ = self.terminate_status();
+    }
+
+    /// 强杀 (SIGKILL)，等待并返回真实退出状态。
+    pub fn kill_status(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        let child = self
+            .child
+            .as_mut()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no child"))?;
+        child.kill()?;
+        child.wait()
     }
 
     /// 强杀 (SIGKILL)。不等待优雅退出。
@@ -293,8 +307,10 @@ impl SisterProcess {
         } = self.restart.clone().ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::Unsupported, "no restart spec")
         })?;
-        self.terminate();
-        self.wait()?;
+        if self.child.is_some() {
+            self.terminate();
+            self.wait()?;
+        }
         self.entry.pid = None;
         let mut cmd = Command::new(&program);
         cmd.args(&args).env("MISAKA_CONFIG_DIR", config_dir);
