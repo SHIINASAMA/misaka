@@ -446,6 +446,8 @@ struct NetworkPsEntry {
     id: u64,
     nickname: String,
     address: Option<String>,
+    stream: Option<String>,
+    path: Option<String>,
     status: String,
     #[serde(rename = "self")]
     is_self: bool,
@@ -467,6 +469,8 @@ async fn network_ps(
         id: self_id,
         nickname: identity.nickname.as_str().to_string(),
         address: None,
+        stream: None,
+        path: None,
         status: "online".into(),
         is_self: true,
     }];
@@ -500,6 +504,18 @@ async fn network_ps(
             id: peer.id,
             nickname: peer.nickname,
             address: Some(peer.addr),
+            stream: peer.stream_endpoints.first().cloned(),
+            path: peer
+                .stream_endpoints
+                .first()
+                .and_then(|endpoint| endpoint.parse::<NetworkEndpoint>().ok())
+                .map(|endpoint| {
+                    match misaka_network::resolver::EndpointCandidate::tcp(endpoint).kind {
+                        misaka_network::resolver::PathKind::Lan => "lan".to_string(),
+                        misaka_network::resolver::PathKind::Direct => "direct".to_string(),
+                        misaka_network::resolver::PathKind::Relay => "relay".to_string(),
+                    }
+                }),
             status: if online { "online" } else { "offline" }.into(),
             is_self: false,
         });
@@ -521,11 +537,16 @@ async fn probe_peer(identity: &misaka_core::SisterIdentity, addr: SocketAddr) ->
 }
 
 fn print_network_ps(report: &NetworkPsReport) {
-    println!("SISTER               ADDRESS             STATUS");
+    println!("SISTER               CONTROL             STREAM              PATH     STATUS");
     for sister in &report.sisters {
         let name = format!("#{} \"{}\"", sister.id, sister.nickname);
         let address = sister.address.as_deref().unwrap_or("local");
-        println!("{:<20} {:<19} {}", name, address, sister.status);
+        let stream = sister.stream.as_deref().unwrap_or("-");
+        let path = sister.path.as_deref().unwrap_or("-");
+        println!(
+            "{:<20} {:<19} {:<19} {:<8} {}",
+            name, address, stream, path, sister.status
+        );
     }
     let online = report
         .sisters

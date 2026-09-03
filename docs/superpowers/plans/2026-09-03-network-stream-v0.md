@@ -505,3 +505,16 @@ metadata followed by fixed-size chunks, and verifies the receiver's result.
 - [x] Keep relay as a reserved candidate kind without pretending it is wired
   into the runtime.
 - [x] Add ranking coverage and sequential fallback through the connectors.
+
+## Phase 12: Multiplexing Checkpoint
+
+### Task 30: Record the v0 session decision
+
+**Files:**
+- Create: `docs/multiplexing-decision.md`
+- Modify: `crates/misaka-cli/src/main.rs`
+
+- [x] Keep one logical operation per `NetworkStream` for v0.
+- [x] Do not invent a custom mux protocol.
+- [x] Expose known candidate stream/path kind in `misaka ps` while clearly
+  distinguishing candidates from active connections.
