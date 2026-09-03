@@ -572,6 +572,7 @@ dependencies = [
  "misaka-core",
  "misaka-network",
  "rand",
+ "rcgen",
  "serde",
  "serde_json",
  "simple-mdns",

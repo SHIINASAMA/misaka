@@ -13,6 +13,7 @@ bincode.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 tokio.workspace = true
+rcgen.workspace = true
 aes-gcm.workspace = true
 rand.workspace = true
 sysinfo.workspace = true

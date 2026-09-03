@@ -27,6 +27,7 @@ pub mod scheduler;
 pub mod shutdown;
 pub mod state;
 pub mod stealing;
+pub mod tls_identity_store;
 
 pub use error::MisakaError as Error;
 pub use shutdown::{Shutdown, ShutdownToken};

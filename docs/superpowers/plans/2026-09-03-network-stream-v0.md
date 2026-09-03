@@ -352,8 +352,9 @@ Security v0 uses a standard TLS 1.3 implementation with mutual certificate
 authentication. The stream layer pins the expected peer certificate and
 validates the peer identity name; it does not invent a custom handshake or
 record protocol. Wiring this secure primitive into LAN-capable runtime paths
-and persisting production Sister credentials remain the next integration
-boundary.
+and provisioning peer trust remain the next integration boundary. Runtime
+persistence now keeps the local certificate/key pair stable without deciding
+who is trusted.
 
 ### Task 21: Add the secure stream primitive
 
@@ -385,3 +386,39 @@ boundary.
   integration uses the secure wrapper.
 - [x] Run the complete Rust and Testament verification gates.
 - [x] Create a snapshot commit for Security v0.
+
+### Task 23: Persist local stream credentials
+
+**Files:**
+- Modify: `crates/misaka-runtime/Cargo.toml`
+- Modify: `crates/misaka-runtime/src/lib.rs`
+- Create: `crates/misaka-runtime/src/tls_identity_store.rs`
+
+- [x] Generate a local self-signed TLS identity when both credential files are
+  absent.
+- [x] Restore the same certificate/key pair from the Sister data directory.
+- [x] Keep the private key in a separate restricted file and never log its
+  contents.
+- [x] Add stable recovery coverage.
+
+## Phase 6: LAN Network v1
+
+LAN v1 is not complete until a secure runtime listener and connector consume
+the persisted credentials, mDNS discovery supplies candidates, and an
+explicit trust policy rejects unknown Sisters. The current raw stream remains
+loopback-only while those pieces are being integrated.
+
+### Task 24: Wire opt-in secure LAN stream
+
+**Files:**
+- Modify: `crates/misaka-runtime/src/config.rs`
+- Modify: `crates/misaka-runtime/src/runtime.rs`
+- Modify: `crates/misaka-runtime/src/connection.rs`
+- Modify: `crates/misaka-cli/src/main.rs`
+- Modify: `crates/testament/src/scenario.rs`
+
+- [ ] Add explicit secure-stream configuration and trust provisioning.
+- [ ] Bind non-loopback stream listeners only in secure mode.
+- [ ] Route SisterId connections through the secure backend and retain mDNS
+  discovery as candidate metadata only.
+- [ ] Add black-box LAN-style secure connection coverage.
