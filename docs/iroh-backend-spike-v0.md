@@ -48,8 +48,9 @@ lifecycle and rotation requirements.
 - `IrohBackend::connect_session`/`accept_session` expose an explicit
   long-lived QUIC connection; `IrohSession::open_stream` and
   `accept_stream` create multiple independently handshaken logical streams on
-  that connection. The runtime's existing listener remains stream-scoped until
-  session ownership is designed for all backends.
+  that connection. The opt-in runtime listener now owns each accepted Iroh
+  session and dispatches its logical streams independently; Direct TCP keeps
+  its existing one-stream-per-accepted-socket behavior.
 - One logical operation still owns one `NetworkStream`; no session
   multiplexing or transparent reconnect is introduced.
 - The current listener compatibility metadata remains a `SocketAddr`; relay

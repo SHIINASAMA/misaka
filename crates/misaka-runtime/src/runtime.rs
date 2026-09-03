@@ -23,9 +23,14 @@ use tokio::task::{JoinHandle, JoinSet};
 pub struct SisterRuntime {
     node: SisterNode,
     listener: TcpListener,
-    stream_listener: Option<misaka_network::NetworkListener>,
+    stream_listener: Option<StreamAcceptor>,
     shutdown: Shutdown,
     configured_peers: Vec<SocketAddr>,
+}
+
+enum StreamAcceptor {
+    Direct(misaka_network::NetworkListener),
+    Iroh(misaka_network::IrohBackend),
 }
 
 impl SisterRuntime {
@@ -61,12 +66,12 @@ impl SisterRuntime {
         let backend = misaka_network::DirectTcpBackend;
         let stream_listener = match (stream_port, stream_backend) {
             (Some(port), StreamBackend::DirectTcp) => match stream_security {
-                crate::config::StreamSecurity::InsecureLoopback => Some(
+                crate::config::StreamSecurity::InsecureLoopback => Some(StreamAcceptor::Direct(
                     backend
                         .listen(NetworkEndpoint::Tcp(format!("127.0.0.1:{port}").parse()?))
                         .await
                         .map_err(|error| crate::Error::Network(error.to_string()))?,
-                ),
+                )),
                 crate::config::StreamSecurity::MutualTls {
                     identity,
                     trusted_peer_certificates,
@@ -77,7 +82,7 @@ impl SisterRuntime {
                                 .to_string(),
                         ));
                     }
-                    Some(
+                    Some(StreamAcceptor::Direct(
                         misaka_network::tls::TlsServer::new(
                             identity
                                 .server_config_with_trusted_client_certificates(
@@ -88,7 +93,7 @@ impl SisterRuntime {
                         .listen(NetworkEndpoint::Tcp(format!("0.0.0.0:{port}").parse()?))
                         .await
                         .map_err(|error| crate::Error::Network(error.to_string()))?,
-                    )
+                    ))
                 }
             },
             (None, StreamBackend::DirectTcp) => None,
@@ -105,12 +110,11 @@ impl SisterRuntime {
                     );
                 }
                 let endpoint = NetworkEndpoint::Iroh(backend.endpoint_addr());
-                Some(
-                    backend
-                        .listen(endpoint)
-                        .await
-                        .map_err(|error| crate::Error::Network(error.to_string()))?,
-                )
+                backend
+                    .listen(endpoint)
+                    .await
+                    .map_err(|error| crate::Error::Network(error.to_string()))?;
+                Some(StreamAcceptor::Iroh(backend))
             }
         };
 
@@ -136,10 +140,13 @@ impl SisterRuntime {
         if matches!(self.node.config.stream_backend, StreamBackend::Iroh(_)) {
             return None;
         }
-        self.stream_listener.as_ref().map(|listener| {
-            let port = listener.local_addr().port();
-            SocketAddr::new(self.node.listen_addr.ip(), port)
-        })
+        match self.stream_listener.as_ref()? {
+            StreamAcceptor::Direct(listener) => {
+                let port = listener.local_addr().port();
+                Some(SocketAddr::new(self.node.listen_addr.ip(), port))
+            }
+            StreamAcceptor::Iroh(_) => None,
+        }
     }
 
     /// Start discovery, state exchange, execution, cleanup, and work stealing.
@@ -271,7 +278,7 @@ async fn configured_peer_loop(node: SisterNode, peers: Vec<SocketAddr>) {
 fn spawn_background_tasks(
     node: &SisterNode,
     configured_peers: Vec<SocketAddr>,
-    stream_listener: Option<misaka_network::NetworkListener>,
+    stream_listener: Option<StreamAcceptor>,
 ) -> Vec<JoinHandle<()>> {
     let mut tasks = Vec::new();
     if !configured_peers.is_empty() {
@@ -314,10 +321,15 @@ fn spawn_background_tasks(
     });
 
     tasks.extend([discovery, state, cleanup, executor, stealing]);
-    if let Some(listener) = stream_listener {
+    if let Some(acceptor) = stream_listener {
         let stream_node = node.clone();
         tasks.push(tokio::spawn(async move {
-            stream_accept_loop(stream_node, listener).await;
+            match acceptor {
+                StreamAcceptor::Direct(listener) => stream_accept_loop(stream_node, listener).await,
+                StreamAcceptor::Iroh(backend) => {
+                    iroh_session_accept_loop(stream_node, backend).await;
+                }
+            }
         }));
     }
     tasks
@@ -333,24 +345,7 @@ async fn stream_accept_loop(node: SisterNode, listener: misaka_network::NetworkL
                     Ok((stream, addr)) => {
                         let session_node = node.clone();
                         sessions.spawn(async move {
-                            let stats = stream.stats();
-                            let connected_for = stream.connected_for();
-                            let path = stream.path_info();
-                            let result = echo_stream(stream).await;
-                            tracing::debug!(
-                                event = "stream_closed",
-                                sister_id = session_node.identity.id.as_u64(),
-                                peer_addr = %addr,
-                                backend = %path.backend,
-                                route = %path.route,
-                                local_endpoint = ?path.local_endpoint,
-                                remote_endpoint = ?path.remote_endpoint,
-                                connected_for_ms = connected_for.as_millis() as u64,
-                                tx_bytes = stats.tx_bytes(),
-                                rx_bytes = stats.rx_bytes(),
-                                error = ?result.as_ref().err(),
-                                "network stream closed"
-                            );
+                            log_and_echo_stream(session_node, stream, addr).await;
                         });
                     }
                     Err(error) => {
@@ -367,6 +362,88 @@ async fn stream_accept_loop(node: SisterNode, listener: misaka_network::NetworkL
     }
     sessions.abort_all();
     while sessions.join_next().await.is_some() {}
+}
+
+async fn iroh_session_accept_loop(node: SisterNode, backend: misaka_network::IrohBackend) {
+    let mut sessions = JoinSet::new();
+    loop {
+        tokio::select! {
+            _ = node.shutdown.cancelled() => break,
+            accepted = backend.accept_session() => {
+                match accepted {
+                    Ok(session) => {
+                        let session_node = node.clone();
+                        sessions.spawn(async move {
+                            iroh_session_loop(session_node, session).await;
+                        });
+                    }
+                    Err(error) => {
+                        if !matches!(error, misaka_network::NetworkError::Closed) {
+                            tracing::warn!(
+                                event = "iroh_session_accept_failed",
+                                sister_id = node.identity.id.as_u64(),
+                                error = %error,
+                                "Iroh session accept failed"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    sessions.abort_all();
+    while sessions.join_next().await.is_some() {}
+}
+
+async fn iroh_session_loop(node: SisterNode, session: misaka_network::IrohSession) {
+    let mut streams = JoinSet::new();
+    loop {
+        tokio::select! {
+            _ = node.shutdown.cancelled() => break,
+            accepted = session.accept_stream() => {
+                match accepted {
+                    Ok(stream) => {
+                        let stream_node = node.clone();
+                        streams.spawn(async move {
+                            log_and_echo_stream(
+                                stream_node,
+                                stream,
+                                SocketAddr::from(([0, 0, 0, 0], 0)),
+                            ).await;
+                        });
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+    }
+    streams.abort_all();
+    while streams.join_next().await.is_some() {}
+}
+
+async fn log_and_echo_stream(
+    session_node: SisterNode,
+    stream: misaka_network::NetworkStream,
+    addr: SocketAddr,
+) {
+    let stats = stream.stats();
+    let connected_for = stream.connected_for();
+    let path = stream.path_info();
+    let result = echo_stream(stream).await;
+    tracing::debug!(
+        event = "stream_closed",
+        sister_id = session_node.identity.id.as_u64(),
+        peer_addr = %addr,
+        backend = %path.backend,
+        route = %path.route,
+        local_endpoint = ?path.local_endpoint,
+        remote_endpoint = ?path.remote_endpoint,
+        connected_for_ms = connected_for.as_millis() as u64,
+        tx_bytes = stats.tx_bytes(),
+        rx_bytes = stats.rx_bytes(),
+        error = ?result.as_ref().err(),
+        "network stream closed"
+    );
 }
 
 async fn echo_stream(mut stream: misaka_network::NetworkStream) -> std::io::Result<()> {
@@ -530,13 +607,11 @@ mod tests {
         .await
         .unwrap();
         let stream_addr = runtime.stream_addr().unwrap();
-        assert!(runtime
-            .stream_listener
-            .as_ref()
-            .unwrap()
-            .local_addr()
-            .ip()
-            .is_loopback());
+        assert!(matches!(
+            runtime.stream_listener.as_ref(),
+            Some(super::StreamAcceptor::Direct(listener))
+                if listener.local_addr().ip().is_loopback()
+        ));
         let shutdown = runtime.shutdown();
         let task = tokio::spawn(runtime.run());
 
@@ -616,6 +691,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn iroh_runtime_reuses_one_session_for_multiple_logical_streams() {
+        let server_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .alpns(vec![misaka_network::IROH_ALPN.to_vec()])
+            .bind_addr("127.0.0.1:0")
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let client_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .alpns(vec![misaka_network::IROH_ALPN.to_vec()])
+            .bind_addr("127.0.0.1:0")
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let server_backend =
+            misaka_network::IrohBackend::new(server_endpoint, misaka_network::IROH_ALPN);
+        let client_backend =
+            misaka_network::IrohBackend::new(client_endpoint, misaka_network::IROH_ALPN);
+        let server_address = iroh::EndpointAddr::new(server_backend.endpoint().id())
+            .with_ip_addr(server_backend.endpoint().bound_sockets()[0]);
+        let runtime = SisterRuntime::new(
+            SisterIdentity::new(
+                1,
+                "iroh-session-test".into(),
+                "host".into(),
+                "test".into(),
+                "0.1".into(),
+                0,
+            ),
+            default_encryption_key(),
+            RuntimeConfig {
+                listen_port: 0,
+                stream_backend: StreamBackend::Iroh(server_backend),
+                discovery: DiscoveryMode::Off,
+                ..Default::default()
+            },
+            vec![],
+        )
+        .await
+        .unwrap();
+        let shutdown = runtime.shutdown();
+        let task = tokio::spawn(runtime.run());
+
+        let session = client_backend
+            .connect_session(misaka_network::NetworkEndpoint::Iroh(server_address))
+            .await
+            .unwrap();
+        let mut first = session.open_stream().await.unwrap();
+        let mut second = session.open_stream().await.unwrap();
+        for stream in [&mut first, &mut second] {
+            let mut greeting = [0u8; 5];
+            stream.read_exact(&mut greeting).await.unwrap();
+            assert_eq!(&greeting, b"world");
+            stream.write_all(b"ping").await.unwrap();
+        }
+        for stream in [&mut first, &mut second] {
+            let mut echo = [0u8; 4];
+            stream.read_exact(&mut echo).await.unwrap();
+            assert_eq!(&echo, b"ping");
+        }
+
+        shutdown.cancel();
+        task.await.unwrap().unwrap();
+        client_backend.close().await;
+    }
+
+    #[tokio::test]
     async fn secure_stream_listener_accepts_only_mutually_authenticated_clients() {
         let server_dir =
             std::env::temp_dir().join(format!("misaka-runtime-server-{}", uuid::Uuid::new_v4()));
@@ -652,13 +795,11 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(runtime
-            .stream_listener
-            .as_ref()
-            .unwrap()
-            .local_addr()
-            .ip()
-            .is_unspecified());
+        assert!(matches!(
+            runtime.stream_listener.as_ref(),
+            Some(super::StreamAcceptor::Direct(listener))
+                if listener.local_addr().ip().is_unspecified()
+        ));
         let stream_addr = runtime.stream_addr().unwrap();
         let shutdown = runtime.shutdown();
         let task = tokio::spawn(runtime.run());

@@ -632,5 +632,6 @@ QUIC bidirectional stream, without changing the runtime's Direct TCP default.
 - [x] Keep endpoint lifetime attached to session-created streams.
 - [x] Verify concurrent logical stream lifetime with a deterministic loopback
   test.
-- [x] Leave runtime-wide session ownership and transparent recovery for a
+- [x] Route opt-in runtime Iroh sessions to independent service stream tasks.
+- [x] Leave transparent recovery and cross-backend session ownership for a
   later checkpoint.
