@@ -424,12 +424,15 @@ fn network_stream_with_telemetry(
 #[derive(Clone)]
 struct IrohPathTelemetry {
     state: Arc<RwLock<PathInfo>>,
+    _selected_path: Arc<RwLock<Option<String>>>,
 }
 
 impl IrohPathTelemetry {
     fn new(connection: Connection, initial: PathInfo) -> Self {
         let state = Arc::new(RwLock::new(initial));
+        let selected_path = Arc::new(RwLock::new(selected_path_key(&connection)));
         let observer_state = Arc::downgrade(&state);
+        let observer_selected_path = Arc::downgrade(&selected_path);
         tokio::spawn(async move {
             let mut events = connection.path_events();
             let mut stop_check = tokio::time::interval(Duration::from_secs(1));
@@ -437,17 +440,27 @@ impl IrohPathTelemetry {
                 tokio::select! {
                     event = events.next() => {
                         let Some(event) = event else { break };
-                        if matches!(
-                            event,
-                            iroh::endpoint::PathEvent::Selected { .. }
-                                | iroh::endpoint::PathEvent::Lagged { .. }
-                        ) {
+                        let event_path_key = match event {
+                            iroh::endpoint::PathEvent::Selected { id, .. } => {
+                                Some(format!("{id:?}"))
+                            }
+                            iroh::endpoint::PathEvent::Lagged { .. } => selected_path_key(&connection),
+                            _ => None,
+                        };
+                        if event_path_key.is_some() {
                             let Some(observer_state) = observer_state.upgrade() else { break };
+                            let Some(observer_selected_path) = observer_selected_path.upgrade() else { break };
                             let (route, rtt_ms) = selected_path_metrics(&connection);
                             let mut path = observer_state
                                 .write()
                                 .expect("Iroh path telemetry lock poisoned");
-                            if path.route != route {
+                            let mut selected_path = observer_selected_path
+                                .write()
+                                .expect("Iroh selected path telemetry lock poisoned");
+                            let changed = event_path_key
+                                .as_ref()
+                                .is_some_and(|key| selected_path.as_ref() != Some(key));
+                            if changed {
                                 path.path_switches = path.path_switches.saturating_add(1);
                                 tracing::info!(
                                     event = "iroh_path_switched",
@@ -458,6 +471,7 @@ impl IrohPathTelemetry {
                                     "Iroh selected path changed"
                                 );
                             }
+                            *selected_path = event_path_key;
                             path.route = route.to_string();
                             path.rtt_ms = rtt_ms;
                         }
@@ -468,7 +482,10 @@ impl IrohPathTelemetry {
                 }
             }
         });
-        Self { state }
+        Self {
+            state,
+            _selected_path: selected_path,
+        }
     }
 
     fn snapshot(&self) -> PathInfo {
@@ -477,6 +494,14 @@ impl IrohPathTelemetry {
             .expect("Iroh path telemetry lock poisoned")
             .clone()
     }
+}
+
+fn selected_path_key(connection: &Connection) -> Option<String> {
+    connection
+        .paths()
+        .iter()
+        .find(|path| path.is_selected())
+        .map(|path| format!("{:?}", path.id()))
 }
 
 fn connection_path_info(endpoint: &Endpoint, connection: &Connection) -> PathInfo {

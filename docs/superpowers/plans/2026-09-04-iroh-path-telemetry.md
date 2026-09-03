@@ -14,7 +14,7 @@ stream.
 - [x] Let `NetworkStream` obtain dynamic path metadata through an optional
   provider while preserving the existing static constructor.
 - [x] Subscribe each Iroh connection to native path events and refresh the
-  current route/RTT plus the route-change counter.
+  current route/RTT plus the selected-path switch counter.
 - [x] Reuse one telemetry provider across logical streams on a persistent Iroh
   session.
 - [x] Show the counter in human-readable `misaka ps` output and final JSON

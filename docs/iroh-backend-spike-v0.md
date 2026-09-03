@@ -55,7 +55,7 @@ lifecycle and rotation requirements.
   route when known, optional selected-path RTT in milliseconds, and endpoint
   metadata suitable for diagnostics. Iroh path events refresh the route and
   RTT while the stream is active and increment `path_switches` when the
-  selected route changes; active introspection and final JSON probe reports
+  selected Iroh path changes; active introspection and final JSON probe reports
   expose that counter.
 - The CLI uses an explicit 8 MiB Tokio worker stack because concurrent Iroh
   connection teardown can exceed the platform default stack on macOS. This is
