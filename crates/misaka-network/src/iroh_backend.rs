@@ -17,6 +17,7 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 use std::task::{Context, Poll};
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 
 /// A backend backed by one Iroh endpoint.
@@ -428,32 +429,42 @@ struct IrohPathTelemetry {
 impl IrohPathTelemetry {
     fn new(connection: Connection, initial: PathInfo) -> Self {
         let state = Arc::new(RwLock::new(initial));
-        let observer_state = Arc::clone(&state);
+        let observer_state = Arc::downgrade(&state);
         tokio::spawn(async move {
             let mut events = connection.path_events();
-            while let Some(event) = events.next().await {
-                if matches!(
-                    event,
-                    iroh::endpoint::PathEvent::Selected { .. }
-                        | iroh::endpoint::PathEvent::Lagged { .. }
-                ) {
-                    let (route, rtt_ms) = selected_path_metrics(&connection);
-                    let mut path = observer_state
-                        .write()
-                        .expect("Iroh path telemetry lock poisoned");
-                    if path.route != route {
-                        path.path_switches = path.path_switches.saturating_add(1);
-                        tracing::info!(
-                            event = "iroh_path_switched",
-                            peer_id = %connection.remote_id(),
-                            from_route = %path.route,
-                            to_route = %route,
-                            path_switches = path.path_switches,
-                            "Iroh selected path changed"
-                        );
+            let mut stop_check = tokio::time::interval(Duration::from_secs(1));
+            loop {
+                tokio::select! {
+                    event = events.next() => {
+                        let Some(event) = event else { break };
+                        if matches!(
+                            event,
+                            iroh::endpoint::PathEvent::Selected { .. }
+                                | iroh::endpoint::PathEvent::Lagged { .. }
+                        ) {
+                            let Some(observer_state) = observer_state.upgrade() else { break };
+                            let (route, rtt_ms) = selected_path_metrics(&connection);
+                            let mut path = observer_state
+                                .write()
+                                .expect("Iroh path telemetry lock poisoned");
+                            if path.route != route {
+                                path.path_switches = path.path_switches.saturating_add(1);
+                                tracing::info!(
+                                    event = "iroh_path_switched",
+                                    peer_id = %connection.remote_id(),
+                                    from_route = %path.route,
+                                    to_route = %route,
+                                    path_switches = path.path_switches,
+                                    "Iroh selected path changed"
+                                );
+                            }
+                            path.route = route.to_string();
+                            path.rtt_ms = rtt_ms;
+                        }
                     }
-                    path.route = route.to_string();
-                    path.rtt_ms = rtt_ms;
+                    _ = stop_check.tick() => {
+                        if observer_state.upgrade().is_none() { break; }
+                    }
                 }
             }
         });
