@@ -41,18 +41,20 @@ select a backend yet and accept `SocketAddr` through `Into<NetworkEndpoint>`.
 
 `NetworkEndpoint` is deliberately separate from `SisterId`: the endpoint is a
 connection candidate, not an identity. It currently supports direct TCP and
-an opt-in Iroh `EndpointAddr`; relay endpoint selection and SisterId-to-Iroh
-address resolution remain future integration work.
+an opt-in Iroh `EndpointAddr`; Iroh endpoint candidates are resolved from
+explicitly stored peer data, while automatic discovery and relay policy remain
+future integration work.
 
 The initial addressing layer stores stream candidates separately from the
 control-plane address and exposes `SisterConnector::connect_to_sister(SisterId)`
-in `misaka-runtime`. It tries stored TCP candidates in order. mDNS now carries
-the stream port as metadata and feeds the same peer state, but does not open a
-stream itself; non-loopback stream candidates are withheld while the stream is
-insecure and loopback-only. `ConnectionManager` adds explicit per-Sister
-lifecycle state and fresh-stream reconnect after callers mark a previous
-stream disconnected; it does not transparently recover sessions or retry in
-the background. Authentication remains a separate phase.
+in `misaka-runtime`. It races stored TCP and explicitly stored Iroh candidates
+when an Iroh backend is configured. mDNS now carries the stream port as
+metadata and feeds the same peer state, but does not open a stream itself;
+non-loopback stream candidates are withheld while the raw stream is insecure
+and loopback-only. `ConnectionManager` adds explicit per-Sister lifecycle state
+and fresh-stream reconnect after callers mark a previous stream disconnected;
+it does not transparently recover sessions or retry in the background.
+Authentication remains a separate phase.
 
 Security v0 now provides an independent TLS 1.3/mTLS wrapper in
 `misaka-network::tls`. It uses certificate pinning plus the TLS server-name

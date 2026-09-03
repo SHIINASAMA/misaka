@@ -1,9 +1,8 @@
 //! Iroh QUIC backend for the NetworkStream contract.
 //!
-//! This is intentionally a small connectivity spike: one Iroh connection
-//! carries one bidirectional QUIC stream, and the stream still uses the
-//! Network Stream handshake before it is exposed to callers. Runtime routing
-//! and automatic candidate selection remain outside this module for now.
+//! One Iroh connection can carry one or more bidirectional QUIC streams, and
+//! every stream still uses the Network Stream handshake before it is exposed
+//! to callers. Runtime routing and candidate selection remain explicit.
 
 use crate::{
     validate_handshake, AsyncStream, ListenerFuture, NetworkEndpoint, NetworkError,
@@ -134,7 +133,7 @@ impl IrohSession {
             send,
             recv,
             self.endpoint.clone(),
-            self.connection.remote_id(),
+            &self.connection,
         ))
     }
 
@@ -152,7 +151,7 @@ impl IrohSession {
             send,
             recv,
             self.endpoint.clone(),
-            self.connection.remote_id(),
+            &self.connection,
         ))
     }
 }
@@ -216,6 +215,7 @@ impl crate::NetworkBackend for IrohBackend {
             send,
             recv,
             self.endpoint.clone(),
+            selected_route(&connection),
             remote_endpoint,
         ))
     }
@@ -259,10 +259,7 @@ impl NetworkListenerDriver for IrohListener {
                     .map_err(|error| NetworkError::Iroh(error.to_string()))?;
             read_and_validate_handshake(&mut recv).await?;
             write_handshake(&mut send).await?;
-            let route = match &remote_addr {
-                IncomingAddr::Relay { .. } | IncomingAddr::Custom(_) => "relay",
-                _ => "direct",
-            };
+            let route = selected_route(&connection);
             let peer_addr = match remote_addr {
                 IncomingAddr::Ip(addr) => addr,
                 IncomingAddr::Relay { .. } | IncomingAddr::Custom(_) => {
@@ -312,18 +309,25 @@ fn network_stream(
     send: SendStream,
     recv: RecvStream,
     endpoint: Endpoint,
-    remote_id: iroh::EndpointId,
+    connection: &Connection,
 ) -> NetworkStream {
-    let remote_endpoint = serde_json::to_string(&EndpointAddr::new(remote_id))
+    let remote_endpoint = serde_json::to_string(&EndpointAddr::new(connection.remote_id()))
         .ok()
         .map(|value| format!("iroh://{value}"));
-    network_stream_with_metadata(send, recv, endpoint, remote_endpoint)
+    network_stream_with_metadata(
+        send,
+        recv,
+        endpoint,
+        selected_route(connection),
+        remote_endpoint,
+    )
 }
 
 fn network_stream_with_metadata(
     send: SendStream,
     recv: RecvStream,
     endpoint: Endpoint,
+    route: impl Into<String>,
     remote_endpoint: Option<String>,
 ) -> NetworkStream {
     NetworkStream::from_stream_with_path(
@@ -334,7 +338,7 @@ fn network_stream_with_metadata(
         },
         PathInfo::new(
             "iroh",
-            "iroh",
+            route,
             endpoint
                 .bound_sockets()
                 .into_iter()
@@ -343,6 +347,23 @@ fn network_stream_with_metadata(
             remote_endpoint,
         ),
     )
+}
+
+fn selected_route(connection: &Connection) -> &'static str {
+    connection
+        .paths()
+        .iter()
+        .find(|path| path.is_selected())
+        .map(|path| {
+            if path.is_ip() {
+                "direct"
+            } else if path.is_relay() {
+                "relay"
+            } else {
+                "custom"
+            }
+        })
+        .unwrap_or("unknown")
 }
 
 impl AsyncRead for IrohStream {

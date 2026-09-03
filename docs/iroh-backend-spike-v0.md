@@ -38,8 +38,9 @@ lifecycle and rotation requirements.
 - `SisterConnector` can resolve an explicitly advertised Iroh endpoint by
   Sister ID when an `IrohBackend` is injected. Mixed TCP/Iroh candidates are
   raced with Iroh ranked after direct TCP; relay policy remains out of scope.
-- Iroh is wired into the opt-in `SisterRuntime` listener, but not into
-  Testament network scenarios or cross-domain measurement yet.
+- Iroh is wired into the opt-in `SisterRuntime` listener and the Testament
+  black-box transfer scenario. Cross-domain measurement still requires two
+  real hosts and is not claimed by the local test suite.
 - CLI `cp`, `tunnel`, and the SSH wrapper select Iroh endpoints through the
   same backend and persisted local transport key; TLS certificate pinning is
   rejected for Iroh endpoints because Iroh already authenticates the endpoint.

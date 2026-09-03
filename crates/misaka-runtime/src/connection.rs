@@ -121,13 +121,10 @@ impl SisterConnector {
     }
 }
 
-/// Resolves an advertised Iroh endpoint for a Sister and opens one stream.
-///
-/// This is intentionally separate from `SisterConnector`: the current
-/// resolver remains TCP-only, while Iroh is being introduced as an explicit
-/// opt-in transport. Keeping the two connectors separate prevents a TCP
-/// candidate from accidentally being handed to an Iroh endpoint (or vice
-/// versa) before multi-backend resolution has been designed.
+/// Resolves an explicitly advertised Iroh endpoint for a Sister and opens one
+/// stream. This remains available for callers that want Iroh-only behavior;
+/// `SisterConnector` can also race stored TCP and Iroh candidates when an Iroh
+/// backend is explicitly injected.
 #[derive(Clone)]
 pub struct IrohSisterConnector {
     peers: PeerService,

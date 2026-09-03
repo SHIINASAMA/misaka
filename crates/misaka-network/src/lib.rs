@@ -539,7 +539,7 @@ mod tests {
             .unwrap();
         let path = outgoing.path_info();
         assert_eq!(path.backend, "iroh");
-        assert_eq!(path.route, "iroh");
+        assert_eq!(path.route, "direct");
         assert!(path.remote_endpoint.is_some());
         let (mut incoming, _) = accept_task.await.unwrap();
 
