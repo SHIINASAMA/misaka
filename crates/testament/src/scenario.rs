@@ -719,6 +719,10 @@ pub fn network_scenarios() -> Vec<ScenarioDef> {
             name: "N14_iroh_restart_new_stream",
             run: Box::new(n14_iroh_restart_new_stream),
         },
+        ScenarioDef {
+            name: "N15_iroh_json_measurement",
+            run: Box::new(n15_iroh_json_measurement),
+        },
     ]
 }
 
@@ -1860,6 +1864,65 @@ fn n14_iroh_restart_new_stream(ctx: &mut Context) -> Result<(), ScenarioError> {
         return Err(ScenarioError::assertion(format!(
             "new Iroh stream failed: {}",
             String::from_utf8_lossy(&new_output.stderr).trim()
+        )));
+    }
+    Ok(())
+}
+
+/// N15: verify the public Iroh stream probe emits one parseable measurement
+/// record when run against two real, isolated Sister processes.
+fn n15_iroh_json_measurement(ctx: &mut Context) -> Result<(), ScenarioError> {
+    ctx.start_iroh_pair()?;
+    let a_introspect = introspect_addr_of(ctx, "a")?;
+    let b_id = ctx.introspect("b")?.identity.id.as_u64();
+    let endpoint = wait_for_iroh_candidate(a_introspect, b_id)?;
+    let output = ctx.run_cli(
+        "a",
+        &[
+            "stream-test",
+            "--endpoint",
+            &endpoint,
+            "--mode",
+            "bidirectional",
+            "--json",
+        ],
+    )?;
+    let report: serde_json::Value = serde_json::from_str(output.trim())
+        .map_err(|error| ScenarioError::assertion(format!("decode Iroh stream report: {error}")))?;
+    assert::assert_eq(
+        report.get("mode").and_then(serde_json::Value::as_str),
+        Some("bidirectional"),
+        "Iroh stream report mode",
+    )?;
+    assert::assert_eq(
+        report.get("backend").and_then(serde_json::Value::as_str),
+        Some("iroh"),
+        "Iroh stream report backend",
+    )?;
+    assert::assert_eq(
+        report.get("route").and_then(serde_json::Value::as_str),
+        Some("direct"),
+        "Iroh stream report route",
+    )?;
+    if report
+        .get("setup_ms")
+        .and_then(serde_json::Value::as_u64)
+        .is_none()
+        || report
+            .get("rtt_ms")
+            .and_then(serde_json::Value::as_u64)
+            .is_none()
+        || report
+            .get("probe_rtt_ms")
+            .and_then(serde_json::Value::as_u64)
+            .is_none()
+        || !report
+            .get("remote_endpoint")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|endpoint| endpoint.starts_with("iroh://"))
+    {
+        return Err(ScenarioError::assertion(format!(
+            "Iroh JSON stream report missing measurements: {report}"
         )));
     }
     Ok(())

@@ -759,3 +759,15 @@ QUIC bidirectional stream, without changing the runtime's Direct TCP default.
 - [x] Include setup latency, selected-path RTT, probe RTT, sustained exchanges,
   and large-stream throughput when available.
 - [x] Add CLI parsing and nullable-field serialization coverage.
+
+### Task 46: Verify machine-readable Iroh measurements externally
+
+**Files:**
+- Modify: `crates/testament/src/scenario.rs`
+- Modify: `crates/testament/src/main.rs`
+- Modify: `docs/network-stream-v0.md`
+
+- [x] Add N15 using two isolated real Sister processes and the public
+  `stream-test --json` command.
+- [x] Assert the JSON contains Iroh backend/route, setup latency, both RTT
+  measurements, and the advertised Iroh endpoint.
