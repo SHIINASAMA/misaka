@@ -124,6 +124,12 @@ enum Command {
         json: bool,
     },
 
+    /// Establish and verify a stream to a known Sister by identity.
+    Connect {
+        /// Target Sister ID, with or without a leading #.
+        sister: String,
+    },
+
     /// Copy one local file to a known Sister over its stream endpoint.
     Cp {
         /// Local source file.
@@ -362,6 +368,10 @@ async fn main() -> Result<(), MisakaError> {
             )
             .await
             .map_err(MisakaError::Other)?;
+        }
+
+        Command::Connect { sister } => {
+            run_connect(&sister).await.map_err(MisakaError::Other)?;
         }
 
         Command::Cp {
@@ -932,6 +942,48 @@ fn print_stream_probe_report(report: &StreamProbeReport) -> Result<(), String> {
             .map_err(|error| format!("serialize stream report: {error}"))?
     );
     Ok(())
+}
+
+async fn run_connect(sister: &str) -> Result<(), String> {
+    let sister_id = parse_sister_id(sister)?;
+    let peer = PeerStore::load_from_file()
+        .into_iter()
+        .find(|peer| peer.id == sister_id)
+        .ok_or_else(|| format!("Sister #{sister_id} is not in the local peer store"))?;
+    if peer.stream_endpoints.is_empty() {
+        return Err(format!("Sister #{sister_id} has no stream endpoint"));
+    }
+
+    let mut last_error = None;
+    for raw_endpoint in &peer.stream_endpoints {
+        let endpoint = match raw_endpoint.parse::<NetworkEndpoint>() {
+            Ok(endpoint) => endpoint,
+            Err(error) => {
+                last_error = Some(format!("parse endpoint {raw_endpoint}: {error}"));
+                continue;
+            }
+        };
+        match connect_peer_stream(endpoint, sister_id, peer.stream_certificate.as_deref()).await {
+            Ok(mut stream) => {
+                exchange(&mut stream, b"connect").await?;
+                let path = stream.path_info();
+                println!(
+                    "Connected to Sister #{sister_id}: backend={} route={} rtt_ms={} local={} remote={}",
+                    path.backend,
+                    path.route,
+                    path.rtt_ms
+                        .map(|rtt| rtt.to_string())
+                        .unwrap_or_else(|| "-".to_string()),
+                    path.local_endpoint.as_deref().unwrap_or("-"),
+                    path.remote_endpoint.as_deref().unwrap_or("-"),
+                );
+                return Ok(());
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error
+        .unwrap_or_else(|| format!("all stream endpoints for Sister #{sister_id} failed")))
 }
 
 async fn run_copy(source: &Path, destination: &str, resume: bool) -> Result<(), String> {
@@ -1632,6 +1684,15 @@ mod stream_tests {
         assert!(matches!(
             cli.command,
             Command::StreamTest { json: true, .. }
+        ));
+    }
+
+    #[test]
+    fn connect_accepts_a_display_sister_id() {
+        let cli = Cli::try_parse_from(["misaka", "connect", "#10032"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Connect { sister } if sister == "#10032"
         ));
     }
 

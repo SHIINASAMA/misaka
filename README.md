@@ -40,6 +40,17 @@ MISAKA_CONFIG_DIR=.misaka-b cargo run -p misaka -- start \
 
 `--introspect` enables a read-only JSON snapshot endpoint on loopback. It is disabled by default. See [docs/architecture.md](docs/architecture.md) and [docs/protocol.md](docs/protocol.md).
 
+Once a peer has been learned into the local PeerStore, establish and verify a
+stream by Sister identity:
+
+```bash
+MISAKA_CONFIG_DIR=.misaka-a cargo run -p misaka -- connect '#<sister-id>'
+```
+
+The command resolves the stored TCP or explicitly advertised Iroh candidate,
+performs the stream handshake and a bounded echo exchange, then reports the
+selected path.
+
 ## Operator UX
 
 Testament can launch a deterministic full-mesh experiment without making

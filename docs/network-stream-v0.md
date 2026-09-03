@@ -54,6 +54,8 @@ non-loopback stream candidates are withheld while the raw stream is insecure
 and loopback-only. `ConnectionManager` adds explicit per-Sister lifecycle state
 and fresh-stream reconnect after callers mark a previous stream disconnected;
 it does not transparently recover sessions or retry in the background.
+The public `misaka connect #<sister-id>` command exercises the same identity
+to-candidate boundary for a one-shot verified stream connection.
 Authentication remains a separate phase.
 
 Security v0 now provides an independent TLS 1.3/mTLS wrapper in
@@ -87,7 +89,7 @@ cargo run -p testament -- network-verify
 cargo run -p testament -- network-verify --json
 ```
 
-N01–N15 cover connection, bidirectional exchange, sustained reuse of one
+N01–N16 cover connection, bidirectional exchange, sustained reuse of one
 connection, a 64 MiB bounded-buffer stream, remote disconnect, restart followed
 by a new stream, an opt-in TLS 1.3/mTLS LAN-style connection, Transfer v0,
 Tunnel v0, public-CLI Transfer v1 resume, active-stream introspection, and
@@ -105,6 +107,8 @@ identities and allows a fresh stream to be established.
 N15 verifies that the public Iroh `stream-test --json` command emits one
 parseable measurement record with setup, path RTT, probe RTT, and endpoint
 metadata.
+N16 verifies that the public `misaka connect #<sister-id>` command resolves
+the stored Iroh candidate and establishes a stream by Sister identity.
 
 Transfer v1 is layered above the selected `NetworkStream`: `MTR1` uses fixed
 64 KiB chunks, per-chunk integrity digests, explicit offset acknowledgements,

@@ -771,3 +771,17 @@ QUIC bidirectional stream, without changing the runtime's Direct TCP default.
   `stream-test --json` command.
 - [x] Assert the JSON contains Iroh backend/route, setup latency, both RTT
   measurements, and the advertised Iroh endpoint.
+
+### Task 47: Expose SisterId stream connection through the CLI
+
+**Files:**
+- Modify: `crates/misaka-cli/src/main.rs`
+- Modify: `crates/testament/src/scenario.rs`
+- Modify: `crates/testament/src/main.rs`
+- Modify: `docs/network-stream-v0.md`
+
+- [x] Add `misaka connect #<sister-id>` using persisted PeerStore endpoint
+  candidates and the existing Direct TCP/Iroh connection adapters.
+- [x] Verify the handshake and an echo exchange before reporting the selected
+  path.
+- [x] Add N16 coverage with isolated real Iroh Sister processes.

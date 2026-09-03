@@ -723,6 +723,10 @@ pub fn network_scenarios() -> Vec<ScenarioDef> {
             name: "N15_iroh_json_measurement",
             run: Box::new(n15_iroh_json_measurement),
         },
+        ScenarioDef {
+            name: "N16_connect_by_sister_id",
+            run: Box::new(n16_connect_by_sister_id),
+        },
     ]
 }
 
@@ -1925,6 +1929,25 @@ fn n15_iroh_json_measurement(ctx: &mut Context) -> Result<(), ScenarioError> {
             "Iroh JSON stream report missing measurements: {report}"
         )));
     }
+    Ok(())
+}
+
+/// N16: verify the public `connect` command resolves a Sister ID from the
+/// local PeerStore and establishes an Iroh-backed stream.
+fn n16_connect_by_sister_id(ctx: &mut Context) -> Result<(), ScenarioError> {
+    ctx.start_iroh_pair()?;
+    let a_introspect = introspect_addr_of(ctx, "a")?;
+    let b_id = ctx.introspect("b")?.identity.id.as_u64();
+    let _ = wait_for_iroh_candidate(a_introspect, b_id)?;
+    let sister_arg = format!("#{b_id}");
+    let output = ctx.run_cli("a", &["connect", &sister_arg])?;
+    assert::assert_contains(
+        &output,
+        &format!("Connected to Sister #{b_id}"),
+        "connect target",
+    )?;
+    assert::assert_contains(&output, "backend=iroh", "connect backend")?;
+    assert::assert_contains(&output, "route=direct", "connect route")?;
     Ok(())
 }
 
