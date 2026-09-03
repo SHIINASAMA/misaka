@@ -428,6 +428,9 @@ async fn log_and_echo_stream(
     stream: misaka_network::NetworkStream,
     addr: SocketAddr,
 ) {
+    let registration = session_node
+        .stream_registry
+        .register(&stream, (addr.port() != 0).then_some(addr));
     let stats = stream.stats();
     let connected_for = stream.connected_for();
     let path = stream.path_info();
@@ -446,6 +449,7 @@ async fn log_and_echo_stream(
         error = ?result.as_ref().err(),
         "network stream closed"
     );
+    drop(registration);
 }
 
 async fn echo_stream(mut stream: misaka_network::NetworkStream) -> std::io::Result<()> {

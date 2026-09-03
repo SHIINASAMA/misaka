@@ -9,6 +9,7 @@ use crate::resources::{ResourceProvider, SysinfoResourceProvider};
 use crate::scheduler::Scheduler;
 use crate::shutdown::ShutdownToken;
 use crate::state::{LocalJob, LocalState};
+use crate::stream_registry::StreamRegistry;
 use misaka_core::introspection::{IntrospectionSnapshot, ResourceSnapshot};
 use misaka_core::protocol::*;
 use misaka_core::{PeerState, SisterIdentity};
@@ -48,6 +49,9 @@ pub struct SisterNode {
 
     /// 运行时统一取消 token。
     pub(crate) shutdown: ShutdownToken,
+
+    /// In-memory active stream telemetry; never persisted or advertised.
+    pub(crate) stream_registry: StreamRegistry,
 }
 
 impl SisterNode {
@@ -97,6 +101,7 @@ impl SisterNode {
             scheduler: Arc::new(Scheduler::new()),
             transport: PeerTransport::new(Crypto::new(&encryption_key).unwrap()),
             shutdown: ShutdownToken::never(),
+            stream_registry: StreamRegistry::default(),
         }
     }
 
@@ -169,12 +174,14 @@ impl SisterNode {
         let peers = self.peers.peer_snapshots().await;
         let jobs = self.jobs.job_snapshots().await;
         let queue_depth = self.jobs.queue_len();
+        let active_streams = self.stream_registry.snapshot();
         IntrospectionSnapshot {
             identity: self.identity.as_ref().clone(),
             resources,
             peers,
             jobs,
             queue_depth,
+            active_streams,
         }
     }
 

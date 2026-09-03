@@ -84,10 +84,10 @@ cargo run -p testament -- network-verify
 cargo run -p testament -- network-verify --json
 ```
 
-N01–N10 cover connection, bidirectional exchange, sustained reuse of one
+N01–N11 cover connection, bidirectional exchange, sustained reuse of one
 connection, a 64 MiB bounded-buffer stream, remote disconnect, restart followed
 by a new stream, an opt-in TLS 1.3/mTLS LAN-style connection, Transfer v0,
-Tunnel v0, and public-CLI Transfer v1 resume.
+Tunnel v0, public-CLI Transfer v1 resume, and active-stream introspection.
 The large-stream client uses concurrent reader and
 writer halves and deterministic incremental hashing; it never buffers the
 complete payload. N05 and N06 use `stream-test --ready-file` and bounded

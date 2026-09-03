@@ -28,6 +28,7 @@ pub mod scheduler;
 pub mod shutdown;
 pub mod state;
 pub mod stealing;
+pub(crate) mod stream_registry;
 pub mod tls_identity_store;
 
 pub use error::MisakaError as Error;

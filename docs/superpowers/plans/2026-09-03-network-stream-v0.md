@@ -665,3 +665,23 @@ QUIC bidirectional stream, without changing the runtime's Direct TCP default.
 - [x] Launch the public `misaka cp --resume` CLI against isolated real Sister
   processes and assert exact destination bytes.
 - [x] Assert completed transfers do not leave partial or resume metadata.
+
+### Task 40: Expose active NetworkStream observability
+
+**Files:**
+- Modify: `crates/misaka-core/src/introspection.rs`
+- Modify: `crates/misaka-core/src/lib.rs`
+- Create: `crates/misaka-runtime/src/stream_registry.rs`
+- Modify: `crates/misaka-runtime/src/lib.rs`
+- Modify: `crates/misaka-runtime/src/node.rs`
+- Modify: `crates/misaka-runtime/src/runtime.rs`
+- Modify: `crates/testament/src/scenario.rs`
+- Modify: `crates/testament/src/main.rs`
+- Modify: `docs/testing.md`
+- Modify: `docs/network-stream-v0.md`
+
+- [x] Track active logical streams in an in-memory registry only.
+- [x] Expose backend, route, endpoints, lifetime, and live tx/rx counters in
+  loopback-only introspection.
+- [x] Remove registry entries automatically when a stream closes.
+- [x] Add N11 black-box coverage for active telemetry and cleanup.

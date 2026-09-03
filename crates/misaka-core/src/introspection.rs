@@ -67,6 +67,23 @@ pub struct JobSnapshot {
     pub finished_at: Option<u64>,
 }
 
+/// A currently active logical NetworkStream observed by the local Sister.
+///
+/// This is runtime telemetry, not a peer-protocol contract. A transport
+/// endpoint may be known even when the stream has not been bound to a SisterId
+/// by an application-level service.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActiveStreamSnapshot {
+    pub stream_id: u64,
+    pub backend: String,
+    pub route: String,
+    pub local_endpoint: Option<String>,
+    pub remote_endpoint: Option<String>,
+    pub connected_for_ms: u64,
+    pub tx_bytes: u64,
+    pub rx_bytes: u64,
+}
+
 /// 完整 introspection snapshot —— Testament 的稳定观测面
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IntrospectionSnapshot {
@@ -75,4 +92,6 @@ pub struct IntrospectionSnapshot {
     pub peers: Vec<PeerSnapshot>,
     pub jobs: Vec<JobSnapshot>,
     pub queue_depth: usize,
+    #[serde(default)]
+    pub active_streams: Vec<ActiveStreamSnapshot>,
 }

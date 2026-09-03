@@ -651,6 +651,10 @@ pub fn network_scenarios() -> Vec<ScenarioDef> {
             name: "N10_transfer_v1_resume",
             run: Box::new(n10_transfer_v1_resume),
         },
+        ScenarioDef {
+            name: "N11_active_stream_observability",
+            run: Box::new(n11_active_stream_observability),
+        },
     ]
 }
 
@@ -1497,6 +1501,68 @@ fn n09_tunnel_v0(ctx: &mut Context) -> Result<(), ScenarioError> {
     drop(client);
     let _ = tunnel.wait_timeout_mut(Duration::from_millis(100));
     let _ = fixture_thread.join();
+    Ok(())
+}
+
+/// N11: introspection reports the selected path and live counters while a
+/// logical stream is still open, then removes it after the client exits.
+fn n11_active_stream_observability(ctx: &mut Context) -> Result<(), ScenarioError> {
+    start_stream_pair(ctx)?;
+    let address = ctx.stream_addr("b")?.to_string();
+    let b_introspect = introspect_addr_of(ctx, "b")?;
+    let ready_file = ctx.layout.root.join("n11-stream-ready");
+    let ready_file_arg = ready_file.to_string_lossy().to_string();
+    let mut client = ctx.spawn_cli(
+        "a",
+        &[
+            "stream-test",
+            "--addr",
+            &address,
+            "--mode",
+            "hold",
+            "--ready-file",
+            &ready_file_arg,
+        ],
+    )?;
+    wait_for_stream_ready(&mut client, &ready_file, Duration::from_secs(8))?;
+    assert::eventually(
+        b_introspect,
+        "b reports an active stream",
+        Duration::from_secs(8),
+        |snapshot| !snapshot.active_streams.is_empty(),
+    )?;
+    let snapshot = observer::fetch(b_introspect, Duration::from_millis(500))
+        .map_err(|error| ScenarioError::infra(format!("fetch active stream snapshot: {error}")))?;
+    let active = snapshot
+        .active_streams
+        .first()
+        .ok_or_else(|| ScenarioError::assertion("active stream disappeared unexpectedly"))?;
+    assert::assert_eq(
+        active.backend.clone(),
+        "direct-tcp".to_string(),
+        "active stream backend",
+    )?;
+    assert::assert_eq(
+        active.route.clone(),
+        "direct".to_string(),
+        "active stream route",
+    )?;
+    if active.tx_bytes < 5 || active.rx_bytes == 0 || active.remote_endpoint.is_none() {
+        return Err(ScenarioError::assertion(format!(
+            "active stream telemetry incomplete: {active:?}"
+        )));
+    }
+
+    client.terminate();
+    let _ = client
+        .wait_timeout(Duration::from_secs(8))
+        .map_err(|error| ScenarioError::infra(format!("wait observability client: {error}")))?;
+    assert::eventually(
+        b_introspect,
+        "b removes the closed active stream",
+        Duration::from_secs(8),
+        |snapshot| snapshot.active_streams.is_empty(),
+    )?;
     Ok(())
 }
 
