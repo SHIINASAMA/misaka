@@ -43,6 +43,8 @@ lifecycle and rotation requirements.
 - CLI `cp`, `tunnel`, and the SSH wrapper select Iroh endpoints through the
   same backend and persisted local transport key; TLS certificate pinning is
   rejected for Iroh endpoints because Iroh already authenticates the endpoint.
+- Each returned stream exposes `PathInfo` with `backend = iroh`, the selected
+  route when known, and endpoint metadata suitable for diagnostics.
 - One logical operation still owns one `NetworkStream`; no session
   multiplexing or transparent reconnect is introduced.
 - The current listener compatibility metadata remains a `SocketAddr`; relay

@@ -124,8 +124,42 @@ impl<T> AsyncStream for T where T: AsyncRead + AsyncWrite + Send + Unpin {}
 /// A validated, long-lived bidirectional byte stream.
 pub struct NetworkStream {
     inner: Box<dyn AsyncStream>,
+    path: PathInfo,
     stats: StreamStats,
     started_at: Instant,
+}
+
+/// Connection metadata captured when a stream is established.
+///
+/// This describes the selected transport path, not the peer's application
+/// identity. Endpoint strings are diagnostic metadata and may be absent for
+/// transports whose meaningful address is not a socket address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathInfo {
+    pub backend: String,
+    pub route: String,
+    pub local_endpoint: Option<String>,
+    pub remote_endpoint: Option<String>,
+}
+
+impl PathInfo {
+    pub fn new(
+        backend: impl Into<String>,
+        route: impl Into<String>,
+        local_endpoint: Option<String>,
+        remote_endpoint: Option<String>,
+    ) -> Self {
+        Self {
+            backend: backend.into(),
+            route: route.into(),
+            local_endpoint,
+            remote_endpoint,
+        }
+    }
+
+    fn unknown() -> Self {
+        Self::new("unknown", "unknown", None, None)
+    }
 }
 
 /// Counters collected at the transport-neutral stream boundary.
@@ -158,11 +192,20 @@ impl StreamStats {
 impl NetworkStream {
     /// Wrap a backend-provided bidirectional byte stream.
     pub fn from_stream(stream: impl AsyncStream + 'static) -> Self {
+        Self::from_stream_with_path(stream, PathInfo::unknown())
+    }
+
+    pub fn from_stream_with_path(stream: impl AsyncStream + 'static, path: PathInfo) -> Self {
         Self {
             inner: Box::new(stream),
+            path,
             stats: StreamStats::default(),
             started_at: Instant::now(),
         }
+    }
+
+    pub fn path_info(&self) -> PathInfo {
+        self.path.clone()
     }
 
     pub fn stats(&self) -> StreamStats {
@@ -318,7 +361,12 @@ mod direct_tcp {
             .map_err(NetworkError::Connect)?;
         client_handshake(&mut stream).await?;
         tracing::info!(event = "stream_connected", peer_addr = %addr, "network stream connected");
-        Ok(NetworkStream::from_stream(stream))
+        let local_endpoint = stream.local_addr().ok().map(|addr| addr.to_string());
+        let remote_endpoint = stream.peer_addr().ok().map(|addr| addr.to_string());
+        Ok(NetworkStream::from_stream_with_path(
+            stream,
+            super::PathInfo::new("direct-tcp", "direct", local_endpoint, remote_endpoint),
+        ))
     }
 
     struct DirectTcpListener {
@@ -344,7 +392,19 @@ mod direct_tcp {
                         ),
                     })??;
                 tracing::info!(event = "stream_accepted", peer_addr = %addr, "network stream accepted");
-                Ok((NetworkStream::from_stream(stream), addr))
+                let local_endpoint = stream.local_addr().ok().map(|addr| addr.to_string());
+                Ok((
+                    NetworkStream::from_stream_with_path(
+                        stream,
+                        super::PathInfo::new(
+                            "direct-tcp",
+                            "direct",
+                            local_endpoint,
+                            Some(addr.to_string()),
+                        ),
+                    ),
+                    addr,
+                ))
             })
         }
     }
@@ -477,6 +537,10 @@ mod tests {
             .connect(NetworkEndpoint::Iroh(server_address))
             .await
             .unwrap();
+        let path = outgoing.path_info();
+        assert_eq!(path.backend, "iroh");
+        assert_eq!(path.route, "iroh");
+        assert!(path.remote_endpoint.is_some());
         let (mut incoming, _) = accept_task.await.unwrap();
 
         outgoing.write_all(b"iroh-ok").await.unwrap();

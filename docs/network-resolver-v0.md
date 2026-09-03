@@ -23,4 +23,6 @@ reserved kind for the relay integration boundary. `SisterConnector` and
 diagnostics and sequential fallback.
 
 Connection racing and active path telemetry are intentionally separate future
-steps. A candidate is not evidence that a stream is connected.
+steps. The stream boundary now captures `PathInfo` for the selected backend,
+but a candidate is not evidence that a stream is connected and no active-path
+registry exists yet.

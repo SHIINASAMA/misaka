@@ -335,11 +335,16 @@ async fn stream_accept_loop(node: SisterNode, listener: misaka_network::NetworkL
                         sessions.spawn(async move {
                             let stats = stream.stats();
                             let connected_for = stream.connected_for();
+                            let path = stream.path_info();
                             let result = echo_stream(stream).await;
                             tracing::debug!(
                                 event = "stream_closed",
                                 sister_id = session_node.identity.id.as_u64(),
                                 peer_addr = %addr,
+                                backend = %path.backend,
+                                route = %path.route,
+                                local_endpoint = ?path.local_endpoint,
+                                remote_endpoint = ?path.remote_endpoint,
                                 connected_for_ms = connected_for.as_millis() as u64,
                                 tx_bytes = stats.tx_bytes(),
                                 rx_bytes = stats.rx_bytes(),

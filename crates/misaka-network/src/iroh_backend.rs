@@ -7,7 +7,7 @@
 
 use crate::{
     validate_handshake, AsyncStream, ListenerFuture, NetworkEndpoint, NetworkError,
-    NetworkListener, NetworkListenerDriver, NetworkStream, Result, HANDSHAKE_LEN,
+    NetworkListener, NetworkListenerDriver, NetworkStream, PathInfo, Result, HANDSHAKE_LEN,
     HANDSHAKE_TIMEOUT, IROH_ALPN, MAGIC, PROTOCOL_VERSION,
 };
 use iroh::endpoint::{IncomingAddr, RecvStream, SendStream};
@@ -112,16 +112,31 @@ impl crate::NetworkBackend for IrohBackend {
             .map_err(|error| NetworkError::Iroh(error.to_string()))?;
         write_handshake(&mut send).await?;
         read_and_validate_handshake(&mut recv).await?;
+        let remote_endpoint = serde_json::to_string(&EndpointAddr::new(connection.remote_id()))
+            .ok()
+            .map(|value| format!("iroh://{value}"));
         tracing::info!(
             event = "iroh_stream_connected",
             peer_id = %connection.remote_id(),
             "Iroh network stream connected"
         );
-        Ok(NetworkStream::from_stream(IrohStream {
-            send,
-            recv,
-            _endpoint: self.endpoint.clone(),
-        }))
+        Ok(NetworkStream::from_stream_with_path(
+            IrohStream {
+                send,
+                recv,
+                _endpoint: self.endpoint.clone(),
+            },
+            PathInfo::new(
+                "iroh",
+                "iroh",
+                self.endpoint
+                    .bound_sockets()
+                    .into_iter()
+                    .next()
+                    .map(|addr| addr.to_string()),
+                remote_endpoint,
+            ),
+        ))
     }
 }
 
@@ -163,6 +178,10 @@ impl NetworkListenerDriver for IrohListener {
                     .map_err(|error| NetworkError::Iroh(error.to_string()))?;
             read_and_validate_handshake(&mut recv).await?;
             write_handshake(&mut send).await?;
+            let route = match &remote_addr {
+                IncomingAddr::Relay { .. } | IncomingAddr::Custom(_) => "relay",
+                _ => "direct",
+            };
             let peer_addr = match remote_addr {
                 IncomingAddr::Ip(addr) => addr,
                 IncomingAddr::Relay { .. } | IncomingAddr::Custom(_) => {
@@ -177,11 +196,23 @@ impl NetworkListenerDriver for IrohListener {
                 "Iroh network stream accepted"
             );
             Ok((
-                NetworkStream::from_stream(IrohStream {
-                    send,
-                    recv,
-                    _endpoint: self.endpoint.clone(),
-                }),
+                NetworkStream::from_stream_with_path(
+                    IrohStream {
+                        send,
+                        recv,
+                        _endpoint: self.endpoint.clone(),
+                    },
+                    PathInfo::new(
+                        "iroh",
+                        route,
+                        self.endpoint
+                            .bound_sockets()
+                            .into_iter()
+                            .next()
+                            .map(|addr| addr.to_string()),
+                        Some(format!("iroh://{}", connection.remote_id())),
+                    ),
+                ),
                 peer_addr,
             ))
         })

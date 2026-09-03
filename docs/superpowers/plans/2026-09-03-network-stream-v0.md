@@ -603,3 +603,19 @@ QUIC bidirectional stream, without changing the runtime's Direct TCP default.
 - [x] Let `SisterConnector` race TCP and explicitly injected Iroh candidates.
 - [x] Preserve Direct TCP-only behavior when no Iroh backend is configured.
 - [x] Keep relay and other backend implementations out of this checkpoint.
+
+### Task 36: Capture selected path metadata at stream creation
+
+**Files:**
+- Modify: `crates/misaka-network/src/lib.rs`
+- Modify: `crates/misaka-network/src/direct_tcp.rs` (inline backend module)
+- Modify: `crates/misaka-network/src/tls.rs`
+- Modify: `crates/misaka-network/src/iroh_backend.rs`
+- Modify: `crates/misaka-runtime/src/runtime.rs`
+
+- [x] Attach backend, route, local endpoint, and remote endpoint metadata to
+  each `NetworkStream`.
+- [x] Record Iroh metadata without treating endpoint identity as a TCP address.
+- [x] Include selected path metadata in runtime stream-close diagnostics.
+- [x] Keep introspection read-only and do not use diagnostic logs as Testament
+  assertions.

@@ -1,6 +1,6 @@
 use crate::{
-    NetworkEndpoint, NetworkError, NetworkListener, NetworkListenerDriver, NetworkStream, Result,
-    HANDSHAKE_TIMEOUT,
+    NetworkEndpoint, NetworkError, NetworkListener, NetworkListenerDriver, NetworkStream, PathInfo,
+    Result, HANDSHAKE_TIMEOUT,
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
 use rustls::{ClientConfig, RootCertStore, ServerConfig};
@@ -123,12 +123,21 @@ impl TlsClient {
         let stream = TcpStream::connect(address)
             .await
             .map_err(NetworkError::Connect)?;
+        let local_endpoint = stream.local_addr().ok().map(|addr| addr.to_string());
         let stream = self
             .connector
             .connect(self.server_name.clone(), stream)
             .await
             .map_err(|error| NetworkError::Tls(error.to_string()))?;
-        Ok(NetworkStream::from_stream(stream))
+        Ok(NetworkStream::from_stream_with_path(
+            stream,
+            PathInfo::new(
+                "direct-tcp",
+                "direct",
+                local_endpoint,
+                Some(address.to_string()),
+            ),
+        ))
     }
 }
 
@@ -145,12 +154,17 @@ impl TlsServer {
     }
 
     pub async fn accept(&self, stream: TcpStream) -> Result<NetworkStream> {
+        let local_endpoint = stream.local_addr().ok().map(|addr| addr.to_string());
+        let remote_endpoint = stream.peer_addr().ok().map(|addr| addr.to_string());
         let stream = self
             .acceptor
             .accept(stream)
             .await
             .map_err(|error| NetworkError::Tls(error.to_string()))?;
-        Ok(NetworkStream::from_stream(stream))
+        Ok(NetworkStream::from_stream_with_path(
+            stream,
+            PathInfo::new("direct-tcp", "direct", local_endpoint, remote_endpoint),
+        ))
     }
 
     pub async fn listen(&self, endpoint: NetworkEndpoint) -> Result<NetworkListener> {
@@ -190,11 +204,23 @@ impl NetworkListenerDriver for TlsListener {
     fn accept(&self) -> crate::ListenerFuture<'_> {
         Box::pin(async move {
             let (stream, address) = self.inner.accept().await.map_err(NetworkError::Io)?;
+            let local_endpoint = stream.local_addr().ok().map(|addr| addr.to_string());
             let stream = tokio::time::timeout(HANDSHAKE_TIMEOUT, self.acceptor.accept(stream))
                 .await
                 .map_err(|_| NetworkError::Tls("TLS handshake timed out".to_string()))?
                 .map_err(|error| NetworkError::Tls(error.to_string()))?;
-            Ok((NetworkStream::from_stream(stream), address))
+            Ok((
+                NetworkStream::from_stream_with_path(
+                    stream,
+                    PathInfo::new(
+                        "direct-tcp",
+                        "direct",
+                        local_endpoint,
+                        Some(address.to_string()),
+                    ),
+                ),
+                address,
+            ))
         })
     }
 }
