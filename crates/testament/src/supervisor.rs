@@ -29,6 +29,13 @@ pub struct RestartSpec {
     config_dir: PathBuf,
 }
 
+impl RestartSpec {
+    /// Append launch arguments for scenario-specific backend flags.
+    pub fn append_args<const N: usize>(&mut self, args: [&str; N]) {
+        self.args.extend(args.into_iter().map(str::to_string));
+    }
+}
+
 /// Parameters for constructing one isolated Sister process.
 pub struct SpawnConfig<'a> {
     pub layout: &'a RunLayout,
@@ -197,6 +204,7 @@ pub fn build_spawn(config: SpawnConfig<'_>) -> (SisterEntry, Command, RestartSpe
         pid: None,
         listen_addr: format!("127.0.0.1:{}", listen_port),
         stream_addr: format!("127.0.0.1:{}", stream_port),
+        stream_backend: String::new(),
         introspection_addr: Some(format!("127.0.0.1:{}", introspect_port)),
         config_dir: config_dir.to_string_lossy().to_string(),
         stdout_log: stdout_log.to_string_lossy().to_string(),
@@ -289,6 +297,10 @@ pub fn command_for_entry(entry: &SisterEntry, fallback_binary: &Path) -> std::io
     if let Some(stream_port) = stream_port_from_entry(entry)? {
         args.splice(3..3, ["--stream-port".to_string(), stream_port.to_string()]);
     }
+    if !entry.stream_backend.is_empty() {
+        args.push("--stream-backend".to_string());
+        args.push(entry.stream_backend.clone());
+    }
     for peer in &entry.peer_addrs {
         args.push("--peer".to_string());
         args.push(peer.clone());
@@ -380,6 +392,10 @@ fn command_args_for_entry(entry: &SisterEntry) -> std::io::Result<Vec<String>> {
     ];
     if let Some(stream_port) = stream_port_from_entry(entry)? {
         args.splice(3..3, ["--stream-port".into(), stream_port.to_string()]);
+    }
+    if !entry.stream_backend.is_empty() {
+        args.push("--stream-backend".into());
+        args.push(entry.stream_backend.clone());
     }
     for peer in &entry.peer_addrs {
         args.push("--peer".into());
@@ -618,7 +634,7 @@ mod tests {
             events_path: root.join("events.jsonl"),
             sisters_dir: root.join("sisters"),
         };
-        let (entry, _, _) = build_spawn(SpawnConfig {
+        let (mut entry, _, _) = build_spawn(SpawnConfig {
             layout: &layout,
             alias: "s1",
             nickname: "test",
@@ -641,5 +657,15 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|pair| pair == ["--stream-port", "31701"]));
+
+        entry.stream_backend = "iroh".to_string();
+        let iroh_command = command_for_entry(&entry, PathBuf::from("/bin/echo").as_path()).unwrap();
+        let iroh_args: Vec<_> = iroh_command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(iroh_args
+            .windows(2)
+            .any(|pair| pair == ["--stream-backend", "iroh"]));
     }
 }

@@ -358,7 +358,7 @@ impl Context {
         let b_ports = allocate_ports()?;
         let a_addr: SocketAddr = format!("127.0.0.1:{}", a_ports.0).parse().unwrap();
 
-        let (a_entry, mut a_command, a_restart) = build_spawn(SpawnConfig {
+        let (mut a_entry, mut a_command, mut a_restart) = build_spawn(SpawnConfig {
             layout: &self.layout,
             alias: "a",
             nickname: "alpha",
@@ -371,7 +371,7 @@ impl Context {
             heartbeat: self.heartbeat,
             peer_timeout: self.peer_timeout,
         });
-        let (b_entry, mut b_command, b_restart) = build_spawn(SpawnConfig {
+        let (mut b_entry, mut b_command, mut b_restart) = build_spawn(SpawnConfig {
             layout: &self.layout,
             alias: "b",
             nickname: "beta",
@@ -384,8 +384,12 @@ impl Context {
             heartbeat: self.heartbeat,
             peer_timeout: self.peer_timeout,
         });
+        a_entry.stream_backend = "iroh".to_string();
+        b_entry.stream_backend = "iroh".to_string();
         a_command.arg("--stream-backend").arg("iroh");
         b_command.arg("--stream-backend").arg("iroh");
+        a_restart.append_args(["--stream-backend", "iroh"]);
+        b_restart.append_args(["--stream-backend", "iroh"]);
 
         self.spawn_only("a", a_entry, a_command, a_restart)?;
         self.spawn_only("b", b_entry, b_command, b_restart)?;
@@ -710,6 +714,10 @@ pub fn network_scenarios() -> Vec<ScenarioDef> {
         ScenarioDef {
             name: "N13_iroh_active_path_observability",
             run: Box::new(n13_iroh_active_path_observability),
+        },
+        ScenarioDef {
+            name: "N14_iroh_restart_new_stream",
+            run: Box::new(n14_iroh_restart_new_stream),
         },
     ]
 }
@@ -1791,6 +1799,102 @@ fn n13_iroh_active_path_observability(ctx: &mut Context) -> Result<(), ScenarioE
         |snapshot| snapshot.active_streams.is_empty(),
     )?;
     Ok(())
+}
+
+/// N14: after an Iroh Sister dies, its persisted transport identity and
+/// explicit candidate are reused for a fresh stream after restart.
+fn n14_iroh_restart_new_stream(ctx: &mut Context) -> Result<(), ScenarioError> {
+    ctx.start_iroh_pair()?;
+    let a_introspect = introspect_addr_of(ctx, "a")?;
+    let b_id = ctx.introspect("b")?.identity.id.as_u64();
+    let endpoint = wait_for_iroh_candidate(a_introspect, b_id)?;
+    let ready_file = ctx.layout.root.join("n14-iroh-stream-ready");
+    let ready_file_arg = ready_file.to_string_lossy().to_string();
+    let mut old_client = ctx.spawn_cli(
+        "a",
+        &[
+            "stream-test",
+            "--endpoint",
+            &endpoint,
+            "--mode",
+            "hold",
+            "--ready-file",
+            &ready_file_arg,
+        ],
+    )?;
+    wait_for_stream_ready(&mut old_client, &ready_file, Duration::from_secs(12))?;
+    let status = ctx.kill_sister("b")?;
+    if status.success() {
+        return Err(ScenarioError::assertion(
+            "Iroh Sister unexpectedly exited successfully after kill",
+        ));
+    }
+    let output = old_client
+        .wait_timeout(Duration::from_secs(10))
+        .map_err(|error| ScenarioError::infra(format!("wait old Iroh stream: {error}")))?;
+    if output.status.success() {
+        return Err(ScenarioError::assertion(
+            "old Iroh stream did not fail after remote kill",
+        ));
+    }
+
+    ctx.restart_sister("b")?;
+    let b2_id = ctx.introspect("b")?.identity.id.as_u64();
+    assert::assert_eq(b2_id, b_id, "Iroh Sister identity across restart")?;
+    let endpoint = wait_for_iroh_candidate(a_introspect, b_id)?;
+    let new_output = ctx
+        .spawn_cli(
+            "a",
+            &[
+                "stream-test",
+                "--endpoint",
+                &endpoint,
+                "--mode",
+                "bidirectional",
+            ],
+        )?
+        .wait_timeout(Duration::from_secs(20))
+        .map_err(|error| ScenarioError::infra(format!("wait new Iroh stream: {error}")))?;
+    if !new_output.status.success() {
+        return Err(ScenarioError::assertion(format!(
+            "new Iroh stream failed: {}",
+            String::from_utf8_lossy(&new_output.stderr).trim()
+        )));
+    }
+    Ok(())
+}
+
+fn wait_for_iroh_candidate(
+    introspect: SocketAddr,
+    sister_id: u64,
+) -> Result<String, ScenarioError> {
+    assert::eventually(
+        introspect,
+        "Sister advertises an Iroh stream candidate",
+        Duration::from_secs(12),
+        |snapshot| {
+            snapshot.peers.iter().any(|peer| {
+                peer.id == sister_id
+                    && peer
+                        .stream_endpoints
+                        .iter()
+                        .any(|endpoint| endpoint.starts_with("iroh://"))
+            })
+        },
+    )?;
+    let snapshot = observer::fetch(introspect, Duration::from_millis(500))
+        .map_err(|error| ScenarioError::infra(format!("fetch Iroh candidate: {error}")))?;
+    snapshot
+        .peers
+        .iter()
+        .find(|peer| peer.id == sister_id)
+        .and_then(|peer| {
+            peer.stream_endpoints
+                .iter()
+                .find(|endpoint| endpoint.starts_with("iroh://"))
+        })
+        .cloned()
+        .ok_or_else(|| ScenarioError::assertion("Iroh candidate disappeared unexpectedly"))
 }
 
 fn wait_for_tcp_listener(addr: SocketAddr, timeout: Duration) -> Result<(), ScenarioError> {

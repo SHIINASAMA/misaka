@@ -106,6 +106,9 @@ pub struct SisterEntry {
     pub listen_addr: String,
     #[serde(default)]
     pub stream_addr: String,
+    /// Optional stream backend flag needed to rebuild an Iroh Sister.
+    #[serde(default)]
+    pub stream_backend: String,
     pub introspection_addr: Option<String>,
     pub config_dir: String,
     pub stdout_log: String,
