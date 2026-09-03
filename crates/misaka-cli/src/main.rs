@@ -4,6 +4,7 @@ use misaka_runtime::error::MisakaError;
 use misaka_runtime::identity_store::IdentityStore;
 use misaka_runtime::node::SisterNode;
 use misaka_runtime::peer_store::PeerStore;
+use misaka_runtime::runtime::{default_encryption_key, SisterRuntime};
 use std::net::SocketAddr;
 
 #[derive(Parser)]
@@ -96,7 +97,6 @@ async fn main() -> Result<(), MisakaError> {
             println!("  Platform: {}", identity.platform);
             println!("  Version: {}", identity.version);
 
-            let key = identity_key();
             let discovery_mode = match discovery.as_str() {
                 "manual" => misaka_runtime::config::DiscoveryMode::Manual,
                 "off" => misaka_runtime::config::DiscoveryMode::Off,
@@ -114,65 +114,16 @@ async fn main() -> Result<(), MisakaError> {
                 },
                 ..Default::default()
             };
-            let node = SisterNode::new(identity, key, config.clone());
-
-            // 只读 introspection 服务器 (默认禁用)
-            if let Some(addr) = config.introspection_addr {
-                match node.spawn_introspection_server(addr).await {
-                    Ok(bound) => println!("[Misaka] introspection serving on {}", bound),
-                    Err(e) => eprintln!("[Misaka] introspection failed: {}", e),
-                }
-            }
-
-            // 启动监听
-            let listener = node.start_listener().await?;
-
-            // 连接已知 peers
-            for p in &peer {
-                if let Ok(addr) = p.parse::<SocketAddr>() {
-                    let _ = node.add_known_peer(addr).await;
-                }
-            }
-
-            // 后台任务
-            let discovery_node = node.clone();
-            tokio::spawn(async move {
-                // 依 discovery 模式决定要不要跑 mDNS
-                if matches!(
-                    discovery_node.config.discovery,
-                    misaka_runtime::config::DiscoveryMode::Mdns
-                ) {
-                    let _ = discovery_node.mdns_loop().await;
-                } else {
-                    // mdns off/manual：挂起，避免无意义循环
-                    std::future::pending::<()>().await;
-                }
-            });
-            let n1 = node.clone();
-            tokio::spawn(async move {
-                let _ = n1.state_broadcast_loop().await;
-            });
-            let n2 = node.clone();
-            tokio::spawn(async move {
-                let _ = n2.cleanup_loop().await;
-            });
-            let n3 = node.clone();
-            tokio::spawn(async move {
-                let _ = n3.local_executor_loop().await;
-            });
-            let n4 = node.clone();
-            tokio::spawn(async move {
-                let _ = n4.work_stealing_loop(1).await;
-            });
-
-            // 接受入站连接
-            loop {
-                let (stream, addr) = listener.accept().await?;
-                let node = node.clone();
-                tokio::spawn(async move {
-                    let _ = node.handle_inbound(stream, addr).await;
-                });
-            }
+            let runtime = SisterRuntime::new(
+                identity,
+                default_encryption_key(),
+                config,
+                peer.iter()
+                    .filter_map(|p| p.parse::<SocketAddr>().ok())
+                    .collect(),
+            )
+            .await?;
+            runtime.run().await?;
         }
 
         Command::Nickname { nickname } => {
@@ -242,12 +193,11 @@ async fn main() -> Result<(), MisakaError> {
                 .ok_or_else(|| {
                     MisakaError::Other("Not running. Run 'misaka start' first.".into())
                 })?;
-            let key = identity_key();
             let config = misaka_runtime::config::RuntimeConfig {
                 listen_port: identity.listen_port,
                 ..Default::default()
             };
-            let node = SisterNode::new(identity, key, config);
+            let node = SisterNode::new(identity, default_encryption_key(), config);
 
             if local {
                 println!("[Misaka] run --local: {}", command);
@@ -293,12 +243,4 @@ fn check_online(addr: Option<SocketAddr>) -> bool {
     use std::net::TcpStream;
     use std::time::Duration;
     TcpStream::connect_timeout(&addr, Duration::from_millis(800)).is_ok()
-}
-
-/// 加密密钥。Phase 1 用网络密钥派生；后续换成基于身份的密钥。
-fn identity_key() -> [u8; 32] {
-    let mut key = [0u8; 32];
-    let seed = b"misaka_network_default_key_";
-    key[..seed.len()].copy_from_slice(seed);
-    key
 }

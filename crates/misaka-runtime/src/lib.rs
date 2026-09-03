@@ -13,6 +13,7 @@ pub mod identity_store;
 pub mod node;
 pub mod peer_store;
 pub mod queue;
+pub mod runtime;
 pub mod scheduler;
 pub mod state;
 
