@@ -1,0 +1,16 @@
+[package]
+name = "misaka-relay"
+version.workspace = true
+edition.workspace = true
+description = "Minimal byte-forwarding relay for Misaka end-to-end streams"
+
+[[bin]]
+name = "misaka-relay"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

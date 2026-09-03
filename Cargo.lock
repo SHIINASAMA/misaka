@@ -563,6 +563,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "misaka-relay"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "misaka-runtime"
 version = "0.1.0"
 dependencies = [

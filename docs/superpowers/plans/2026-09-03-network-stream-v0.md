@@ -471,3 +471,20 @@ metadata followed by fixed-size chunks, and verifies the receiver's result.
 - [x] Add `misaka ssh <sister-id>` with optional user and remote port.
 - [x] Reuse the loopback-only Tunnel v0 listener and peer certificate policy.
 - [x] Delegate the actual SSH protocol to the system OpenSSH client.
+
+## Phase 10: Relay v0
+
+### Task 28: Add a thin byte-forwarding relay
+
+**Files:**
+- Modify: `Cargo.toml`
+- Create: `crates/misaka-relay/Cargo.toml`
+- Create: `crates/misaka-relay/src/main.rs`
+- Create: `docs/relay-v0.md`
+
+- [x] Add register/dial pairing by Sister ID.
+- [x] Forward opaque bytes with `copy_bidirectional`.
+- [x] Keep relay independent from `misaka-runtime`, identity authority, and
+  payload decryption.
+- [x] Add an in-process socket-pairing regression test for the relay only;
+  Testament remains an external harness for Sister behavior.

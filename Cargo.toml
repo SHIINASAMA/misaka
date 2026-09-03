@@ -6,6 +6,7 @@ members = [
     "crates/misaka-runtime",
     "crates/misaka-cli",
     "crates/testament",
+    "crates/misaka-relay",
 ]
 
 [workspace.package]
