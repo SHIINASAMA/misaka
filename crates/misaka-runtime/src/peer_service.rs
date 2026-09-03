@@ -59,13 +59,19 @@ impl PeerService {
     }
 
     /// Record the identity/advertised address received from a peer, then persist.
-    pub async fn remember_peer(&self, identity: &SisterIdentity, listen_addr: &str) {
+    pub async fn remember_peer(
+        &self,
+        identity: &SisterIdentity,
+        listen_addr: &str,
+        stream_addr: Option<&str>,
+    ) {
         self.upsert(PeerState {
             id: identity.id.as_u64(),
             nickname: identity.nickname.as_str().to_string(),
             hostname: identity.hostname.clone(),
             platform: identity.platform.clone(),
             version: identity.version.clone(),
+            stream_endpoints: stream_addr.into_iter().map(str::to_string).collect(),
             addr: listen_addr.to_string(),
             cpu_usage: 0.0,
             memory_total: 0,
@@ -105,6 +111,7 @@ mod tests {
             hostname: "host".into(),
             platform: "test".into(),
             version: "0.1".into(),
+            stream_endpoints: vec![],
             addr: "127.0.0.1:1".into(),
             cpu_usage: 0.0,
             memory_total: 0,
@@ -119,12 +126,17 @@ mod tests {
     #[tokio::test]
     async fn service_exposes_registry_and_persists() {
         let dir = TempDir::new();
-        let registry = PeerRegistry::new_seeded(vec![state(1)]);
+        let mut first = state(1);
+        first.stream_endpoints = vec!["tcp://127.0.0.1:31701".into()];
+        let registry = PeerRegistry::new_seeded(vec![first]);
         let service = PeerService::new(registry, dir.path().to_path_buf());
         assert_eq!(service.len().await, 1);
         service.upsert(state(2)).await;
         service.persist().await;
         assert!(dir.path().join("peers.json").exists());
+        let saved = PeerStore::load_from_dir(dir.path());
+        let first = saved.iter().find(|peer| peer.id == 1).unwrap();
+        assert_eq!(first.stream_endpoints, vec!["tcp://127.0.0.1:31701"]);
     }
 }
 

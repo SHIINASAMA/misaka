@@ -70,6 +70,7 @@ impl SisterNode {
                 hostname: bp.hostname,
                 platform: bp.platform,
                 version: bp.version,
+                stream_endpoints: bp.stream_endpoints,
                 addr: bp.addr,
                 cpu_usage: 0.0,
                 memory_total: 0,
@@ -111,6 +112,17 @@ impl SisterNode {
         self.listen_addr = format!("{}:{}", host, self.config.listen_port)
             .parse()
             .unwrap();
+    }
+
+    /// Current stream endpoint candidate, kept separate from the control address.
+    pub fn stream_addr(&self) -> Option<SocketAddr> {
+        self.config
+            .stream_port
+            .map(|port| SocketAddr::new(self.listen_addr.ip(), port))
+    }
+
+    pub fn stream_endpoint(&self) -> Option<String> {
+        self.stream_addr().map(|addr| format!("tcp://{addr}"))
     }
 
     pub fn get_crypto(&self) -> Crypto {
@@ -189,8 +201,15 @@ impl SisterNode {
     }
 
     /// 把 hello 里的身份信息存进 peer service。
-    pub(crate) async fn remember_peer(&self, identity: &SisterIdentity, listen_addr: &str) {
-        self.peers.remember_peer(identity, listen_addr).await;
+    pub(crate) async fn remember_peer(
+        &self,
+        identity: &SisterIdentity,
+        listen_addr: &str,
+        stream_addr: Option<&str>,
+    ) {
+        self.peers
+            .remember_peer(identity, listen_addr, stream_addr)
+            .await;
     }
 
     /// 手工插入一个 peer (Phase 1 没有 mDNS 时用 --peer 指定)
@@ -202,12 +221,17 @@ impl SisterNode {
             bincode::serialize(&HelloData {
                 identity: self.identity.as_ref().clone(),
                 listen_addr: self.listen_addr.to_string(),
+                stream_addr: self.stream_endpoint(),
             })?,
         );
         let reply = self.send_to(addr, &env).await?;
         let hello: HelloData = bincode::deserialize(&reply.data)?;
-        self.remember_peer(&hello.identity, &hello.listen_addr)
-            .await;
+        self.remember_peer(
+            &hello.identity,
+            &hello.listen_addr,
+            hello.stream_addr.as_deref(),
+        )
+        .await;
         tracing::info!(
             event = "peer_connected",
             sister_id = self.identity.id.as_u64(),
@@ -485,6 +509,7 @@ impl SisterNode {
                             hostname: host,
                             platform,
                             version: String::new(),
+                            stream_endpoints: vec![],
                             addr: addr.to_string(),
                             cpu_usage: 0.0,
                             memory_total: 0,
@@ -574,6 +599,7 @@ impl SisterNode {
                 StateData {
                     identity: self.identity.as_ref().clone(),
                     listen_addr: self.listen_addr.to_string(),
+                    stream_addr: self.stream_endpoint(),
                     cpu_usage: ls.cpu_usage,
                     memory_total: ls.memory_total,
                     memory_used: ls.memory_used,

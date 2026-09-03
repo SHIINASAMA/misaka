@@ -9,6 +9,9 @@ pub struct PeerState {
     pub hostname: String,
     pub platform: String,
     pub version: String,
+    /// Candidate endpoints for long-lived streams; control-plane `addr` stays separate.
+    #[serde(default)]
+    pub stream_endpoints: Vec<String>,
     pub addr: String,
 
     // 本地的观测字段
@@ -33,6 +36,8 @@ pub struct PeerState {
 pub struct PeerBlueprint {
     pub id: u64,
     pub addr: String,
+    #[serde(default)]
+    pub stream_endpoints: Vec<String>,
     pub nickname: String,
     pub hostname: String,
     pub platform: String,
@@ -44,6 +49,7 @@ impl From<&PeerState> for PeerBlueprint {
         Self {
             id: p.id,
             addr: p.addr.clone(),
+            stream_endpoints: p.stream_endpoints.clone(),
             nickname: p.nickname.clone(),
             hostname: p.hostname.clone(),
             platform: p.platform.clone(),
@@ -81,6 +87,9 @@ impl PeerStateTable {
             // 保留较老的 hostname/addr 变化
             if !state.nickname.is_empty() {
                 prev.nickname = state.nickname;
+            }
+            if !state.stream_endpoints.is_empty() {
+                prev.stream_endpoints = state.stream_endpoints;
             }
         } else {
             self.peers.insert(state.id, state);
@@ -140,6 +149,7 @@ mod tests {
             hostname: "h".into(),
             platform: "p".into(),
             version: "v".into(),
+            stream_endpoints: vec![],
             addr: addr.into(),
             cpu_usage: 10.0,
             memory_total: 0,
@@ -163,9 +173,28 @@ mod tests {
         assert_eq!(t.len(), 1);
         assert_eq!(t.get(1).unwrap().addr, "127.0.0.1:1");
 
+        let mut endpoint_update = state(1, "127.0.0.1:3");
+        endpoint_update.stream_endpoints = vec!["tcp://127.0.0.1:31701".into()];
+        t.upsert(endpoint_update);
+        assert_eq!(
+            t.get(1).unwrap().stream_endpoints,
+            vec!["tcp://127.0.0.1:31701"]
+        );
+
         // 移除离线
         let removed = t.prune_offline(std::time::Duration::from_secs(0));
         assert_eq!(removed, vec![1]);
         assert!(t.is_empty());
+    }
+
+    #[test]
+    fn peer_state_roundtrips_stream_endpoint_candidates() {
+        let mut peer = state(7, "127.0.0.1:31700");
+        peer.stream_endpoints = vec!["tcp://127.0.0.1:31701".into()];
+
+        let encoded = serde_json::to_string(&peer).unwrap();
+        let decoded: PeerState = serde_json::from_str(&encoded).unwrap();
+
+        assert_eq!(decoded.stream_endpoints, peer.stream_endpoints);
     }
 }

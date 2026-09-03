@@ -45,6 +45,9 @@ pub struct HelloData {
     pub identity: super::identity::SisterIdentity,
     /// 发送方自己声明的监听地址，用于建 peer 表 (不要用 TCP 源地址)
     pub listen_addr: String,
+    /// Optional candidate address for the long-lived stream listener.
+    #[serde(default)]
+    pub stream_addr: Option<String>,
 }
 
 /// 状态 payload —— Sister 上报自身局部状态
@@ -53,6 +56,9 @@ pub struct StateData {
     pub identity: super::identity::SisterIdentity,
     /// 发送方自己声明的监听地址，用于建 peer 表 (不要用 TCP 源地址)
     pub listen_addr: String,
+    /// Optional candidate address for the long-lived stream listener.
+    #[serde(default)]
+    pub stream_addr: Option<String>,
     pub cpu_usage: f32,
     pub memory_total: u64,
     pub memory_used: u64,

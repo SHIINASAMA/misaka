@@ -263,3 +263,53 @@ It keeps identity and connectivity separate and supports TCP only.
 - [x] Document `SisterId != NetworkEndpoint` and the TCP-only scope.
 - [x] Run the complete Rust and Testament verification gates.
 - [x] Record Endpoint Model v0 completion and the next SisterId-to-endpoint resolution phase.
+
+---
+
+## Sister Network Addressing v0 — initial resolution layer
+
+This phase adds the smallest useful addressing layer on top of Endpoint Model
+v0. It stores stream endpoint candidates separately from the legacy control
+address and provides `SisterId`-based resolution. mDNS advertisement changes,
+reconnect policy, authentication, and session ownership remain separate
+follow-up phases.
+
+### Task 16: Persist stream endpoint candidates
+
+**Files:**
+- Modify: `crates/misaka-core/src/peer.rs`
+- Modify: `crates/misaka-runtime/src/node.rs`
+- Modify: `crates/misaka-runtime/src/handler.rs`
+- Modify: `crates/misaka-runtime/src/peer_service.rs`
+- Modify: `crates/misaka-runtime/src/peer_registry.rs`
+- Modify: `crates/misaka-runtime/src/scheduler.rs`
+
+- [x] Add a failing peer-state serde test for stream endpoint candidates.
+- [x] Add `stream_endpoints: Vec<String>` with serde defaulting for older `peers.json` files.
+- [x] Preserve endpoint candidates through peer updates and state propagation.
+- [x] Keep control-plane `addr` unchanged as the legacy control endpoint.
+
+### Task 17: Resolve and connect by SisterId
+
+**Files:**
+- Create: `crates/misaka-runtime/src/connection.rs`
+- Modify: `crates/misaka-runtime/src/lib.rs`
+- Modify: `crates/misaka-network/src/lib.rs`
+
+- [x] Add a failing real-loopback test for `SisterConnector::connect_to_sister(SisterId)`.
+- [x] Parse persisted TCP endpoint candidates through `NetworkEndpoint`.
+- [x] Try candidates in stored order and return a `NetworkStream` from the selected backend.
+- [x] Report unknown peers and peers without stream candidates distinctly.
+
+### Task 18: Verify and document addressing v0
+
+**Files:**
+- Modify: `docs/architecture.md`
+- Modify: `docs/network-stream-v0.md`
+- Modify: `docs/superpowers/plans/2026-09-03-network-stream-v0.md`
+- Modify: `'/Users/kaoru/Documents/Obsidian Vault/Misaka Network — Network Stream v0.md'`
+
+- [x] Document control endpoint versus stream endpoint candidates and the
+  current absence of mDNS stream advertisement.
+- [x] Run the complete Rust and Testament verification gates.
+- [x] Record the addressing result and the next mDNS/connection-lifecycle phase.

@@ -134,7 +134,9 @@ knowledge, or route by SisterId.
 Endpoint Model v0 introduces `NetworkEndpoint::Tcp(SocketAddr)` at the
 backend boundary. This endpoint is a connection candidate and is deliberately
 distinct from `SisterId`; SisterId resolution and persisted stream endpoint
-knowledge belong to a later phase.
+knowledge are separate from the legacy control endpoint. `SisterConnector`
+resolves stored stream candidates by `SisterId` and tries them in order; it
+does not retry, recover, authenticate, or own a long-lived session yet.
 
 The v0 runtime echo loop exists only to validate long-lived bidirectional
 streams and uses bounded buffers. The stream is intentionally insecure and is

@@ -40,6 +40,12 @@ connection candidate, not an identity. Endpoint Model v0 contains only
 `NetworkEndpoint::Tcp`; Iroh, relay, and other endpoint variants are deferred
 until their respective backend designs exist.
 
+The initial addressing layer stores stream candidates separately from the
+control-plane address and exposes `SisterConnector::connect_to_sister(SisterId)`
+in `misaka-runtime`. It tries stored TCP candidates in order. mDNS stream
+advertisement, reconnection policy, session ownership, and authentication are
+not part of this layer; the current insecure stream remains loopback-only.
+
 The handshake contains only the `MISAKA_STREAM` magic and protocol version 1.
 It carries no Sister identity, credentials, permissions, service metadata, or
 capability list.

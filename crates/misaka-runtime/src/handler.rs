@@ -28,8 +28,12 @@ pub(crate) async fn dispatch(
 
         MessageType::Hello => {
             let hello: HelloData = bincode::deserialize(&env.data)?;
-            node.remember_peer(&hello.identity, &hello.listen_addr)
-                .await;
+            node.remember_peer(
+                &hello.identity,
+                &hello.listen_addr,
+                hello.stream_addr.as_deref(),
+            )
+            .await;
             let reply = Envelope::new(
                 MessageType::Hello,
                 node.identity.id.as_u64(),
@@ -37,6 +41,7 @@ pub(crate) async fn dispatch(
                 bincode::serialize(&HelloData {
                     identity: node.identity.as_ref().clone(),
                     listen_addr: node.listen_addr.to_string(),
+                    stream_addr: node.stream_endpoint(),
                 })?,
             );
             node.transport.reply(stream, &reply).await?;
@@ -63,6 +68,7 @@ pub(crate) async fn dispatch(
                     hostname: state.identity.hostname,
                     platform: state.identity.platform,
                     version: state.identity.version,
+                    stream_endpoints: state.stream_addr.into_iter().collect(),
                     addr: state.listen_addr,
                     cpu_usage: state.cpu_usage,
                     memory_total: state.memory_total,

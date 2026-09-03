@@ -6,6 +6,7 @@
 
 pub mod commands;
 pub mod config;
+pub mod connection;
 pub mod crypto;
 pub mod discovery;
 pub mod error;

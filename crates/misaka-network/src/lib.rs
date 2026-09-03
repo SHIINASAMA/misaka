@@ -57,6 +57,19 @@ impl std::fmt::Display for NetworkEndpoint {
     }
 }
 
+impl std::str::FromStr for NetworkEndpoint {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        let addr = value
+            .strip_prefix("tcp://")
+            .ok_or_else(|| format!("unsupported network endpoint: {value}"))?
+            .parse::<SocketAddr>()
+            .map_err(|error| format!("invalid TCP endpoint {value}: {error}"))?;
+        Ok(Self::Tcp(addr))
+    }
+}
+
 /// The transport boundary for stream establishment.
 #[allow(async_fn_in_trait)]
 pub trait NetworkBackend: Send + Sync {

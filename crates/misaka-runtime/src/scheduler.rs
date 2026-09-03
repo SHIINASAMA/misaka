@@ -69,6 +69,7 @@ mod tests {
             hostname: "test".into(),
             platform: "test".into(),
             version: "test".into(),
+            stream_endpoints: vec![],
             addr: format!("127.0.0.1:{}", id),
             cpu_usage,
             memory_total: 0,
