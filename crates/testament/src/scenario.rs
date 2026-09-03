@@ -350,6 +350,54 @@ impl Context {
         Ok(())
     }
 
+    /// Start two real Sisters whose stream transport is the opt-in Iroh
+    /// backend. Control-plane discovery remains the same manual black-box
+    /// mechanism; only the advertised stream endpoint changes.
+    pub fn start_iroh_pair(&mut self) -> Result<(), ScenarioError> {
+        let a_ports = allocate_ports()?;
+        let b_ports = allocate_ports()?;
+        let a_addr: SocketAddr = format!("127.0.0.1:{}", a_ports.0).parse().unwrap();
+
+        let (a_entry, mut a_command, a_restart) = build_spawn(SpawnConfig {
+            layout: &self.layout,
+            alias: "a",
+            nickname: "alpha",
+            listen_port: a_ports.0,
+            stream_port: a_ports.1,
+            introspect_port: a_ports.2,
+            binary: &self.binary,
+            peers: &[],
+            discovery: "manual",
+            heartbeat: self.heartbeat,
+            peer_timeout: self.peer_timeout,
+        });
+        let (b_entry, mut b_command, b_restart) = build_spawn(SpawnConfig {
+            layout: &self.layout,
+            alias: "b",
+            nickname: "beta",
+            listen_port: b_ports.0,
+            stream_port: b_ports.1,
+            introspect_port: b_ports.2,
+            binary: &self.binary,
+            peers: &[a_addr],
+            discovery: "manual",
+            heartbeat: self.heartbeat,
+            peer_timeout: self.peer_timeout,
+        });
+        a_command.arg("--stream-backend").arg("iroh");
+        b_command.arg("--stream-backend").arg("iroh");
+
+        self.spawn_only("a", a_entry, a_command, a_restart)?;
+        self.spawn_only("b", b_entry, b_command, b_restart)?;
+        for alias in ["a", "b"] {
+            if let Err(error) = self.wait_until_ready(alias) {
+                self.teardown();
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
     pub fn introspect(&self, alias: &str) -> Result<IntrospectionSnapshot, ScenarioError> {
         let addr = self
             .entries
@@ -654,6 +702,10 @@ pub fn network_scenarios() -> Vec<ScenarioDef> {
         ScenarioDef {
             name: "N11_active_stream_observability",
             run: Box::new(n11_active_stream_observability),
+        },
+        ScenarioDef {
+            name: "N12_iroh_transfer_v1",
+            run: Box::new(n12_iroh_transfer_v1),
         },
     ]
 }
@@ -1563,6 +1615,44 @@ fn n11_active_stream_observability(ctx: &mut Context) -> Result<(), ScenarioErro
         Duration::from_secs(8),
         |snapshot| snapshot.active_streams.is_empty(),
     )?;
+    Ok(())
+}
+
+/// N12: run Transfer v1 over the opt-in Iroh backend using real Sister
+/// processes and transport identities persisted in each isolated config dir.
+fn n12_iroh_transfer_v1(ctx: &mut Context) -> Result<(), ScenarioError> {
+    ctx.start_iroh_pair()?;
+    let a_introspect = introspect_addr_of(ctx, "a")?;
+    let b_id = ctx.introspect("b")?.identity.id.as_u64();
+    assert::eventually(
+        a_introspect,
+        "a learns b Iroh stream candidate",
+        Duration::from_secs(12),
+        |snapshot| {
+            snapshot.peers.iter().any(|peer| {
+                peer.id == b_id
+                    && peer
+                        .stream_endpoints
+                        .iter()
+                        .any(|endpoint| endpoint.starts_with("iroh://"))
+            })
+        },
+    )?;
+
+    let source = ctx.layout.root.join("iroh-transfer-source.bin");
+    let destination = ctx.layout.root.join("iroh-transfer-destination.bin");
+    let payload = (0..(64 * 1024 + 1234))
+        .map(|index| ((index * 7) % 251) as u8)
+        .collect::<Vec<_>>();
+    std::fs::write(&source, &payload)
+        .map_err(|error| ScenarioError::infra(format!("write Iroh source: {error}")))?;
+    let source_arg = source.to_string_lossy().to_string();
+    let destination_arg = format!("#{b_id}:{}", destination.display());
+    let output = ctx.run_cli("a", &["cp", "--resume", &source_arg, &destination_arg])?;
+    assert::assert_contains(&output, "Resumed copy", "Iroh transfer completion output")?;
+    let received = std::fs::read(&destination)
+        .map_err(|error| ScenarioError::assertion(format!("read Iroh destination: {error}")))?;
+    assert::assert_eq(received, payload, "Iroh transfer bytes")?;
     Ok(())
 }
 

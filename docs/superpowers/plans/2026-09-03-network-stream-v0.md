@@ -685,3 +685,18 @@ QUIC bidirectional stream, without changing the runtime's Direct TCP default.
   loopback-only introspection.
 - [x] Remove registry entries automatically when a stream closes.
 - [x] Add N11 black-box coverage for active telemetry and cleanup.
+
+### Task 41: Verify Iroh through external Sister processes
+
+**Files:**
+- Modify: `crates/testament/src/scenario.rs`
+- Modify: `crates/testament/src/main.rs`
+- Modify: `docs/testing.md`
+- Modify: `docs/network-stream-v0.md`
+
+- [x] Start isolated real Sister processes with `--stream-backend iroh`.
+- [x] Wait for the control plane to advertise an `iroh://` stream candidate.
+- [x] Execute public `misaka cp --resume` over that candidate and assert exact
+  destination bytes.
+- [x] Keep the scenario deterministic and restricted to the existing local
+  Iroh connectivity fixture; cross-domain/relay measurements remain separate.
