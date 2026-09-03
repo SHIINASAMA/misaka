@@ -17,3 +17,4 @@ rand.workspace = true
 sysinfo.workspace = true
 simple-mdns.workspace = true
 futures-util.workspace = true
+tracing.workspace = true

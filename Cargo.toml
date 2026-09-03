@@ -23,4 +23,6 @@ rand = "0.8"
 sysinfo = "0.30"
 simple-mdns = { version = "0.7", features = ["async-tokio"] }
 futures-util = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 clap = { version = "4", features = ["derive"] }

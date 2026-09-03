@@ -120,6 +120,8 @@ pub fn build_spawn(config: SpawnConfig<'_>) -> (SisterEntry, Command) {
         .arg(listen_port.to_string())
         .arg("--nickname")
         .arg(nickname)
+        .arg("--log-format")
+        .arg("json")
         .arg("--discovery")
         .arg(discovery)
         .arg("--heartbeat")

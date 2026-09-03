@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
 
+/// Current version of the encrypted wire envelope.
+pub const PROTOCOL_VERSION: u16 = 1;
+
 /// 消息类型枚举 (对等网络，无主从之分)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MessageType {
@@ -15,6 +18,7 @@ pub enum MessageType {
 /// 网络层封装的消息 (对等)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Envelope {
+    pub protocol_version: u16,
     pub msg_type: MessageType,
     pub from: u64,     // 发送方 Sister ID
     pub to: u64,       // 接收方 Sister ID (0 = 广播)
@@ -24,6 +28,7 @@ pub struct Envelope {
 impl Envelope {
     pub fn new(msg_type: MessageType, from: u64, to: u64, data: Vec<u8>) -> Self {
         Self {
+            protocol_version: PROTOCOL_VERSION,
             msg_type,
             from,
             to,
@@ -100,6 +105,7 @@ mod tests {
         let env = Envelope::new(MessageType::State, 10032, 0, vec![1, 2, 3]);
         let bytes = bincode::serialize(&env).unwrap();
         let back: Envelope = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(back.protocol_version, PROTOCOL_VERSION);
         assert_eq!(back.msg_type, MessageType::State);
         assert_eq!(back.from, 10032);
         assert_eq!(back.data, vec![1, 2, 3]);

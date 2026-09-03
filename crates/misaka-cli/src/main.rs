@@ -4,8 +4,9 @@ use misaka_runtime::error::MisakaError;
 use misaka_runtime::identity_store::IdentityStore;
 use misaka_runtime::node::SisterNode;
 use misaka_runtime::peer_store::PeerStore;
+use misaka_runtime::resources::{ResourceProvider, SysinfoResourceProvider};
 use misaka_runtime::runtime::{default_encryption_key, SisterRuntime};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
 #[derive(Parser)]
 #[command(name = "misaka")]
@@ -42,6 +43,14 @@ enum Command {
         /// 判定 peer 离线的时长 (秒)
         #[arg(long, default_value_t = 60)]
         peer_timeout: u64,
+
+        /// 对 peer 宣告的局域网地址
+        #[arg(long)]
+        advertise_host: Option<IpAddr>,
+
+        /// 日志格式 (human | json)
+        #[arg(long, default_value = "human")]
+        log_format: String,
 
         /// 只读 introspection 端口 (0 = 禁用)
         #[arg(long, default_value_t = 0)]
@@ -83,19 +92,33 @@ async fn main() -> Result<(), MisakaError> {
             discovery,
             heartbeat,
             peer_timeout,
+            advertise_host,
+            log_format,
             introspect,
         } => {
+            init_tracing(&log_format);
             // 加载或生成身份 (持久化)
+            let data_dir =
+                IdentityStore::config_dir().map_err(|e| MisakaError::Other(e.to_string()))?;
             let identity = IdentityStore::load_or_init(nickname.clone(), port)
                 .map_err(|e| MisakaError::Other(e.to_string()))?;
             if nickname.clone().is_some() {
-                println!("[Misaka] nickname updated: {}", identity.nickname);
+                tracing::info!(
+                    event = "nickname_updated",
+                    nickname = %identity.nickname,
+                    "nickname updated"
+                );
             }
 
-            println!("{}", identity.display_name());
-            println!("  Device : {}", identity.hostname);
-            println!("  Platform: {}", identity.platform);
-            println!("  Version: {}", identity.version);
+            tracing::info!(
+                event = "sister_identity",
+                sister_id = identity.id.as_u64(),
+                nickname = %identity.nickname,
+                hostname = %identity.hostname,
+                platform = %identity.platform,
+                version = %identity.version,
+                "Sister identity loaded"
+            );
 
             let discovery_mode = match discovery.as_str() {
                 "manual" => misaka_runtime::config::DiscoveryMode::Manual,
@@ -104,8 +127,10 @@ async fn main() -> Result<(), MisakaError> {
             };
             let config = misaka_runtime::config::RuntimeConfig {
                 listen_port: port,
+                data_dir,
                 heartbeat_interval: std::time::Duration::from_secs(heartbeat),
                 peer_timeout: std::time::Duration::from_secs(peer_timeout),
+                advertise_host,
                 discovery: discovery_mode,
                 introspection_addr: if introspect != 0 {
                     Some(format!("127.0.0.1:{}", introspect).parse().unwrap())
@@ -141,7 +166,8 @@ async fn main() -> Result<(), MisakaError> {
 
             // 本机实时资源
             let mut state = misaka_runtime::state::LocalState::new();
-            state.refresh(&mut sysinfo::System::new());
+            let mut resource_provider = SysinfoResourceProvider::new();
+            state.apply_snapshot(resource_provider.snapshot());
             let mem_gb = |b: u64| b as f64 / 1024.0 / 1024.0 / 1024.0;
 
             println!("Misaka Network\n");
@@ -193,8 +219,11 @@ async fn main() -> Result<(), MisakaError> {
                 .ok_or_else(|| {
                     MisakaError::Other("Not running. Run 'misaka start' first.".into())
                 })?;
+            let data_dir =
+                IdentityStore::config_dir().map_err(|e| MisakaError::Other(e.to_string()))?;
             let config = misaka_runtime::config::RuntimeConfig {
                 listen_port: identity.listen_port,
+                data_dir,
                 ..Default::default()
             };
             let node = SisterNode::new(identity, default_encryption_key(), config);
@@ -219,6 +248,23 @@ async fn main() -> Result<(), MisakaError> {
     Ok(())
 }
 
+fn init_tracing(format: &str) {
+    use tracing_subscriber::EnvFilter;
+
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    if format == "json" {
+        let _ = tracing_subscriber::fmt()
+            .json()
+            .with_target(false)
+            .with_env_filter(filter)
+            .try_init();
+    } else {
+        let _ = tracing_subscriber::fmt()
+            .with_target(false)
+            .with_env_filter(filter)
+            .try_init();
+    }
+}
 fn print_result(result: &misaka_core::protocol::JobResultData) {
     println!("────────────────────────────────");
     println!(

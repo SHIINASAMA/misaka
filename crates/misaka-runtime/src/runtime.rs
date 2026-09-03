@@ -33,7 +33,11 @@ impl SisterRuntime {
 
         if let Some(addr) = introspection_addr {
             let bound = node.spawn_introspection_server(addr).await?;
-            println!("[Misaka] introspection serving on {}", bound);
+            tracing::info!(
+                event = "introspection_started",
+                address = %bound,
+                "introspection endpoint started"
+            );
         }
         let listener = node.start_listener().await?;
 

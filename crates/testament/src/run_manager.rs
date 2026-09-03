@@ -37,6 +37,7 @@ pub fn create_run() -> std::io::Result<(String, RunLayout)> {
         sisters_dir: root.join("sisters"),
     };
     std::fs::create_dir_all(&layout.sisters_dir)?;
+    std::fs::File::create(&layout.events_path)?;
     Ok((run_id, layout))
 }
 

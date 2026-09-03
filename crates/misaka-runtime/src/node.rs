@@ -3,6 +3,7 @@ use crate::crypto::Crypto;
 use crate::network::PeerTransport;
 use crate::peer_store::PeerStore;
 use crate::queue::JobQueue;
+use crate::resources::{ResourceProvider, SysinfoResourceProvider};
 use crate::scheduler::Scheduler;
 use crate::state::{LocalJob, LocalState};
 use misaka_core::introspection::{
@@ -50,12 +51,13 @@ pub struct SisterNode {
     /// 调度器
     pub scheduler: Arc<Scheduler>,
 
-    /// 网络收发原语
-    transport: PeerTransport,
+    /// 网络收发原语。
+    pub(crate) transport: PeerTransport,
 }
 
 impl SisterNode {
     pub fn new(identity: SisterIdentity, encryption_key: [u8; 32], config: RuntimeConfig) -> Self {
+        let data_dir = config.data_dir.clone();
         let bind_addr: SocketAddr = format!("0.0.0.0:{}", identity.listen_port).parse().unwrap();
         // 告知 peer 的连接地址: 单机测试用 127.0.0.1; 局域网环境可换成机器 IP。
         let listen_addr: SocketAddr = format!("127.0.0.1:{}", identity.listen_port)
@@ -63,11 +65,12 @@ impl SisterNode {
             .unwrap();
         // 启动时立刻刷新一次本机状态
         let mut local_state = LocalState::new();
-        local_state.refresh(&mut sysinfo::System::new());
+        let mut resource_provider = SysinfoResourceProvider::new();
+        local_state.apply_snapshot(resource_provider.snapshot());
 
         // 从磁盘 seed 已知 peers (供 run 独立进程复用地址)
         let mut peers = PeerStateTable::new();
-        for bp in PeerStore::load_from_file() {
+        for bp in PeerStore::load_from_dir(&data_dir) {
             peers.upsert(PeerState {
                 id: bp.id,
                 nickname: bp.nickname,
@@ -196,186 +199,17 @@ impl SisterNode {
         _addr: SocketAddr,
     ) -> crate::Result<()> {
         let env = self.transport.receive(&mut stream).await?;
-        self.dispatch(env, &mut stream).await
-    }
-
-    async fn dispatch(&self, env: Envelope, stream: &mut TcpStream) -> crate::Result<()> {
-        match env.msg_type {
-            MessageType::Hello => {
-                let hello: HelloData = bincode::deserialize(&env.data)?;
-                self.remember_peer(&hello.identity, &hello.listen_addr)
-                    .await;
-                let reply = Envelope::new(
-                    MessageType::Hello,
-                    self.identity.id.as_u64(),
-                    env.from,
-                    bincode::serialize(&HelloData {
-                        identity: self.identity.as_ref().clone(),
-                        listen_addr: self.listen_addr.to_string(),
-                    })?,
-                );
-                self.transport.reply(stream, &reply).await?;
-            }
-
-            MessageType::State => {
-                let state: StateData = bincode::deserialize(&env.data)?;
-                println!(
-                    "[Misaka] {} <- state from #{} ({}): cpu={:.1}% mem={}/{}, jobs {}/{}",
-                    self.identity.nickname.as_str(),
-                    env.from,
-                    state.identity.nickname.as_str(),
-                    state.cpu_usage,
-                    state.memory_used,
-                    state.memory_total,
-                    state.running_jobs,
-                    state.queued_jobs,
-                );
-                let mut peers = self.peers.write().await;
-                peers.upsert(PeerState {
-                    id: state.identity.id.as_u64(),
-                    nickname: state.identity.nickname.as_str().to_string(),
-                    hostname: state.identity.hostname,
-                    platform: state.identity.platform,
-                    version: state.identity.version,
-                    addr: state.listen_addr,
-                    cpu_usage: state.cpu_usage,
-                    memory_total: state.memory_total,
-                    memory_used: state.memory_used,
-                    running_jobs: state.running_jobs,
-                    queued_jobs: state.queued_jobs,
-                    uptime_secs: state.uptime_secs,
-                    capabilities: state.capabilities,
-                });
-            }
-
-            MessageType::Job => {
-                let job: JobData = bincode::deserialize(&env.data)?;
-                // 若指定了 executor 且不是本机 → 转发
-                if job.executor != 0 && job.executor != self.identity.id.as_u64() {
-                    if let Some(addr) = self.peer_addr(job.executor).await {
-                        println!(
-                            "[Misaka] {} forwarding job {} to #{}",
-                            self.identity.nickname.as_str(),
-                            job.id,
-                            job.executor
-                        );
-                        self.send_fire(
-                            addr,
-                            &Envelope::new(
-                                MessageType::Job,
-                                env.from,
-                                job.executor,
-                                env.data.clone(),
-                            ),
-                        )
-                        .await?;
-                        return Ok(());
-                    }
-                }
-                // 本机执行
-                let job_id = job.id.clone();
-                let full_cmd = job.full_command();
-                let mut local_job = LocalJob::new(job_id.clone(), full_cmd.clone());
-                local_job.creator = job.creator;
-                local_job.creator_addr = Some(job.creator_addr.clone());
-                let mut jobs = self.local_jobs.write().await;
-                jobs.insert(job_id.clone(), local_job.clone());
-                self.job_queue.push(local_job);
-                println!(
-                    "[Misaka] {} queued job {} from #{}: {}",
-                    self.identity.nickname.as_str(),
-                    job_id,
-                    env.from,
-                    full_cmd
-                );
-            }
-
-            MessageType::JobResponse => {
-                let result: JobResultData = bincode::deserialize(&env.data)?;
-                println!(
-                    "[Misaka] {} got result for job {} (executor #{}, exit_code={})",
-                    self.identity.nickname.as_str(),
-                    result.job_id,
-                    result.executor,
-                    result.exit_code
-                );
-                // 唤醒等结果的提交方
-                if let Some(tx) = self.pending_jobs.lock().unwrap().remove(&result.job_id) {
-                    let _ = tx.send(result);
-                }
-            }
-
-            MessageType::JobRequest => {
-                // Work Stealing: 有人来要活。给一个本地排队中的任务。
-                let requester = env.from;
-                let peer_addr = self.peer_addr(requester).await;
-                if let Some(job) = self.job_queue.pop() {
-                    if let Some(addr) = peer_addr {
-                        let job_data = JobData {
-                            id: job.id.clone(),
-                            creator: job.creator,
-                            executor: requester,
-                            creator_addr: job
-                                .creator_addr
-                                .clone()
-                                .unwrap_or_else(|| self.listen_addr.to_string()),
-                            command: job.command.clone(),
-                            arguments: vec![],
-                            created_at: now_secs(),
-                        };
-                        println!(
-                            "[Misaka] {} stealing job {} out to #{}",
-                            self.identity.nickname.as_str(),
-                            job.id,
-                            requester
-                        );
-                        let env = Envelope::new(
-                            MessageType::Job,
-                            self.identity.id.as_u64(),
-                            requester,
-                            bincode::serialize(&job_data)?,
-                        );
-                        if self.send_fire(addr, &env).await.is_ok() {
-                            let mut jobs = self.local_jobs.write().await;
-                            if let Some(local_job) = jobs.get_mut(&job.id) {
-                                local_job.status = JobStatus::Transferred;
-                            }
-                        } else {
-                            // 保留任务，等待下一次请求重试。
-                            self.job_queue.push(job);
-                        }
-                    } else {
-                        self.job_queue.push(job);
-                    }
-                } else if let Some(addr) = peer_addr {
-                    // 没有 → 回 Ack 表示无活
-                    let _ = self
-                        .send_fire(
-                            addr,
-                            &Envelope::new(
-                                MessageType::Ack,
-                                self.identity.id.as_u64(),
-                                requester,
-                                vec![],
-                            ),
-                        )
-                        .await;
-                }
-            }
-
-            _ => {}
-        }
-        Ok(())
+        crate::handler::dispatch(self, env, &mut stream).await
     }
 
     /// 把当前 peer 表持久化到磁盘 (供独立 run 进程解析地址)
     async fn save_peers(&self) {
         let peers = self.peers.read().await;
-        let _ = PeerStore::save_to_file(&peers);
+        let _ = PeerStore::save_to_dir(&peers, &self.config.data_dir);
     }
 
     /// 把 hello 里的身份信息存进 peer 表
-    async fn remember_peer(&self, identity: &SisterIdentity, listen_addr: &str) {
+    pub(crate) async fn remember_peer(&self, identity: &SisterIdentity, listen_addr: &str) {
         let mut peers = self.peers.write().await;
         peers.upsert(PeerState {
             id: identity.id.as_u64(),
@@ -411,10 +245,13 @@ impl SisterNode {
         let hello: HelloData = bincode::deserialize(&reply.data)?;
         self.remember_peer(&hello.identity, &hello.listen_addr)
             .await;
-        println!(
-            "[Misaka] Handshake with {} @ {}",
-            hello.identity.display_name(),
-            hello.listen_addr
+        tracing::info!(
+            event = "peer_connected",
+            sister_id = self.identity.id.as_u64(),
+            peer_id = hello.identity.id.as_u64(),
+            peer_nickname = %hello.identity.nickname.as_str(),
+            peer_addr = %hello.listen_addr,
+            "peer handshake completed"
         );
         Ok(())
     }
@@ -438,10 +275,12 @@ impl SisterNode {
         };
 
         if executor != creator {
-            println!(
-                "[Misaka] {} submits to #{}",
-                self.identity.nickname.as_str(),
-                executor
+            tracing::info!(
+                event = "job_submitted",
+                sister_id = self.identity.id.as_u64(),
+                executor,
+                command = %command,
+                "job submitted to peer"
             );
         }
         self.submit_to_sister(executor, command).await
@@ -471,7 +310,12 @@ impl SisterNode {
         jobs.insert(job.id.clone(), job.clone());
         drop(jobs);
         self.job_queue.push(job);
-        println!("[Misaka] enqueued {}", command);
+        tracing::info!(
+            event = "job_created",
+            sister_id = self.identity.id.as_u64(),
+            command = %command,
+            "local job queued"
+        );
         Ok(())
     }
 
@@ -549,8 +393,13 @@ impl SisterNode {
                 lj.started_at = Some(started);
             }
         }
-        println!("[Misaka] executing locally: {}", command);
-        let result = execute_blocking(command.to_string()).await;
+        tracing::info!(
+            event = "job_started",
+            sister_id = self.identity.id.as_u64(),
+            command = %command,
+            "job execution started"
+        );
+        let result = crate::executor::execute_blocking(command.to_string()).await;
         let finished = now_secs();
 
         let job_result = JobResultData {
@@ -576,16 +425,27 @@ impl SisterNode {
                 lj.result_output = Some(result.full_output());
             }
         }
-        println!(
-            "[Misaka] job {} done -> {:?}\n{}",
-            job_id,
-            if result.success() {
-                "completed"
-            } else {
-                "failed"
-            },
-            result.full_output()
-        );
+        if result.success() {
+            tracing::info!(
+                event = "job_completed",
+                sister_id = self.identity.id.as_u64(),
+                job_id = %job_id,
+                success = true,
+                exit_code = result.exit_code,
+                output = %result.full_output(),
+                "local job finished"
+            );
+        } else {
+            tracing::warn!(
+                event = "job_failed",
+                sister_id = self.identity.id.as_u64(),
+                job_id = %job_id,
+                success = false,
+                exit_code = result.exit_code,
+                output = %result.full_output(),
+                "local job failed"
+            );
+        }
         job_result
     }
 
@@ -598,22 +458,28 @@ impl SisterNode {
                 self.identity.id.as_u64(),
                 &self.identity.hostname,
                 &self.identity.platform,
-                self.identity.listen_port,
+                self.listen_addr,
                 tx,
             ) {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!("[Misaka] mDNS advertise failed: {:?}", e);
+                    tracing::warn!(
+                        event = "discovery_advertise_failed",
+                        error = ?e,
+                        "mDNS advertisement failed"
+                    );
                     return Ok(());
                 }
             };
             (s, rx)
         };
 
-        println!(
-            "[Misaka] mDNS advertising as {} (port {})",
-            self.identity.nickname.as_str(),
-            self.identity.listen_port
+        tracing::info!(
+            event = "discovery_started",
+            sister_id = self.identity.id.as_u64(),
+            nickname = %self.identity.nickname.as_str(),
+            listen_addr = %self.listen_addr,
+            "mDNS advertisement started"
         );
 
         while let Some(instance) = rx.recv().await {
@@ -648,9 +514,13 @@ impl SisterNode {
                         .cloned()
                         .flatten()
                         .unwrap_or_default();
-                    println!(
-                        "[Misaka] mDNS discovered #{} \"{}\" @ {}",
-                        peer_id, nick, addr
+                    tracing::info!(
+                        event = "peer_discovered",
+                        sister_id = self.identity.id.as_u64(),
+                        peer_id,
+                        nickname = %nick,
+                        peer_addr = %addr,
+                        "mDNS peer discovered"
                     );
                     // 握手
                     let _ = self.add_known_peer(addr).await;
@@ -685,10 +555,11 @@ impl SisterNode {
     /// 启动监听，返回 listener
     pub async fn start_listener(&self) -> crate::Result<TcpListener> {
         let listener = TcpListener::bind(self.bind_addr).await?;
-        println!(
-            "[Misaka] {} listening on {}",
-            self.identity.display_name(),
-            self.bind_addr
+        tracing::info!(
+            event = "sister_started",
+            sister_id = self.identity.id.as_u64(),
+            listen_addr = %self.bind_addr,
+            "Sister listener started"
         );
         Ok(listener)
     }
@@ -713,11 +584,12 @@ impl SisterNode {
     /// 周期刷新本机状态并广播给已知 peers
     pub async fn state_broadcast_loop(&self) -> crate::Result<()> {
         let mut interval = tokio::time::interval(self.config.heartbeat_interval);
+        let mut resource_provider = SysinfoResourceProvider::new();
         loop {
             interval.tick().await;
             {
                 let mut state = self.local_state.write().await;
-                state.refresh(&mut sysinfo::System::new());
+                state.apply_snapshot(resource_provider.snapshot());
                 // 从任务表统计排队/运行数，比 job_queue.len() 更准确
                 // (排队任务被 pop 后标记 running，若前面有长任务，queue.len() 会掉到 0 但仍有积压)
                 let jobs = self.local_jobs.read().await;
@@ -778,140 +650,28 @@ impl SisterNode {
             let mut peers = self.peers.write().await;
             let removed = peers.prune_offline(self.config.peer_timeout);
             if !removed.is_empty() {
-                println!(
-                    "[Misaka] {} sister(s) went offline: {:?}",
-                    removed.len(),
-                    removed
+                tracing::info!(
+                    event = "peer_offline",
+                    sister_id = self.identity.id.as_u64(),
+                    peer_ids = ?removed,
+                    "peer timeout cleanup removed offline peers"
                 );
             }
         }
     }
 
-    /// 工作窃取循环: 本机真正空闲 (无运行 + 无排队) 时，
-    /// 主动向已知 peer 要活。
+    /// 工作窃取循环由独立 stealing service 承担。
     pub async fn work_stealing_loop(&self, steal_when_lt: usize) -> crate::Result<()> {
-        let mut interval = tokio::time::interval(self.config.steal_interval);
-        loop {
-            interval.tick().await;
-            // 只在本地真的没活干时才去偷
-            let is_busy = {
-                let jobs = self.local_jobs.read().await;
-                jobs.values()
-                    .any(|j| j.status == JobStatus::Running || j.status == JobStatus::Queued)
-                    || !self.job_queue.is_empty()
-            };
-            if is_busy || self.job_queue.len() >= steal_when_lt {
-                continue;
-            }
-            // 从已知 peer 里挑一个，请求它给我们一个排队任务
-            let target = {
-                let peers = self.peers.read().await;
-                let list = peers.all();
-                list.into_iter()
-                    .filter(|p| p.queued_jobs > 0) // 只向确实有积压任务的 peer 要
-                    .min_by(|a, b| {
-                        a.cpu_usage
-                            .partial_cmp(&b.cpu_usage)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    })
-            };
-            if let Some(p) = target {
-                println!(
-                    "[Misaka] {} wants work from #{} (peer has {} queued)",
-                    self.identity.nickname.as_str(),
-                    p.id,
-                    p.queued_jobs
-                );
-                let _ = self.request_work_from(p.id).await;
-            }
-        }
+        crate::stealing::run(self, steal_when_lt).await
     }
 
-    /// 本地执行队列循环：从 job_queue 弹出任务并执行。
-    /// 若任务来自远端 (creator != 本机)，执行完要回送 JobResponse 给创建者。
+    /// 本地执行队列循环由独立 executor service 承担。
     pub async fn local_executor_loop(&self) -> crate::Result<()> {
-        loop {
-            if let Some(job) = self.job_queue.pop() {
-                let mut jobs = self.local_jobs.write().await;
-                if let Some(lj) = jobs.get_mut(&job.id) {
-                    lj.status = JobStatus::Running;
-                    lj.started_at = Some(now_secs());
-                }
-                drop(jobs);
-
-                println!("[Misaka] executing locally: {}", job.command);
-                let result = execute_blocking(job.command.clone()).await;
-
-                let finished = now_secs();
-                let job_result = JobResultData {
-                    job_id: job.id.clone(),
-                    creator: job.creator,
-                    executor: self.identity.id.as_u64(),
-                    output: result.full_output(),
-                    exit_code: result.exit_code,
-                    success: result.success(),
-                    started_at: job.started_at.unwrap_or(finished),
-                    finished_at: finished,
-                };
-
-                let mut jobs = self.local_jobs.write().await;
-                if let Some(lj) = jobs.get_mut(&job.id) {
-                    lj.status = if result.success() {
-                        JobStatus::Completed
-                    } else {
-                        JobStatus::Failed
-                    };
-                    lj.finished_at = Some(finished);
-                    lj.result_output = Some(result.full_output());
-                    println!(
-                        "[Misaka] job {} -> {:?}\n{}",
-                        job.id,
-                        lj.status,
-                        result.full_output()
-                    );
-                }
-                drop(jobs);
-
-                // 远端委派来的任务：回送结果给 creator
-                if job.creator != self.identity.id.as_u64() {
-                    if let Some(creator_addr) = job.creator_addr {
-                        if let Ok(addr) = creator_addr.parse::<SocketAddr>() {
-                            let env = Envelope::new(
-                                MessageType::JobResponse,
-                                self.identity.id.as_u64(),
-                                job.creator,
-                                bincode::serialize(&job_result)?,
-                            );
-                            let _ = self.send_fire(addr, &env).await;
-                        }
-                    }
-                }
-            } else {
-                tokio::time::sleep(self.config.executor_poll_interval).await;
-            }
-        }
+        crate::executor::run(self).await
     }
 }
 
-async fn execute_blocking(command: String) -> crate::commands::CommandResult {
-    match tokio::task::spawn_blocking(move || crate::commands::CommandExecutor::execute(&command))
-        .await
-    {
-        Ok(Ok(result)) => result,
-        Ok(Err(e)) => crate::commands::CommandResult {
-            stdout: format!("Error: {}", e),
-            stderr: String::new(),
-            exit_code: -1,
-        },
-        Err(e) => crate::commands::CommandResult {
-            stdout: format!("Error: command worker failed: {}", e),
-            stderr: String::new(),
-            exit_code: -1,
-        },
-    }
-}
-
-fn now_secs() -> u64 {
+pub(crate) fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

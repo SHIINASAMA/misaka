@@ -13,6 +13,8 @@ pub enum MisakaError {
     Crypto(String),
     #[error("Address parse error: {0}")]
     Addr(#[from] std::net::AddrParseError),
+    #[error("Frame length {length} exceeds maximum {max}")]
+    FrameTooLarge { length: usize, max: usize },
     #[error("Unknown: {0}")]
     Other(String),
 }

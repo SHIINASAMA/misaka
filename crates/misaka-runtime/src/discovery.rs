@@ -19,12 +19,11 @@ pub fn advertise(
     sister_id: u64,
     hostname: &str,
     platform: &str,
-    port: u16,
+    addr: SocketAddr,
     report: tokio::sync::mpsc::Sender<InstanceInformation>,
 ) -> Result<ServiceDiscovery, simple_mdns::SimpleMdnsError> {
     let info = InstanceInformation::new(nickname.to_string())
-        // 单机测试用 127.0.0.1；真实局域网应使用机器 IP (见 ADVERTISE_HOST 说明)
-        .with_socket_address(format!("127.0.0.1:{}", port).parse().unwrap())
+        .with_socket_address(addr)
         .with_attribute(TXT_ID.to_string(), Some(sister_id.to_string()))
         .with_attribute(TXT_NICK.to_string(), Some(nickname.to_string()))
         .with_attribute(TXT_HOST.to_string(), Some(hostname.to_string()))

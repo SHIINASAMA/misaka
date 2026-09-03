@@ -9,6 +9,8 @@ use crate::supervisor::{build_spawn, CliProcess, SisterProcess, SpawnConfig};
 use crate::types::{Artifacts, Manifest, Report, RunLayout, SisterEntry};
 use misaka_core::introspection::IntrospectionSnapshot;
 use std::collections::HashMap;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -214,9 +216,33 @@ impl Context {
         };
         process.terminate();
         process.wait().map_err(|e| format!("wait {alias}: {e}"))?;
+        self.collect_entry_events(&process.entry);
         self.entries.remove(alias);
         self.manifest.sisters.retain(|entry| entry.alias != alias);
         Ok(())
+    }
+
+    fn collect_entry_events(&self, entry: &SisterEntry) {
+        let Ok(mut events) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.layout.events_path)
+        else {
+            return;
+        };
+        for path in [&entry.stdout_log, &entry.stderr_log] {
+            if let Ok(contents) = std::fs::read_to_string(path) {
+                for line in contents.lines().filter(|line| !line.is_empty()) {
+                    let _ = writeln!(events, "{}", line);
+                }
+            }
+        }
+    }
+
+    fn collect_events(&self) {
+        for entry in self.entries.values() {
+            self.collect_entry_events(entry);
+        }
     }
 
     /// 全部停止并清理。
@@ -225,6 +251,7 @@ impl Context {
             p.terminate();
             let _ = p.wait();
         }
+        self.collect_events();
         // 已结束的场景不应让 down 误杀未来复用这些 PID 的进程。
         for entry in &mut self.manifest.sisters {
             entry.pid = None;

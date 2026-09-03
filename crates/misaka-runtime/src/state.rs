@@ -1,10 +1,8 @@
-use misaka_core::JobStatus;
+use crate::resources::detect_capabilities;
+use misaka_core::{JobStatus, ResourceSnapshot};
 use serde::{Deserialize, Serialize};
 
-pub const PEER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-pub const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
-
-/// 本地资源状态,由 sysinfo 定期刷新
+/// 本地资源状态，由资源 provider 提供系统指标。
 #[derive(Debug, Clone)]
 pub struct LocalState {
     pub cpu_usage: f32,
@@ -29,14 +27,15 @@ impl LocalState {
         }
     }
 
-    /// 刷新系统指标
-    pub fn refresh(&mut self, system: &mut sysinfo::System) {
-        system.refresh_cpu();
-        system.refresh_memory();
-        self.cpu_usage = system.global_cpu_info().cpu_usage();
-        self.memory_total = system.total_memory();
-        self.memory_used = system.used_memory();
-        self.uptime_secs = sysinfo::System::uptime();
+    /// 应用资源 provider 的最新快照。
+    pub fn apply_snapshot(&mut self, snapshot: ResourceSnapshot) {
+        self.cpu_usage = snapshot.cpu_usage;
+        self.memory_total = snapshot.memory_total;
+        self.memory_used = snapshot.memory_used;
+        self.running_jobs = snapshot.running_jobs;
+        self.queued_jobs = snapshot.queued_jobs;
+        self.uptime_secs = snapshot.uptime_secs;
+        self.capabilities = snapshot.capabilities;
     }
 }
 
@@ -44,15 +43,6 @@ impl Default for LocalState {
     fn default() -> Self {
         Self::new()
     }
-}
-
-fn detect_capabilities() -> Vec<String> {
-    let mut caps = Vec::new();
-    if std::env::consts::OS == "macos" || std::env::consts::OS == "linux" {
-        caps.push("posix-shell".into());
-    }
-    caps.push("unknown".into());
-    caps
 }
 
 /// 记录本地任务的运行状态

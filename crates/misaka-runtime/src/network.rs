@@ -4,7 +4,7 @@
 //! encrypt/decrypt, send, receive. No protocol dispatch, no job logic.
 
 use crate::crypto::Crypto;
-use misaka_core::Envelope;
+use misaka_core::{Envelope, PROTOCOL_VERSION};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -54,6 +54,32 @@ pub async fn bind(addr: std::net::SocketAddr) -> crate::Result<TcpListener> {
     Ok(TcpListener::bind(addr).await?)
 }
 
+fn validate_protocol_version(version: u16) -> crate::Result<()> {
+    if version != PROTOCOL_VERSION {
+        return Err(crate::Error::Other(format!(
+            "unsupported protocol version: expected {}, got {}",
+            PROTOCOL_VERSION, version
+        )));
+    }
+    Ok(())
+}
+
+/// Maximum encrypted payload accepted in one frame.
+///
+/// Rejecting oversized lengths before allocation prevents a peer from
+/// requesting an unbounded inbound buffer.
+pub const MAX_FRAME_LENGTH: usize = 4 * 1024 * 1024;
+
+fn validate_frame_length(length: usize) -> crate::Result<()> {
+    if length > MAX_FRAME_LENGTH {
+        return Err(crate::Error::FrameTooLarge {
+            length,
+            max: MAX_FRAME_LENGTH,
+        });
+    }
+    Ok(())
+}
+
 /// 序列化 + 加密 + 写入 stream (frame: [len:u32 BE][ciphertext])
 pub async fn write_envelope(
     stream: &mut TcpStream,
@@ -62,6 +88,7 @@ pub async fn write_envelope(
 ) -> crate::Result<()> {
     let plaintext = bincode::serialize(env)?;
     let encrypted = crypto.encrypt(&plaintext)?;
+    validate_frame_length(encrypted.len())?;
     stream
         .write_all(&(encrypted.len() as u32).to_be_bytes())
         .await?;
@@ -74,9 +101,31 @@ pub async fn read_envelope(stream: &mut TcpStream, crypto: &Crypto) -> crate::Re
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf).await?;
     let len = u32::from_be_bytes(len_buf) as usize;
+    validate_frame_length(len)?;
     let mut buf = vec![0u8; len];
     stream.read_exact(&mut buf).await?;
     let decrypted = crypto.decrypt(&buf)?;
     let env: Envelope = bincode::deserialize(&decrypted)?;
+    validate_protocol_version(env.protocol_version)?;
     Ok(env)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frame_length_is_bounded_before_allocation() {
+        assert!(validate_frame_length(MAX_FRAME_LENGTH).is_ok());
+        assert!(matches!(
+            validate_frame_length(MAX_FRAME_LENGTH + 1),
+            Err(crate::Error::FrameTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn protocol_version_rejects_unknown_versions() {
+        assert!(validate_protocol_version(PROTOCOL_VERSION).is_ok());
+        assert!(validate_protocol_version(PROTOCOL_VERSION + 1).is_err());
+    }
 }
