@@ -77,7 +77,11 @@ async fn main() -> Result<(), MisakaError> {
             println!("  Version: {}", identity.version);
 
             let key = identity_key();
-            let node = SisterNode::new(identity, key);
+            let config = misaka_runtime::config::RuntimeConfig {
+                listen_port: port,
+                ..Default::default()
+            };
+            let node = SisterNode::new(identity, key, config);
 
             // 启动监听
             let listener = node.start_listener().await?;
@@ -189,7 +193,11 @@ async fn main() -> Result<(), MisakaError> {
                     MisakaError::Other("Not running. Run 'misaka start' first.".into())
                 })?;
             let key = identity_key();
-            let node = SisterNode::new(identity, key);
+            let config = misaka_runtime::config::RuntimeConfig {
+                listen_port: identity.listen_port,
+                ..Default::default()
+            };
+            let node = SisterNode::new(identity, key, config);
 
             if local {
                 println!("[Misaka] run --local: {}", command);

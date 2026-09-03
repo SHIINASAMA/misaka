@@ -15,6 +15,7 @@ pub enum CryptoError {
     DecryptionFailed,
 }
 
+#[derive(Clone)]
 pub struct Crypto {
     cipher: Aes256Gcm,
 }

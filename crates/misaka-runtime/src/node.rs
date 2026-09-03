@@ -1,8 +1,10 @@
+use crate::config::RuntimeConfig;
 use crate::crypto::Crypto;
+use crate::network::PeerTransport;
 use crate::peer_store::PeerStore;
 use crate::queue::JobQueue;
 use crate::scheduler::Scheduler;
-use crate::state::{LocalJob, LocalState, HEARTBEAT_INTERVAL, PEER_TIMEOUT};
+use crate::state::{LocalJob, LocalState};
 use misaka_core::protocol::*;
 use misaka_core::JobStatus;
 use misaka_core::SisterIdentity;
@@ -10,7 +12,6 @@ use misaka_core::{PeerState, PeerStateTable};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{oneshot, RwLock};
 
@@ -20,6 +21,8 @@ use tokio::sync::{oneshot, RwLock};
 pub struct SisterNode {
     pub identity: Arc<SisterIdentity>,
     encryption_key: [u8; 32],
+    /// 运行配置 (集中定时器/端口)
+    pub config: RuntimeConfig,
 
     pub bind_addr: SocketAddr,
 
@@ -43,10 +46,13 @@ pub struct SisterNode {
 
     /// 调度器
     pub scheduler: Arc<Scheduler>,
+
+    /// 网络收发原语
+    transport: PeerTransport,
 }
 
 impl SisterNode {
-    pub fn new(identity: SisterIdentity, encryption_key: [u8; 32]) -> Self {
+    pub fn new(identity: SisterIdentity, encryption_key: [u8; 32], config: RuntimeConfig) -> Self {
         let bind_addr: SocketAddr = format!("0.0.0.0:{}", identity.listen_port).parse().unwrap();
         // 告知 peer 的连接地址: 单机测试用 127.0.0.1; 局域网环境可换成机器 IP。
         let listen_addr: SocketAddr = format!("127.0.0.1:{}", identity.listen_port)
@@ -79,6 +85,7 @@ impl SisterNode {
         Self {
             identity: Arc::new(identity),
             encryption_key,
+            config,
             bind_addr,
             listen_addr,
             peers: Arc::new(RwLock::new(peers)),
@@ -87,6 +94,7 @@ impl SisterNode {
             local_jobs: Arc::new(RwLock::new(HashMap::new())),
             pending_jobs: Arc::new(Mutex::new(HashMap::new())),
             scheduler: Arc::new(Scheduler::new()),
+            transport: PeerTransport::new(Crypto::new(&encryption_key).unwrap()),
         }
     }
 
@@ -109,17 +117,12 @@ impl SisterNode {
 
     /// 打开一条短连接发送 envelope，等待一条响应
     pub async fn send_to(&self, addr: SocketAddr, env: &Envelope) -> crate::Result<Envelope> {
-        let mut stream = TcpStream::connect(addr).await?;
-        write_envelope(&mut stream, &self.get_crypto(), env).await?;
-        let resp = read_envelope(&mut stream, &self.get_crypto()).await?;
-        Ok(resp)
+        self.transport.send_to(addr, env).await
     }
 
     /// 单向发送 (不等待响应)
     pub async fn send_fire(&self, addr: SocketAddr, env: &Envelope) -> crate::Result<()> {
-        let mut stream = TcpStream::connect(addr).await?;
-        write_envelope(&mut stream, &self.get_crypto(), env).await?;
-        Ok(())
+        self.transport.send_fire(addr, env).await
     }
 
     /// 从 peer 表取一个 peer 的对外地址
@@ -135,7 +138,7 @@ impl SisterNode {
         mut stream: TcpStream,
         _addr: SocketAddr,
     ) -> crate::Result<()> {
-        let env = read_envelope(&mut stream, &self.get_crypto()).await?;
+        let env = self.transport.receive(&mut stream).await?;
         self.dispatch(env, &mut stream).await
     }
 
@@ -154,7 +157,7 @@ impl SisterNode {
                         listen_addr: self.listen_addr.to_string(),
                     })?,
                 );
-                write_envelope(stream, &self.get_crypto(), &reply).await?;
+                self.transport.reply(stream, &reply).await?;
             }
 
             MessageType::State => {
@@ -452,7 +455,7 @@ impl SisterNode {
         );
         self.send_fire(exec_addr, &env).await?;
 
-        tokio::time::timeout(std::time::Duration::from_secs(60), rx)
+        tokio::time::timeout(self.config.job_timeout, rx)
             .await
             .map_err(|_| crate::Error::Other(format!("job {} timed out", job_id)))?
             .map_err(|_| crate::Error::Other(format!("job {} canceled", job_id)))
@@ -648,7 +651,7 @@ impl SisterNode {
 
     /// 周期刷新本机状态并广播给已知 peers
     pub async fn state_broadcast_loop(&self) -> crate::Result<()> {
-        let mut interval = tokio::time::interval(HEARTBEAT_INTERVAL);
+        let mut interval = tokio::time::interval(self.config.heartbeat_interval);
         loop {
             interval.tick().await;
             {
@@ -708,11 +711,11 @@ impl SisterNode {
 
     /// 离线清理循环
     pub async fn cleanup_loop(&self) -> crate::Result<()> {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
+        let mut interval = tokio::time::interval(self.config.cleanup_interval);
         loop {
             interval.tick().await;
             let mut peers = self.peers.write().await;
-            let removed = peers.prune_offline(PEER_TIMEOUT);
+            let removed = peers.prune_offline(self.config.peer_timeout);
             if !removed.is_empty() {
                 println!(
                     "[Misaka] {} sister(s) went offline: {:?}",
@@ -726,7 +729,7 @@ impl SisterNode {
     /// 工作窃取循环: 本机真正空闲 (无运行 + 无排队) 时，
     /// 主动向已知 peer 要活。
     pub async fn work_stealing_loop(&self, steal_when_lt: usize) -> crate::Result<()> {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(4));
+        let mut interval = tokio::time::interval(self.config.steal_interval);
         loop {
             interval.tick().await;
             // 只在本地真的没活干时才去偷
@@ -828,7 +831,7 @@ impl SisterNode {
                     }
                 }
             } else {
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                tokio::time::sleep(self.config.executor_poll_interval).await;
             }
         }
     }
@@ -844,31 +847,4 @@ fn now_secs() -> u64 {
 fn rand_int() -> u64 {
     use rand::Rng;
     rand::thread_rng().gen::<u64>()
-}
-
-/// 序列化 + 加密 + 写入 stream
-pub async fn write_envelope(
-    stream: &mut TcpStream,
-    crypto: &Crypto,
-    env: &Envelope,
-) -> crate::Result<()> {
-    let plaintext = bincode::serialize(env)?;
-    let encrypted = crypto.encrypt(&plaintext)?;
-    stream
-        .write_all(&(encrypted.len() as u32).to_be_bytes())
-        .await?;
-    stream.write_all(&encrypted).await?;
-    Ok(())
-}
-
-/// 从 stream 读取 + 解密 + 反序列化
-pub async fn read_envelope(stream: &mut TcpStream, crypto: &Crypto) -> crate::Result<Envelope> {
-    let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf).await?;
-    let len = u32::from_be_bytes(len_buf) as usize;
-    let mut buf = vec![0u8; len];
-    stream.read_exact(&mut buf).await?;
-    let decrypted = crypto.decrypt(&buf)?;
-    let env: Envelope = bincode::deserialize(&decrypted)?;
-    Ok(env)
 }
