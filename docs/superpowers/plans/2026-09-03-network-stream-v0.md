@@ -817,3 +817,18 @@ QUIC bidirectional stream, without changing the runtime's Direct TCP default.
   while preserving the default relay behavior.
 - [x] Document explicit relay use as a measurement control, not as a new
   backend or an automatic claim of external connectivity.
+
+### Task 50: Reuse Iroh sessions from ConnectionManager
+
+**Files:**
+- Modify: `crates/misaka-network/src/iroh_backend.rs`
+- Modify: `crates/misaka-runtime/src/connection.rs`
+- Modify: `docs/iroh-backend-spike-v0.md`
+- Modify: `docs/network-stream-v0.md`
+
+- [x] Establish Iroh sessions in the existing candidate race so a winning
+  Iroh path can carry multiple logical streams.
+- [x] Cache one Iroh session per Sister in `ConnectionManager` while keeping
+  Direct TCP one-stream-per-connection behavior.
+- [x] Bound logical-stream handshakes and verify explicit Iroh session reuse
+  with a deterministic runtime test.

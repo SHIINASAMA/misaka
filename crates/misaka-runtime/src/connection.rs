@@ -3,7 +3,8 @@ use misaka_core::SisterId;
 use misaka_network::resolver::{rank_candidates, EndpointCandidate};
 use misaka_network::tls::{TlsClient, TlsIdentity};
 use misaka_network::{
-    DirectTcpBackend, IrohBackend, NetworkBackend, NetworkEndpoint, NetworkError, NetworkStream,
+    DirectTcpBackend, IrohBackend, IrohSession, NetworkBackend, NetworkEndpoint, NetworkError,
+    NetworkStream,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -61,6 +62,15 @@ impl SisterConnector {
         &self,
         sister: SisterId,
     ) -> Result<NetworkStream, ConnectionError> {
+        self.connect_to_sister_with_session(sister)
+            .await
+            .map(|connection| connection.stream)
+    }
+
+    async fn connect_to_sister_with_session(
+        &self,
+        sister: SisterId,
+    ) -> Result<ConnectedStream, ConnectionError> {
         let peer = self
             .peers
             .get(sister.as_u64())
@@ -95,9 +105,26 @@ impl SisterConnector {
             let iroh = self.iroh_backend.clone();
             attempts.push(async move {
                 let result = match candidate.endpoint.clone() {
-                    NetworkEndpoint::Tcp(_) => direct.connect(candidate.endpoint.clone()).await,
+                    NetworkEndpoint::Tcp(_) => direct
+                        .connect(candidate.endpoint.clone())
+                        .await
+                        .map(|stream| ConnectedStream {
+                            stream,
+                            iroh_session: None,
+                        }),
                     NetworkEndpoint::Iroh(endpoint) => match iroh {
-                        Some(backend) => backend.connect(NetworkEndpoint::Iroh(endpoint)).await,
+                        Some(backend) => match backend
+                            .connect_session(NetworkEndpoint::Iroh(endpoint))
+                            .await
+                        {
+                            Ok(session) => {
+                                session.open_stream().await.map(|stream| ConnectedStream {
+                                    stream,
+                                    iroh_session: Some(session),
+                                })
+                            }
+                            Err(error) => Err(error),
+                        },
                         None => Err(NetworkError::UnsupportedEndpoint(
                             "Iroh candidate requires an explicitly configured Iroh backend"
                                 .to_string(),
@@ -260,11 +287,18 @@ pub enum ConnectionState {
 ///
 /// The manager deliberately does not own or recover a `NetworkStream`. The
 /// caller owns each returned stream and reports EOF/I/O failure with
-/// `mark_disconnected`; a later `open_stream` creates a fresh connection.
+/// `mark_disconnected`; a later `open_stream` reuses a healthy Iroh session or
+/// creates a fresh candidate connection.
 #[derive(Clone)]
 pub struct ConnectionManager {
     connector: SisterConnector,
     states: Arc<Mutex<HashMap<u64, ConnectionState>>>,
+    iroh_sessions: Arc<Mutex<HashMap<u64, IrohSession>>>,
+}
+
+struct ConnectedStream {
+    stream: NetworkStream,
+    iroh_session: Option<IrohSession>,
 }
 
 impl ConnectionManager {
@@ -272,6 +306,7 @@ impl ConnectionManager {
         Self {
             connector,
             states: Arc::new(Mutex::new(HashMap::new())),
+            iroh_sessions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -297,19 +332,44 @@ impl ConnectionManager {
             states.insert(sister.as_u64(), ConnectionState::Connecting);
         }
 
-        match self.connector.connect_to_sister(sister.clone()).await {
-            Ok(stream) => {
+        let sister_id = sister.as_u64();
+        if let Some(session) = self.iroh_sessions.lock().await.get(&sister_id).cloned() {
+            match tokio::time::timeout(misaka_network::HANDSHAKE_TIMEOUT, session.open_stream())
+                .await
+            {
+                Ok(Ok(stream)) => {
+                    self.states
+                        .lock()
+                        .await
+                        .insert(sister_id, ConnectionState::Connected);
+                    return Ok(stream);
+                }
+                _ => {
+                    self.iroh_sessions.lock().await.remove(&sister_id);
+                }
+            }
+        }
+
+        match self
+            .connector
+            .connect_to_sister_with_session(sister.clone())
+            .await
+        {
+            Ok(connection) => {
+                if let Some(session) = connection.iroh_session {
+                    self.iroh_sessions.lock().await.insert(sister_id, session);
+                }
                 self.states
                     .lock()
                     .await
-                    .insert(sister.as_u64(), ConnectionState::Connected);
-                Ok(stream)
+                    .insert(sister_id, ConnectionState::Connected);
+                Ok(connection.stream)
             }
             Err(error) => {
                 self.states
                     .lock()
                     .await
-                    .insert(sister.as_u64(), ConnectionState::Disconnected);
+                    .insert(sister_id, ConnectionState::Disconnected);
                 Err(error)
             }
         }
@@ -330,7 +390,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     fn install_test_crypto_provider() {
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     }
 
     #[tokio::test]
@@ -445,6 +505,101 @@ mod tests {
         second.read_exact(&mut second_response).await.unwrap();
         assert_eq!(&second_response, b"second");
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn connection_manager_reuses_an_iroh_session_for_explicit_streams() {
+        let server_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .alpns(vec![misaka_network::IROH_ALPN.to_vec()])
+            .bind_addr("127.0.0.1:0")
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let client_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .alpns(vec![misaka_network::IROH_ALPN.to_vec()])
+            .bind_addr("127.0.0.1:0")
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let server_backend = IrohBackend::new(server_endpoint, misaka_network::IROH_ALPN);
+        let client_backend = IrohBackend::new(client_endpoint, misaka_network::IROH_ALPN);
+        let server_endpoint_addr = iroh::EndpointAddr::new(server_backend.endpoint().id())
+            .with_ip_addr(server_backend.endpoint().bound_sockets()[0]);
+        let server_task = tokio::spawn(async move {
+            let session = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                server_backend.accept_session(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            for response in [b"first".as_slice(), b"second".as_slice()] {
+                let mut stream = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    session.accept_stream(),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                stream.write_all(response).await.unwrap();
+                let mut ack = [0u8; 3];
+                stream.read_exact(&mut ack).await.unwrap();
+                assert_eq!(&ack, b"ack");
+            }
+        });
+
+        let peer = PeerState {
+            id: 42,
+            nickname: "peer".into(),
+            hostname: "host".into(),
+            platform: "test".into(),
+            version: "0.1".into(),
+            stream_endpoints: vec![format!("{}", NetworkEndpoint::Iroh(server_endpoint_addr))],
+            stream_certificate: None,
+            addr: "127.0.0.1:31700".into(),
+            cpu_usage: 0.0,
+            memory_total: 0,
+            memory_used: 0,
+            running_jobs: 0,
+            queued_jobs: 0,
+            uptime_secs: 0,
+            capabilities: vec![],
+        };
+        let service = crate::peer_service::PeerService::new(
+            crate::peer_registry::PeerRegistry::new_seeded(vec![peer]),
+            std::path::PathBuf::from("."),
+        );
+        let manager = super::ConnectionManager::new_with_iroh_backend(service, client_backend);
+        let sister = SisterId(42);
+
+        let mut first = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            manager.open_stream(sister.clone()),
+        )
+        .await
+        .expect("first Iroh stream timed out")
+        .unwrap();
+        let mut first_response = [0u8; 5];
+        first.read_exact(&mut first_response).await.unwrap();
+        assert_eq!(&first_response, b"first");
+        first.write_all(b"ack").await.unwrap();
+        drop(first);
+        manager.mark_disconnected(&sister).await;
+
+        let mut second = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            manager.open_stream(sister),
+        )
+        .await
+        .expect("second Iroh stream timed out")
+        .unwrap();
+        let mut second_response = [0u8; 6];
+        second.read_exact(&mut second_response).await.unwrap();
+        assert_eq!(&second_response, b"second");
+        second.write_all(b"ack").await.unwrap();
+        server_task.await.unwrap();
     }
 
     #[tokio::test]

@@ -71,8 +71,14 @@ lifecycle and rotation requirements.
   that connection. The opt-in runtime listener now owns each accepted Iroh
   session and dispatches its logical streams independently; Direct TCP keeps
   its existing one-stream-per-accepted-socket behavior.
-- One logical operation still owns one `NetworkStream`; no session
-  multiplexing or transparent reconnect is introduced.
+- `ConnectionManager` caches an established Iroh session per Sister and opens
+  later logical streams on it. A caller's explicit `mark_disconnected` only
+  marks logical-stream state; it does not tear down a healthy Iroh session.
+  Failed logical-stream handshakes are bounded by the five-second handshake
+  timeout before candidate connection fallback.
+- One logical operation still owns one `NetworkStream`; Iroh session reuse is
+  explicit inside `ConnectionManager`, with no transparent stream migration
+  or background reconnect.
 - The current listener compatibility metadata remains a `SocketAddr`; relay
   acceptances report `0.0.0.0:0` because their meaningful identity is the
   authenticated Iroh endpoint ID, not a TCP peer address.

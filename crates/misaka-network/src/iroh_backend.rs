@@ -145,8 +145,17 @@ impl IrohSession {
             .open_bi()
             .await
             .map_err(|error| NetworkError::Iroh(error.to_string()))?;
-        write_handshake(&mut send).await?;
-        read_and_validate_handshake(&mut recv).await?;
+        tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
+            write_handshake(&mut send).await?;
+            read_and_validate_handshake(&mut recv).await
+        })
+        .await
+        .map_err(|_| NetworkError::Handshake {
+            reason: format!(
+                "Iroh logical stream handshake timed out after {} seconds",
+                HANDSHAKE_TIMEOUT.as_secs()
+            ),
+        })??;
         Ok(network_stream(
             send,
             recv,
@@ -163,8 +172,17 @@ impl IrohSession {
                     reason: "Iroh logical stream open timed out".to_string(),
                 })?
                 .map_err(|error| NetworkError::Iroh(error.to_string()))?;
-        read_and_validate_handshake(&mut recv).await?;
-        write_handshake(&mut send).await?;
+        tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
+            read_and_validate_handshake(&mut recv).await?;
+            write_handshake(&mut send).await
+        })
+        .await
+        .map_err(|_| NetworkError::Handshake {
+            reason: format!(
+                "Iroh logical stream handshake timed out after {} seconds",
+                HANDSHAKE_TIMEOUT.as_secs()
+            ),
+        })??;
         Ok(network_stream(
             send,
             recv,
@@ -219,8 +237,17 @@ impl crate::NetworkBackend for IrohBackend {
             .open_bi()
             .await
             .map_err(|error| NetworkError::Iroh(error.to_string()))?;
-        write_handshake(&mut send).await?;
-        read_and_validate_handshake(&mut recv).await?;
+        tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
+            write_handshake(&mut send).await?;
+            read_and_validate_handshake(&mut recv).await
+        })
+        .await
+        .map_err(|_| NetworkError::Handshake {
+            reason: format!(
+                "Iroh logical stream handshake timed out after {} seconds",
+                HANDSHAKE_TIMEOUT.as_secs()
+            ),
+        })??;
         let remote_endpoint = serde_json::to_string(&EndpointAddr::new(connection.remote_id()))
             .ok()
             .map(|value| format!("iroh://{value}"));
@@ -277,8 +304,17 @@ impl NetworkListenerDriver for IrohListener {
                         ),
                     })?
                     .map_err(|error| NetworkError::Iroh(error.to_string()))?;
-            read_and_validate_handshake(&mut recv).await?;
-            write_handshake(&mut send).await?;
+            tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
+                read_and_validate_handshake(&mut recv).await?;
+                write_handshake(&mut send).await
+            })
+            .await
+            .map_err(|_| NetworkError::Handshake {
+                reason: format!(
+                    "Iroh logical stream handshake timed out after {} seconds",
+                    HANDSHAKE_TIMEOUT.as_secs()
+                ),
+            })??;
             let (route, rtt_ms) = selected_path_metrics(&connection);
             let peer_addr = match remote_addr {
                 IncomingAddr::Ip(addr) => addr,

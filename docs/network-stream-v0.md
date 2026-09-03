@@ -53,9 +53,12 @@ in `misaka-runtime`. It races stored TCP and explicitly stored Iroh candidates
 when an Iroh backend is configured. mDNS now carries the stream port as
 metadata and feeds the same peer state, but does not open a stream itself;
 non-loopback stream candidates are withheld while the raw stream is insecure
-and loopback-only. `ConnectionManager` adds explicit per-Sister lifecycle state
-and fresh-stream reconnect after callers mark a previous stream disconnected;
-it does not transparently recover sessions or retry in the background.
+and loopback-only. `ConnectionManager` adds explicit per-Sister lifecycle
+state; for Iroh it reuses one established session for subsequent logical
+streams, while Direct TCP retains one connection per logical stream. A failed
+cached Iroh stream handshake is bounded before the manager falls back to a
+fresh candidate connection. It does not transparently recover application
+streams or retry in the background.
 The public `misaka connect #<sister-id>` command exercises the same identity
 to-candidate boundary for a one-shot verified stream connection.
 Authentication remains a separate phase.
@@ -113,7 +116,8 @@ N16 verifies that the public `misaka connect #<sister-id>` command resolves
 the stored Iroh candidate and establishes a stream by Sister identity.
 The `misaka-network` unit suite also verifies an Iroh-native relay path with IP
 transports disabled; this local fixture is not a substitute for external
-cross-domain or NAT measurements.
+cross-domain or NAT measurements. The runtime unit suite verifies that
+`ConnectionManager` reuses one Iroh session for two explicit logical streams.
 
 Transfer v1 is layered above the selected `NetworkStream`: `MTR1` uses fixed
 64 KiB chunks, per-chunk integrity digests, explicit offset acknowledgements,
