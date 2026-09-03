@@ -940,3 +940,16 @@ QUIC bidirectional stream, without changing the runtime's Direct TCP default.
 - [x] Run the focused N19 scenario successfully.
 - [x] Document that v2 is opt-in and sequential v1 remains the compatibility
   path.
+
+### Task 58: Run the Transfer v2 regression gate and update project memory
+
+**Files:**
+- Modify: `crates/misaka-cli/src/main.rs`
+- Modify: `docs/superpowers/plans/2026-09-04-transfer-parallel-chunks-v2.md`
+- Modify: `/Users/kaoru/Documents/Obsidian Vault/Misaka Network — Network Stream v0.md`
+- Modify: `/Users/kaoru/Documents/Obsidian Vault/项目履历.md`
+
+- [x] Run formatting, Clippy, 91 workspace tests, build, Testament T01–T13,
+  and operator O01–O07 gates successfully.
+- [x] Synchronize the durable Transfer v2 progress and remaining gaps to the
+  Obsidian project notes.

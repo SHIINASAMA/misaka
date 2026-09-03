@@ -93,10 +93,12 @@
 - Modify: `/Users/kaoru/Documents/Obsidian Vault/Misaka Network — Network Stream v0.md`
 - Modify: `/Users/kaoru/Documents/Obsidian Vault/项目履历.md`
 
-- [ ] Run `cargo fmt --all -- --check`.
-- [ ] Run `cargo clippy --workspace --all-targets --all-features -- -D warnings`.
-- [ ] Run `cargo test --workspace`.
-- [ ] Run `cargo build -p misaka`.
-- [ ] Run `cargo run -p testament -- verify --json` and `cargo run -p testament -- operator-verify`.
-- [ ] Record only durable conclusions, the new commit IDs, test counts, and remaining cross-domain/object-store gaps in Obsidian.
-- [ ] Commit any final documentation-only corrections as a snapshot.
+- [x] Run `cargo fmt --all -- --check`.
+- [x] Run `cargo clippy --workspace --all-targets --all-features -- -D warnings`.
+- [x] Run `cargo test --workspace` (91 tests passed).
+- [x] Run `cargo build -p misaka`.
+- [x] Run `cargo run -p testament -- verify --json` (13/13) and
+  `cargo run -p testament -- operator-verify` (O01–O07).
+- [x] Record only durable conclusions, the new commit IDs, test counts, and
+  remaining cross-domain/object-store gaps in Obsidian.
+- [x] Commit any final documentation-only corrections as a snapshot.

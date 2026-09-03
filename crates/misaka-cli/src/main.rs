@@ -2164,14 +2164,8 @@ mod stream_tests {
 
     #[test]
     fn resumable_copy_defaults_to_sequential_v1() {
-        let cli = Cli::try_parse_from([
-            "misaka",
-            "cp",
-            "source",
-            "#10032:/tmp/result",
-            "--resume",
-        ])
-        .unwrap();
+        let cli = Cli::try_parse_from(["misaka", "cp", "source", "#10032:/tmp/result", "--resume"])
+            .unwrap();
         assert!(matches!(
             cli.command,
             Command::Cp {
