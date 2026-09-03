@@ -37,13 +37,13 @@
 - `NetworkStream` implements Tokio `AsyncRead + AsyncWrite + Unpin + Send`.
 - Errors distinguish bind/connect/handshake/unsupported-version/IO failures.
 
-- [ ] **Step 1: Write failing unit tests** for valid handshake roundtrip, invalid magic rejection, unsupported version rejection, and localhost byte exchange using a temporary listener.
-- [ ] **Step 2: Run the focused crate test** and confirm it fails because the crate and symbols do not exist.
-- [ ] **Step 3: Add the workspace member and minimal crate dependencies** (`tokio`, `thiserror`, `tracing`).
-- [ ] **Step 4: Implement the fixed handshake** as request magic + version and an accept/reject response; validate before exposing the stream.
-- [ ] **Step 5: Implement `NetworkStream` as a thin `TcpStream` wrapper** with delegated `AsyncRead`/`AsyncWrite` and no post-handshake framing.
-- [ ] **Step 6: Implement `NetworkListener` and `connect`** with handshake validation and stable tracing events.
-- [ ] **Step 7: Run the focused unit tests** and confirm they pass.
+- [x] **Step 1: Write failing unit tests** for valid handshake roundtrip, invalid magic rejection, unsupported version rejection, and localhost byte exchange using a temporary listener.
+- [x] **Step 2: Run the focused crate test** and confirm it fails because the crate and symbols do not exist.
+- [x] **Step 3: Add the workspace member and minimal crate dependencies** (`tokio`, `thiserror`, `tracing`).
+- [x] **Step 4: Implement the fixed handshake** as request magic + version and an accept/reject response; validate before exposing the stream.
+- [x] **Step 5: Implement `NetworkStream` as a thin `TcpStream` wrapper** with delegated `AsyncRead`/`AsyncWrite` and no post-handshake framing.
+- [x] **Step 6: Implement `NetworkListener` and `connect`** with handshake validation and stable tracing events.
+- [x] **Step 7: Run the focused unit tests** and confirm they pass.
 
 ### Task 2: Wire an independent experimental stream listener into runtime
 
@@ -59,13 +59,13 @@
 - `misaka start` gains `--stream-port <port>` and passes it into `RuntimeConfig`.
 - `SisterRuntime` binds the stream listener independently of the control listener and cancels both with the existing shutdown token.
 
-- [ ] **Step 1: Add configuration/CLI tests or parser coverage** proving `--stream-port` is accepted and omitted by default.
-- [ ] **Step 2: Run the focused tests** and confirm they fail before the new field/argument exists.
-- [ ] **Step 3: Add the optional port and runtime dependency** without changing the existing control listener fields or `PeerTransport`.
-- [ ] **Step 4: Bind the stream listener during runtime construction** and report its bound address with `stream_listener_started`.
-- [ ] **Step 5: Add a cancellable stream accept loop** that logs handshake failures, keeps the control-plane accept loop independent, and runs a fixed-buffer experimental echo session for validated streams.
-- [ ] **Step 6: Ensure an accepted stream is long-lived**: the session writes the initial server-to-client validation bytes, then repeatedly reads into a bounded buffer and writes the bytes back until EOF/error/shutdown.
-- [ ] **Step 7: Run runtime tests and existing control-plane tests** and confirm no regression.
+- [x] **Step 1: Add configuration/CLI tests or parser coverage** proving `--stream-port` is accepted and omitted by default.
+- [x] **Step 2: Run the focused tests** and confirm they fail before the new field/argument exists.
+- [x] **Step 3: Add the optional port and runtime dependency** without changing the existing control listener fields or `PeerTransport`.
+- [x] **Step 4: Bind the stream listener during runtime construction** and report its bound address with `stream_listener_started`.
+- [x] **Step 5: Add a cancellable stream accept loop** that logs handshake failures, keeps the control-plane accept loop independent, and runs a fixed-buffer experimental echo session for validated streams.
+- [x] **Step 6: Ensure an accepted stream is long-lived**: the session writes the initial server-to-client validation bytes, then repeatedly reads into a bounded buffer and writes the bytes back until EOF/error/shutdown.
+- [x] **Step 7: Run runtime tests and existing control-plane tests** and confirm no regression.
 
 ### Task 3: Persist stream endpoints in Testament process metadata
 
@@ -80,11 +80,11 @@
 - `Context::start_sister` and `Context::start_full_mesh` allocate and pass a separate stream port.
 - Restart command reconstruction includes the exact recorded `--stream-port`.
 
-- [ ] **Step 1: Add manifest/supervisor tests** asserting stream address persistence and exact restart argument reconstruction.
-- [ ] **Step 2: Run the focused Testament tests** and confirm they fail because stream metadata is absent.
-- [ ] **Step 3: Allocate a stream port per Sister** in normal and full-mesh setup while retaining separate control and introspection ports.
-- [ ] **Step 4: Add `--stream-port` to initial and restart commands** and serialize it in `SisterEntry`.
-- [ ] **Step 5: Run focused tests and a one-Sister startup smoke check**.
+- [x] **Step 1: Add manifest/supervisor tests** asserting stream address persistence and exact restart argument reconstruction.
+- [x] **Step 2: Run the focused Testament tests** and confirm they fail because stream metadata is absent.
+- [x] **Step 3: Allocate a stream port per Sister** in normal and full-mesh setup while retaining separate control and introspection ports.
+- [x] **Step 4: Add `--stream-port` to initial and restart commands** and serialize it in `SisterEntry`.
+- [x] **Step 5: Run focused tests and a one-Sister startup smoke check**.
 
 ### Task 4: Add a real `misaka` stream test client entry point
 
@@ -97,11 +97,11 @@
 - The command must support the Testament cases: handshake/connect, bidirectional exchange, sustained exchange, large streaming exchange, and holding the stream open for disconnect/restart checks.
 - It must use deterministic generated bytes and incremental verification; it must not use `read_to_end` for the 64 MB case.
 
-- [ ] **Step 1: Add CLI integration tests** for argument parsing and deterministic payload/hash behavior.
-- [ ] **Step 2: Run them and confirm failure** because the command is absent.
-- [ ] **Step 3: Implement the smallest client modes needed by N01–N06** using `misaka_network::connect` and fixed 64 KiB buffers.
-- [ ] **Step 4: Add bounded timeouts around connect, reads, sustained exchange, and hold mode** so remote failure cannot hang Testament.
-- [ ] **Step 5: Run the focused CLI tests and manual localhost echo check**.
+- [x] **Step 1: Add CLI integration tests** for argument parsing and deterministic payload/hash behavior.
+- [x] **Step 2: Run them and confirm failure** because the command is absent.
+- [x] **Step 3: Implement the smallest client modes needed by N01–N06** using `misaka_network::connect` and fixed 64 KiB buffers.
+- [x] **Step 4: Add bounded timeouts around connect, reads, sustained exchange, and hold mode** so remote failure cannot hang Testament.
+- [x] **Step 5: Run the focused CLI tests and manual localhost echo check**.
 
 ### Task 5: Implement Testament N01–N06 black-box scenarios
 
@@ -115,14 +115,14 @@
 - Add `network-verify` as a focused command, or expose the same scenarios through the existing deterministic suite while retaining clear names.
 - All assertions use command exit/results and process lifecycle, not log text.
 
-- [ ] **Step 1: Add scenario definitions and failing assertions** for N01–N06.
-- [ ] **Step 2: Run the focused Testament network suite** and confirm the scenarios fail before stream wiring is complete.
-- [ ] **Step 3: Implement N01/N02** with two isolated Sister processes and the dedicated `misaka stream-test` client.
-- [ ] **Step 4: Implement N03** with one connection and repeated exchanges over 3–5 seconds, proving no reconnect is needed.
-- [ ] **Step 5: Implement N04** with a deterministic 64 MB stream, bounded buffers, and matching sent/received hash.
-- [ ] **Step 6: Implement N05** by holding a stream, killing the remote Sister, and asserting a bounded-time EOF/reset/broken-pipe result.
-- [ ] **Step 7: Implement N06** by killing/restarting the remote Sister, asserting the old stream fails, then opening a new stream successfully.
-- [ ] **Step 8: Run the focused network suite** and confirm all six scenarios pass.
+- [x] **Step 1: Add scenario definitions and failing assertions** for N01–N06.
+- [x] **Step 2: Run the focused Testament network suite** and confirm the scenarios fail before stream wiring is complete.
+- [x] **Step 3: Implement N01/N02** with two isolated Sister processes and the dedicated `misaka stream-test` client.
+- [x] **Step 4: Implement N03** with one connection and repeated exchanges over 3–5 seconds, proving no reconnect is needed.
+- [x] **Step 5: Implement N04** with a deterministic 64 MB stream, bounded buffers, and matching sent/received hash.
+- [x] **Step 6: Implement N05** by holding a stream, killing the remote Sister, and asserting a bounded-time EOF/reset/broken-pipe result.
+- [x] **Step 7: Implement N06** by killing/restarting the remote Sister, asserting the old stream fails, then opening a new stream successfully.
+- [x] **Step 8: Run the focused network suite** and confirm all six scenarios pass.
 
 ### Task 6: Document the v0 boundary and run the full regression gate
 
@@ -131,12 +131,12 @@
 - Modify: `docs/architecture.md`
 - Modify: `docs/testing.md`
 
-- [ ] **Step 1: Document the public API, handshake fields, insecure status, independent stream port, test command, and explicit non-goals.**
-- [ ] **Step 2: Run formatting and lint checks.**
-- [ ] **Step 3: Run all workspace unit/component tests.**
-- [ ] **Step 4: Build `misaka` and run the full Testament deterministic suite.**
-- [ ] **Step 5: Run the focused network verification and operator verification.**
-- [ ] **Step 6: Re-read the user plan and compare every Definition of Done item against fresh command output before claiming completion.**
+- [x] **Step 1: Document the public API, handshake fields, insecure status, independent stream port, test command, and explicit non-goals.**
+- [x] **Step 2: Run formatting and lint checks.**
+- [x] **Step 3: Run all workspace unit/component tests.**
+- [x] **Step 4: Build `misaka` and run the full Testament deterministic suite.**
+- [x] **Step 5: Run the focused network verification and operator verification.**
+- [x] **Step 6: Re-read the user plan and compare every Definition of Done item against fresh command output before claiming completion.**
 
 ---
 

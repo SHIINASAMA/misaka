@@ -99,7 +99,7 @@ certificate pinning, and server-name identity validation; it is the LAN-style
 foundation for later transfer and tunnel work, not yet a general Internet
 transport.
 
-Authentication, encryption, identity binding, authorization, SisterId
-routing, peer discovery integration, multiplexing, resume, compression, NAT
-traversal, relay, QUIC, file transfer, SSH, and TCP tunnel behavior are all
-outside this checkpoint.
+Multiplexing, resume, compression, NAT traversal, QUIC, and active relay path
+selection remain outside this checkpoint. The later Transfer, Tunnel, SSH,
+Relay, and Resolver snapshots are documented separately and are not part of
+the raw insecure v0 contract.
