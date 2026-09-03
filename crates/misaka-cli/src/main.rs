@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use misaka_core::protocol::{
     finalize_transfer_digest, update_transfer_digest, Envelope, MessageType, TransferRequest,
-    TransferResult, TRANSFER_MAGIC,
+    TransferResult, TunnelRequest, TRANSFER_MAGIC, TUNNEL_MAGIC,
 };
 use misaka_network::{NetworkBackend, NetworkEndpoint};
 use serde::Serialize;
@@ -112,6 +112,20 @@ enum Command {
 
         /// Remote target in the form #<sister-id>:/absolute/path.
         destination: String,
+    },
+
+    /// Forward a local TCP port to a remote Sister-local TCP endpoint.
+    Tunnel {
+        /// Target Sister ID.
+        sister: u64,
+
+        /// Local loopback port to listen on.
+        #[arg(long)]
+        local: u16,
+
+        /// Remote TCP endpoint as seen by the target Sister.
+        #[arg(long)]
+        remote: SocketAddr,
     },
 
     /// Update the local Sister nickname.
@@ -273,6 +287,16 @@ async fn main() -> Result<(), MisakaError> {
             destination,
         } => {
             run_copy(&source, &destination)
+                .await
+                .map_err(MisakaError::Other)?;
+        }
+
+        Command::Tunnel {
+            sister,
+            local,
+            remote,
+        } => {
+            run_tunnel(sister, local, remote)
                 .await
                 .map_err(MisakaError::Other)?;
         }
@@ -698,6 +722,70 @@ async fn run_copy(source: &Path, destination: &str) -> Result<(), String> {
         size,
         remote_path.display()
     );
+    Ok(())
+}
+
+async fn run_tunnel(sister_id: u64, local_port: u16, remote: SocketAddr) -> Result<(), String> {
+    let peer = PeerStore::load_from_file()
+        .into_iter()
+        .find(|peer| peer.id == sister_id)
+        .ok_or_else(|| format!("Sister #{sister_id} is not in the local peer store"))?;
+    let endpoint = peer
+        .stream_endpoints
+        .first()
+        .ok_or_else(|| format!("Sister #{sister_id} has no stream endpoint"))?
+        .parse::<NetworkEndpoint>()
+        .map_err(|error| error.to_string())?;
+    let peer_certificate = peer.stream_certificate;
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", local_port))
+        .await
+        .map_err(|error| format!("bind local tunnel port {local_port}: {error}"))?;
+    println!("Tunnel listening on 127.0.0.1:{local_port} -> {remote} via Sister #{sister_id}");
+
+    loop {
+        tokio::select! {
+            accepted = listener.accept() => {
+                let (local, _) = accepted.map_err(|error| format!("accept tunnel client: {error}"))?;
+                let peer_certificate = peer_certificate.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = proxy_tunnel(local, endpoint, sister_id, peer_certificate.as_deref(), remote).await {
+                        tracing::debug!(sister_id, error = %error, "tunnel connection closed");
+                    }
+                });
+            }
+            _ = tokio::signal::ctrl_c() => break,
+        }
+    }
+    Ok(())
+}
+
+async fn proxy_tunnel(
+    mut local: tokio::net::TcpStream,
+    endpoint: NetworkEndpoint,
+    sister_id: u64,
+    peer_certificate: Option<&[u8]>,
+    remote: SocketAddr,
+) -> Result<(), String> {
+    let mut stream = connect_peer_stream(endpoint, sister_id, peer_certificate).await?;
+    let request = bincode::serialize(&TunnelRequest {
+        remote: remote.to_string(),
+    })
+    .map_err(|error| error.to_string())?;
+    stream
+        .write_all(TUNNEL_MAGIC)
+        .await
+        .map_err(|error| format!("write tunnel preamble: {error}"))?;
+    stream
+        .write_all(&(request.len() as u32).to_be_bytes())
+        .await
+        .map_err(|error| format!("write tunnel header: {error}"))?;
+    stream
+        .write_all(&request)
+        .await
+        .map_err(|error| format!("write tunnel request: {error}"))?;
+    tokio::io::copy_bidirectional(&mut local, &mut stream)
+        .await
+        .map_err(|error| format!("proxy tunnel bytes: {error}"))?;
     Ok(())
 }
 

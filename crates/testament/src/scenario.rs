@@ -643,6 +643,10 @@ pub fn network_scenarios() -> Vec<ScenarioDef> {
             name: "N08_transfer_v0",
             run: Box::new(n08_transfer_v0),
         },
+        ScenarioDef {
+            name: "N09_tunnel_v0",
+            run: Box::new(n09_tunnel_v0),
+        },
     ]
 }
 
@@ -1377,4 +1381,95 @@ fn n08_transfer_v0(ctx: &mut Context) -> Result<(), ScenarioError> {
         .map_err(|error| ScenarioError::assertion(format!("read received file: {error}")))?;
     assert::assert_eq(received, payload, "transferred bytes")?;
     Ok(())
+}
+
+/// N09: a real `misaka tunnel` process forwards bytes to a plain TCP fixture
+/// reachable from the remote Sister's network namespace.
+fn n09_tunnel_v0(ctx: &mut Context) -> Result<(), ScenarioError> {
+    start_stream_pair(ctx)?;
+    let a_introspect = introspect_addr_of(ctx, "a")?;
+    let b_id = ctx.introspect("b")?.identity.id.as_u64();
+    assert::eventually(
+        a_introspect,
+        "a learns b tunnel candidate",
+        Duration::from_secs(8),
+        |s| s.peers.iter().any(|peer| peer.id == b_id),
+    )?;
+
+    let fixture = std::net::TcpListener::bind(("127.0.0.1", 0))
+        .map_err(|error| ScenarioError::infra(format!("bind tunnel fixture: {error}")))?;
+    let fixture_addr = fixture
+        .local_addr()
+        .map_err(|error| ScenarioError::infra(format!("read tunnel fixture address: {error}")))?;
+    let fixture_thread = std::thread::spawn(move || loop {
+        let Ok((mut stream, _)) = fixture.accept() else {
+            return;
+        };
+        let mut buffer = [0u8; 4096];
+        let read = {
+            use std::io::Read;
+            stream.read(&mut buffer)
+        };
+        let Ok(read) = read else {
+            continue;
+        };
+        if read == 0 {
+            continue;
+        }
+        use std::io::Write;
+        if stream.write_all(&buffer[..read]).is_err() {
+            return;
+        }
+        return;
+    });
+
+    let local_port = alloc_port()
+        .map_err(|error| ScenarioError::infra(format!("alloc tunnel local port: {error}")))?;
+    let remote_arg = fixture_addr.to_string();
+    let local_addr: SocketAddr = format!("127.0.0.1:{local_port}").parse().unwrap();
+    let mut tunnel = ctx.spawn_cli(
+        "a",
+        &[
+            "tunnel",
+            &b_id.to_string(),
+            "--local",
+            &local_port.to_string(),
+            "--remote",
+            &remote_arg,
+        ],
+    )?;
+    wait_for_tcp_listener(local_addr, Duration::from_secs(8))?;
+
+    let mut client = std::net::TcpStream::connect_timeout(&local_addr, Duration::from_secs(2))
+        .map_err(|error| ScenarioError::assertion(format!("connect local tunnel: {error}")))?;
+    use std::io::{Read, Write};
+    let payload = b"tunnel-v0-ok";
+    client
+        .write_all(payload)
+        .map_err(|error| ScenarioError::assertion(format!("write local tunnel: {error}")))?;
+    let mut echoed = vec![0u8; payload.len()];
+    client
+        .read_exact(&mut echoed)
+        .map_err(|error| ScenarioError::assertion(format!("read local tunnel: {error}")))?;
+    assert::assert_eq(echoed, payload.to_vec(), "tunnel echoed bytes")?;
+    drop(client);
+    let _ = tunnel.wait_timeout_mut(Duration::from_millis(100));
+    let _ = fixture_thread.join();
+    Ok(())
+}
+
+fn wait_for_tcp_listener(addr: SocketAddr, timeout: Duration) -> Result<(), ScenarioError> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(100)).is_ok() {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(ScenarioError::infra(format!(
+                "TCP listener {} did not become ready",
+                addr
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
 }

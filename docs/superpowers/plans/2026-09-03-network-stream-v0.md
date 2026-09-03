@@ -443,3 +443,19 @@ metadata followed by fixed-size chunks, and verifies the receiver's result.
 - [x] Add `misaka cp <source> #<sister-id>:/<path>` using PeerStore endpoint
   resolution and secure peer certificates when available.
 - [x] Add black-box coverage for a real Sister-to-Sister transfer.
+
+## Phase 8: Tunnel v0
+
+### Task 26: Add a generic TCP tunnel
+
+**Files:**
+- Modify: `crates/misaka-core/src/protocol.rs`
+- Modify: `crates/misaka-runtime/src/runtime.rs`
+- Modify: `crates/misaka-cli/src/main.rs`
+- Modify: `crates/testament/src/scenario.rs`
+- Create: `docs/tunnel-v0.md`
+
+- [x] Add a versioned tunnel request and remote TCP connector.
+- [x] Forward both directions with bounded Tokio I/O.
+- [x] Add `misaka tunnel <sister-id> --local <port> --remote <addr>`.
+- [x] Add black-box coverage through a plain TCP fixture.

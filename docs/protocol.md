@@ -26,6 +26,8 @@ The payload in `data` is bincode-encoded message-specific data:
 - `JobResultData`: job ID, creator, executor, output, exit code, success, timestamps;
 - `TransferRequest`/`TransferResult`: bounded file metadata, integrity digest,
   and completion status for the `MTR0` stream service;
+- `TunnelRequest`: a remote `SocketAddr` target for the `MTN0` TCP tunnel
+  service;
 - `Ping`/`Pong`: empty payloads used for a read-only compatibility probe.
 
 ## Wire framing and encryption

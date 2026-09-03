@@ -9,14 +9,14 @@ use crate::node::SisterNode;
 use crate::shutdown::Shutdown;
 use misaka_core::protocol::{
     finalize_transfer_digest, update_transfer_digest, TransferRequest, TransferResult,
-    TRANSFER_MAGIC,
+    TunnelRequest, TRANSFER_MAGIC, TUNNEL_MAGIC,
 };
 use misaka_core::SisterIdentity;
 use misaka_network::{NetworkBackend, NetworkEndpoint};
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::task::{JoinHandle, JoinSet};
 
 /// Orchestrates one complete Sister runtime.
@@ -345,6 +345,9 @@ async fn echo_stream(mut stream: misaka_network::NetworkStream) -> std::io::Resu
     if preamble == *TRANSFER_MAGIC {
         return receive_transfer(stream).await;
     }
+    if preamble == *TUNNEL_MAGIC {
+        return receive_tunnel(stream).await;
+    }
     stream.write_all(&preamble).await?;
     let mut buffer = [0u8; 64 * 1024];
     loop {
@@ -416,6 +419,39 @@ async fn receive_transfer(mut stream: misaka_network::NetworkStream) -> std::io:
         .await?;
     stream.write_all(&encoded).await?;
     stream.flush().await
+}
+
+async fn receive_tunnel(mut stream: misaka_network::NetworkStream) -> std::io::Result<()> {
+    let mut length = [0u8; 4];
+    stream.read_exact(&mut length).await?;
+    let request_len = u32::from_be_bytes(length) as usize;
+    if request_len > 64 * 1024 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "tunnel request exceeds 64 KiB",
+        ));
+    }
+    let mut encoded = vec![0u8; request_len];
+    stream.read_exact(&mut encoded).await?;
+    let request: TunnelRequest = bincode::deserialize(&encoded)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let remote = request
+        .remote
+        .parse::<SocketAddr>()
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    let mut remote = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        TcpStream::connect(remote),
+    )
+    .await
+    .map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "remote tunnel connect timed out",
+        )
+    })??;
+    tokio::io::copy_bidirectional(&mut stream, &mut remote).await?;
+    Ok(())
 }
 
 /// Default development encryption key shared by the current toy protocol.

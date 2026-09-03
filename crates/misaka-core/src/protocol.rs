@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 pub const PROTOCOL_VERSION: u16 = 2;
 /// Service preamble for the v0 file-transfer stream.
 pub const TRANSFER_MAGIC: &[u8; 4] = b"MTR0";
+/// Service preamble for the v0 TCP tunnel stream.
+pub const TUNNEL_MAGIC: &[u8; 4] = b"MTN0";
 
 const TRANSFER_DIGEST_PRIME: u64 = 0x100000001b3;
 
@@ -161,6 +163,12 @@ pub struct TransferResult {
     pub error: Option<String>,
 }
 
+/// Request for a v0 TCP tunnel to a service reachable by the remote Sister.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TunnelRequest {
+    pub remote: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,5 +223,17 @@ mod tests {
         update_transfer_digest(&mut state, &input[..7]);
         update_transfer_digest(&mut state, &input[7..]);
         assert_eq!(finalize_transfer_digest(state), whole);
+    }
+
+    #[test]
+    fn tunnel_contract_roundtrips_bincode() {
+        let request = TunnelRequest {
+            remote: "127.0.0.1:22".into(),
+        };
+        let encoded = bincode::serialize(&request).unwrap();
+        assert_eq!(
+            bincode::deserialize::<TunnelRequest>(&encoded).unwrap(),
+            request
+        );
     }
 }
