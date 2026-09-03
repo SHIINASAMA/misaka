@@ -10,6 +10,8 @@ control plane.
 `misaka-network` exposes:
 
 ```rust
+pub trait AsyncStream: AsyncRead + AsyncWrite + Send + Unpin {}
+
 pub trait NetworkBackend {
     async fn connect(&self, addr: SocketAddr) -> Result<NetworkStream>;
     async fn listen(&self, addr: SocketAddr) -> Result<NetworkListener>;
@@ -21,8 +23,10 @@ pub async fn listen(addr: SocketAddr) -> Result<NetworkListener>;
 pub async fn NetworkListener::accept() -> Result<(NetworkStream, SocketAddr)>;
 ```
 
-`NetworkStream` is a thin Tokio `AsyncRead + AsyncWrite` wrapper. After the
-fixed magic/version handshake, bytes are raw and are not Envelope-framed.
+`NetworkStream` is a boxed, transport-neutral `AsyncRead + AsyncWrite`
+wrapper. `NetworkListener` delegates acceptance to a backend listener driver;
+neither abstraction stores TCP-specific types. After the fixed magic/version
+handshake, bytes are raw and are not Envelope-framed.
 The v0 implementation is `DirectTcpBackend`; the free functions remain
 compatibility wrappers for callers that do not need to select a backend yet.
 

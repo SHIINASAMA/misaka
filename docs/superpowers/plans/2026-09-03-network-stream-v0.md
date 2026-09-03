@@ -189,3 +189,35 @@ and extraction of the already-proven Direct TCP implementation:
 - [x] Document loopback-only binding, handshake timeout, backend boundary, and deterministic readiness.
 - [x] Run fmt, clippy, workspace tests, build, Network Stream, full Testament, and Operator UX verification.
 - [x] Update the Obsidian Misaka project note with the hardening/backend result.
+
+---
+
+## Follow-up: Network Backend v0 transport-neutral normalization
+
+This follow-up implements the roadmap's remaining Network Backend v0
+definition of done without adding another backend or changing the endpoint
+model.
+
+### Task 11: Box the stream and listener contracts
+
+**Files:**
+- Modify: `crates/misaka-network/src/lib.rs`
+- Modify: `docs/network-stream-v0.md`
+
+- [x] Add a failing regression test that wraps a Tokio `DuplexStream` in `NetworkStream`.
+- [x] Define the `AsyncStream` contract as `AsyncRead + AsyncWrite + Send + Unpin` and store it behind `Box<dyn AsyncStream>`.
+- [x] Define `NetworkListenerDriver` and store it behind `Box<dyn NetworkListenerDriver>` so `NetworkListener` has no `TcpListener` field.
+- [x] Move TCP listener, TCP stream, handshake, bind, and connect details into the private `direct_tcp` backend module.
+- [x] Add a non-TCP listener-driver regression test and run the focused network tests.
+
+### Task 12: Re-run the roadmap gate
+
+**Files:**
+- Modify: `docs/superpowers/plans/2026-09-03-network-stream-v0.md`
+- Modify: `docs/architecture.md` if the boundary description needs correction
+- Modify: `docs/testing.md` if the verification command changes
+- Modify: `'/Users/kaoru/Documents/Obsidian Vault/Misaka Network — Network Stream v0.md'`
+
+- [x] Run formatting, Clippy, workspace tests, and the `misaka` build.
+- [x] Run Network Stream N01–N06, full Testament, and Operator UX verification.
+- [x] Reconcile the roadmap Definition of Done and record the completed normalization in Obsidian.
