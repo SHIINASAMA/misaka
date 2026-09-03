@@ -17,6 +17,7 @@ tokio.workspace = true
 rcgen.workspace = true
 aes-gcm.workspace = true
 rand.workspace = true
+sha2.workspace = true
 sysinfo.workspace = true
 simple-mdns.workspace = true
 futures-util.workspace = true

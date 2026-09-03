@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// Current version of the encrypted wire envelope.
 pub const PROTOCOL_VERSION: u16 = 2;
@@ -41,6 +42,11 @@ pub fn transfer_digest(bytes: &[u8]) -> [u8; 32] {
     ];
     update_transfer_digest(&mut state, bytes);
     finalize_transfer_digest(state)
+}
+
+/// Return the cryptographic content identifier used by Transfer v1.
+pub fn transfer_content_digest(bytes: &[u8]) -> [u8; 32] {
+    Sha256::digest(bytes).into()
 }
 
 /// 消息类型枚举 (对等网络，无主从之分)
@@ -286,6 +292,18 @@ mod tests {
         update_transfer_digest(&mut state, &input[..7]);
         update_transfer_digest(&mut state, &input[7..]);
         assert_eq!(finalize_transfer_digest(state), whole);
+    }
+
+    #[test]
+    fn transfer_content_digest_uses_sha256() {
+        assert_eq!(
+            transfer_content_digest(b"abc"),
+            [
+                0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae,
+                0x22, 0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61,
+                0xf2, 0x00, 0x15, 0xad,
+            ]
+        );
     }
 
     #[test]

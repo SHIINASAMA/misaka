@@ -15,6 +15,7 @@ use misaka_core::protocol::{
 use misaka_core::SisterIdentity;
 use misaka_network::{NetworkBackend, NetworkEndpoint};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -713,21 +714,16 @@ async fn save_transfer_v1_state(
 
 async fn hash_file_path(path: &std::path::Path) -> std::io::Result<[u8; 32]> {
     let mut file = tokio::fs::File::open(path).await?;
-    let mut state = [
-        0xcbf29ce484222325,
-        0x84222325cbf29ce4,
-        0x9e3779b185ebca87,
-        0xd6e8feb86659fd93,
-    ];
+    let mut hasher = Sha256::new();
     let mut buffer = [0u8; 64 * 1024];
     loop {
         let read = file.read(&mut buffer).await?;
         if read == 0 {
             break;
         }
-        update_transfer_digest(&mut state, &buffer[..read]);
+        hasher.update(&buffer[..read]);
     }
-    Ok(finalize_transfer_digest(state))
+    Ok(hasher.finalize().into())
 }
 
 async fn finalize_transfer_part(
@@ -832,8 +828,8 @@ mod tests {
     use crate::config::{DiscoveryMode, RuntimeConfig, StreamBackend, StreamSecurity};
     use crate::runtime::default_encryption_key;
     use misaka_core::protocol::{
-        transfer_digest, TransferResult, TransferV1Ack, TransferV1Chunk, TransferV1Request,
-        TransferV1Resume, TRANSFER_V1_CHUNK_SIZE,
+        transfer_content_digest, transfer_digest, TransferResult, TransferV1Ack, TransferV1Chunk,
+        TransferV1Request, TransferV1Resume, TRANSFER_V1_CHUNK_SIZE,
     };
     use misaka_core::SisterIdentity;
     use misaka_network::NetworkBackend;
@@ -1029,7 +1025,7 @@ mod tests {
         let request = TransferV1Request {
             destination: destination.display().to_string(),
             size: payload.len() as u64,
-            digest: transfer_digest(&payload),
+            digest: transfer_content_digest(&payload),
             chunk_size: TRANSFER_V1_CHUNK_SIZE,
         };
 

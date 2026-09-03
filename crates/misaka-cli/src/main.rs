@@ -8,6 +8,7 @@ use misaka_core::protocol::{
 };
 use misaka_network::{NetworkBackend, NetworkEndpoint};
 use serde::{de::DeserializeOwned, Serialize};
+use sha2::{Digest, Sha256};
 
 use misaka_runtime::error::MisakaError;
 use misaka_runtime::identity_store::IdentityStore;
@@ -1049,7 +1050,7 @@ async fn run_copy(
         .await
         .map_err(|error| format!("stat source {}: {error}", source.display()))?
         .len();
-    let digest = hash_file(&mut file).await?;
+    let digest = hash_file_v0(&mut file).await?;
     tokio::io::AsyncSeekExt::seek(&mut file, std::io::SeekFrom::Start(0))
         .await
         .map_err(|error| format!("rewind source: {error}"))?;
@@ -1152,7 +1153,7 @@ async fn run_copy_v1(
         .await
         .map_err(|error| format!("stat source {}: {error}", source.display()))?
         .len();
-    let digest = hash_file(&mut file).await?;
+    let digest = hash_file_v1(&mut file).await?;
     tokio::io::AsyncSeekExt::seek(&mut file, std::io::SeekFrom::Start(0))
         .await
         .map_err(|error| format!("rewind source: {error}"))?;
@@ -1498,8 +1499,8 @@ async fn bind_iroh_backend(
     .map_err(|error| error.to_string())
 }
 
-async fn hash_file(file: &mut tokio::fs::File) -> Result<[u8; 32], String> {
-    let mut hasher = [
+async fn hash_file_v0(file: &mut tokio::fs::File) -> Result<[u8; 32], String> {
+    let mut state = [
         0xcbf29ce484222325,
         0x84222325cbf29ce4,
         0x9e3779b185ebca87,
@@ -1513,9 +1514,24 @@ async fn hash_file(file: &mut tokio::fs::File) -> Result<[u8; 32], String> {
         if read == 0 {
             break;
         }
-        update_transfer_digest(&mut hasher, &buffer[..read]);
+        update_transfer_digest(&mut state, &buffer[..read]);
     }
-    Ok(finalize_transfer_digest(hasher))
+    Ok(finalize_transfer_digest(state))
+}
+
+async fn hash_file_v1(file: &mut tokio::fs::File) -> Result<[u8; 32], String> {
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 64 * 1024];
+    loop {
+        let read = tokio::io::AsyncReadExt::read(file, &mut buffer)
+            .await
+            .map_err(|error| format!("hash source: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher.finalize().into())
 }
 
 fn mark_ready(path: Option<&Path>) -> Result<(), String> {

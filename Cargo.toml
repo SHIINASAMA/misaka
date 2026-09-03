@@ -22,6 +22,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 tokio = { version = "1", features = ["full"] }
 aes-gcm = "0.10"
 rand = "0.8"
+sha2 = "0.10"
 sysinfo = "0.30"
 simple-mdns = { version = "0.7", features = ["async-tokio"] }
 futures-util = "0.3"

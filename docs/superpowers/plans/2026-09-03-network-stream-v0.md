@@ -832,3 +832,26 @@ QUIC bidirectional stream, without changing the runtime's Direct TCP default.
   Direct TCP one-stream-per-connection behavior.
 - [x] Bound logical-stream handshakes and verify explicit Iroh session reuse
   with a deterministic runtime test.
+
+### Task 51: Use cryptographic content digests for Transfer v1
+
+**Files:**
+- Modify: `Cargo.toml`
+- Modify: `Cargo.lock`
+- Modify: `crates/misaka-core/Cargo.toml`
+- Modify: `crates/misaka-core/src/protocol.rs`
+- Modify: `crates/misaka-runtime/Cargo.toml`
+- Modify: `crates/misaka-runtime/src/runtime.rs`
+- Modify: `crates/misaka-cli/Cargo.toml`
+- Modify: `crates/misaka-cli/src/main.rs`
+- Modify: `docs/network-stream-v0.md`
+- Modify: `docs/iroh-backend-spike-v0.md`
+
+- [x] Add a standard SHA-256 content digest contract for Transfer v1.
+- [x] Use streaming SHA-256 on both the CLI source and the Sister's durable
+  partial file while preserving the existing per-chunk checksum and `MTR1`
+  framing.
+- [x] Keep Transfer v0 and the existing Direct TCP/Iroh stream selection
+  behavior unchanged.
+- [x] Verify the digest contract and resumable Transfer v1 path with unit and
+  runtime tests.

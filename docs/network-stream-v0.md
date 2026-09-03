@@ -120,11 +120,13 @@ cross-domain or NAT measurements. The runtime unit suite verifies that
 `ConnectionManager` reuses one Iroh session for two explicit logical streams.
 
 Transfer v1 is layered above the selected `NetworkStream`: `MTR1` uses fixed
-64 KiB chunks, per-chunk integrity digests, explicit offset acknowledgements,
-and destination-side `.misaka-part` plus JSON resume state. The CLI opt-in is
-`misaka cp --resume`; Transfer v0 remains unchanged. A deterministic runtime
-test covers disconnect, resume, and finalization, and the protocol works over
-Direct TCP or opt-in Iroh.
+64 KiB chunks, per-chunk integrity checks, a SHA-256 content digest, explicit
+offset acknowledgements, and destination-side `.misaka-part` plus JSON resume
+state. The CLI opt-in is `misaka cp --resume`; Transfer v0 remains unchanged.
+A deterministic runtime test covers disconnect, resume, and finalization, and
+the protocol works over Direct TCP or opt-in Iroh. The content digest is a
+verification identifier, not a content-addressed object store or a deduplication
+index; those remain separate transfer work.
 
 When a Sister has enabled loopback introspection, `misaka ps --json
 --introspect 127.0.0.1:<port>` includes the local active stream registry,
@@ -143,5 +145,5 @@ transport.
 
 Multiplexing, compression, NAT traversal, and active relay path switching
 remain outside the raw insecure v0 contract. Transfer v1 does not yet include
-parallel chunks, content addressing, or cross-domain measurements. The later
-Tunnel, SSH, Relay, and Resolver snapshots are documented separately.
+parallel chunks, a content-addressed object store, or cross-domain measurements.
+The later Tunnel, SSH, Relay, and Resolver snapshots are documented separately.

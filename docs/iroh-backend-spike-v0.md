@@ -50,9 +50,9 @@ lifecycle and rotation requirements.
   route when known, optional selected-path RTT in milliseconds, and endpoint
   metadata suitable for diagnostics.
 - Transfer v1 runs above the same selected stream with no Iroh-specific
-  protocol: `misaka cp --resume` can use Iroh, while parallel chunks,
-  content addressing, and cross-domain transfer measurements remain future
-  work.
+  protocol: `misaka cp --resume` can use Iroh and verifies the file-level
+  SHA-256 content digest. Parallel chunks, a content-addressed object store,
+  and cross-domain transfer measurements remain future work.
 - `misaka stream-test --endpoint iroh://...` is the cross-domain measurement
   entry point. It reports the selected Iroh route, setup latency, RTT for the
   bidirectional probe, and bounded large-stream throughput. Passing `--json`
