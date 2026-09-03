@@ -739,6 +739,10 @@ pub fn network_scenarios() -> Vec<ScenarioDef> {
             name: "N20_iroh_object_store",
             run: Box::new(n20_iroh_object_store),
         },
+        ScenarioDef {
+            name: "N21_iroh_stability_probe",
+            run: Box::new(n21_iroh_stability_probe),
+        },
     ]
 }
 
@@ -1921,6 +1925,63 @@ fn n20_iroh_object_store(ctx: &mut Context) -> Result<(), ScenarioError> {
                 "object-store transfer left durable partial state",
             ));
         }
+    }
+    Ok(())
+}
+
+/// N21: exercise a bounded bidirectional heartbeat window through the public
+/// Iroh stream probe and validate its machine-readable stability record.
+fn n21_iroh_stability_probe(ctx: &mut Context) -> Result<(), ScenarioError> {
+    ctx.start_iroh_pair()?;
+    let a_introspect = introspect_addr_of(ctx, "a")?;
+    let b_id = ctx.introspect("b")?.identity.id.as_u64();
+    let endpoint = wait_for_iroh_candidate(a_introspect, b_id)?;
+    let output = ctx.run_cli(
+        "a",
+        &[
+            "stream-test",
+            "--endpoint",
+            &endpoint,
+            "--mode",
+            "stability",
+            "--duration-secs",
+            "2",
+            "--json",
+        ],
+    )?;
+    let report: serde_json::Value = serde_json::from_str(output.trim())
+        .map_err(|error| ScenarioError::assertion(format!("decode stability report: {error}")))?;
+    assert::assert_eq(
+        report.get("mode").and_then(serde_json::Value::as_str),
+        Some("stability"),
+        "Iroh stability report mode",
+    )?;
+    assert::assert_eq(
+        report.get("backend").and_then(serde_json::Value::as_str),
+        Some("iroh"),
+        "Iroh stability report backend",
+    )?;
+    assert::assert_eq(
+        report.get("route").and_then(serde_json::Value::as_str),
+        Some("direct"),
+        "Iroh stability report route",
+    )?;
+    if report
+        .get("exchanges")
+        .and_then(serde_json::Value::as_u64)
+        .is_none_or(|exchanges| exchanges < 2)
+        || report
+            .get("elapsed_ms")
+            .and_then(serde_json::Value::as_u64)
+            .is_none_or(|elapsed| elapsed < 1_000)
+        || report
+            .get("path_switches")
+            .and_then(serde_json::Value::as_u64)
+            .is_none()
+    {
+        return Err(ScenarioError::assertion(format!(
+            "Iroh stability report missing bounded measurements: {report}"
+        )));
     }
     Ok(())
 }

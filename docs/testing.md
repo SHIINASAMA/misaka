@@ -135,7 +135,7 @@ The `.testament/` directory is ignored by Git. Logs are diagnostic artifacts onl
 ## Network Stream v0 suite
 
 `network-verify` launches isolated real Sisters with separate control,
-stream, and introspection ports. It runs N01–N20: connect, bidirectional
+stream, and introspection ports. It runs N01–N21: connect, bidirectional
 exchange, sustained single-connection exchange, a 64 MiB bounded-buffer
 stream, remote disconnect, and restart followed by a new stream. N18 verifies
 the aggregate active stream count and live tx/rx counters through both raw
@@ -164,6 +164,9 @@ identities remain stable, and verifies a new bidirectional stream afterward.
 N15 validates the public `stream-test --json` measurement output against real
 Iroh Sisters. N16 validates the public `misaka connect #<sister-id>` command
 against a stored Iroh candidate and checks the selected path.
+N21 runs a two-second public stability probe with one bidirectional heartbeat
+per second and validates elapsed time, exchange count, route, and
+`path_switches` in the JSON measurement.
 Dynamic Iroh path metadata is covered by the `misaka-network` and runtime unit
 tests: route/RTT refreshes and `path_switches` are visible through active
 introspection without requiring a nondeterministic path change in CI.

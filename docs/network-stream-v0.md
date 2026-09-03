@@ -95,7 +95,7 @@ cargo run -p testament -- network-verify
 cargo run -p testament -- network-verify --json
 ```
 
-N01–N18 cover connection, bidirectional exchange, sustained reuse of one
+N01–N21 cover connection, bidirectional exchange, sustained reuse of one
 connection, a 64 MiB bounded-buffer stream, remote disconnect, restart followed
 by a new stream, an opt-in TLS 1.3/mTLS LAN-style connection, Transfer v0,
 Tunnel v0, public-CLI Transfer v1 resume, active-stream introspection, and
@@ -118,6 +118,10 @@ parseable measurement record with setup, path RTT, probe RTT, and endpoint
 metadata.
 N16 verifies that the public `misaka connect #<sister-id>` command resolves
 the stored Iroh candidate and establishes a stream by Sister identity.
+N21 runs a short public stability probe with a bounded heartbeat and verifies
+its machine-readable elapsed time, exchange count, selected route, and
+`path_switches`. The same mode can be configured for the 30–60 minute
+external-host measurement described in the Iroh runbook.
 Iroh streams subscribe to the native path event stream after establishment;
 their current route/RTT and route-change counter are refreshed in active
 introspection snapshots, and `misaka ps --json --introspect` exposes the

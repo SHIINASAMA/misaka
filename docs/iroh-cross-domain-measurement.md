@@ -42,6 +42,12 @@ MISAKA_CONFIG_DIR=/path/to/sister-a-config \
 
 MISAKA_CONFIG_DIR=/path/to/sister-a-config \
   misaka stream-test --endpoint "$IROH_ENDPOINT" --mode large
+
+# Long-lived bidirectional stability measurement (for example, 30 minutes).
+MISAKA_CONFIG_DIR=/path/to/sister-a-config \
+  misaka stream-test --endpoint "$IROH_ENDPOINT" --mode stability \
+  --duration-secs 1800 --json \
+  > iroh-stability-$(date +%s).json
 ```
 
 The probe prints the selected backend/route, setup latency, round-trip time,
@@ -54,8 +60,11 @@ MISAKA_CONFIG_DIR=/path/to/sister-a-config \
   > iroh-large-$(date +%s).json
 ```
 
-The JSON report contains `setup_ms`, selected-path `rtt_ms`, and mode-specific
-measurements such as `probe_rtt_ms`, `exchanges`, or `throughput_mib_s`.
+The JSON report contains `setup_ms`, selected-path `rtt_ms`, `path_switches`,
+and mode-specific measurements such as `probe_rtt_ms`, `exchanges`, or
+`throughput_mib_s`. The stability mode performs one bounded bidirectional
+heartbeat per second and fails if the stream closes or an exchange times out;
+its `elapsed_ms` and `exchanges` are the evidence for the selected duration.
 `misaka cp --resume` can be used for a large-transfer confirmation over the
 same advertised endpoint.
 

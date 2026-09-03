@@ -109,9 +109,13 @@ enum Command {
         #[arg(long, conflicts_with = "addr", required_unless_present = "addr")]
         endpoint: Option<String>,
 
-        /// Test mode: connect | bidirectional | sustained | large | hold.
+        /// Test mode: connect | bidirectional | sustained | large | stability | hold.
         #[arg(long, default_value = "connect")]
         mode: String,
+
+        /// Stability test duration; required with --mode stability.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=3600))]
+        duration_secs: Option<u64>,
 
         /// Write this marker after the stream handshake and mode setup succeed.
         #[arg(long)]
@@ -365,6 +369,7 @@ async fn async_main() -> Result<(), MisakaError> {
             addr,
             endpoint,
             mode,
+            duration_secs,
             ready_file,
             secure,
             trust_cert,
@@ -390,6 +395,7 @@ async fn async_main() -> Result<(), MisakaError> {
                     trust_cert: trust_cert.as_deref(),
                     server_name: server_name.as_deref(),
                     json,
+                    duration_secs,
                     iroh_relay: iroh_relay.clone(),
                 },
             )
@@ -805,6 +811,7 @@ struct StreamTestOptions<'a> {
     trust_cert: Option<&'a Path>,
     server_name: Option<&'a str>,
     json: bool,
+    duration_secs: Option<u64>,
     iroh_relay: Option<iroh::RelayUrl>,
 }
 
@@ -819,6 +826,7 @@ async fn run_stream_test(
         trust_cert,
         server_name,
         json,
+        duration_secs,
         iroh_relay,
     } = options;
     let connect_started = tokio::time::Instant::now();
@@ -939,6 +947,21 @@ async fn run_stream_test(
                 );
             }
             mark_ready(ready_file)?;
+            metrics
+        }
+        "stability" => {
+            let duration_secs =
+                duration_secs.ok_or("--duration-secs is required with --mode stability")?;
+            mark_ready(ready_file)?;
+            let metrics = stability(&mut stream, duration_secs).await?;
+            final_path = stream.path_info();
+            if !json {
+                println!(
+                    "Stability stream: exchanges={} elapsed_ms={}",
+                    metrics.exchanges.expect("stability exchanges"),
+                    metrics.elapsed_ms.expect("stability elapsed")
+                );
+            }
             metrics
         }
         "hold" => {
@@ -1989,6 +2012,26 @@ async fn sustained(
     })
 }
 
+async fn stability(
+    stream: &mut misaka_network::NetworkStream,
+    duration_secs: u64,
+) -> Result<StreamProbeMetrics, String> {
+    let payload = b"stability-heartbeat";
+    let started = std::time::Instant::now();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(duration_secs);
+    let mut exchanges = 0u64;
+    while tokio::time::Instant::now() < deadline {
+        exchange(stream, payload).await?;
+        exchanges += 1;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    Ok(StreamProbeMetrics {
+        exchanges: Some(exchanges),
+        elapsed_ms: Some(started.elapsed().as_millis()),
+        ..StreamProbeMetrics::default()
+    })
+}
+
 async fn large_stream(stream: misaka_network::NetworkStream) -> Result<StreamProbeMetrics, String> {
     let started = std::time::Instant::now();
     let (mut reader, mut writer) = tokio::io::split(stream);
@@ -2174,6 +2217,29 @@ mod stream_tests {
         assert!(matches!(
             cli.command,
             Command::StreamTest { json: true, .. }
+        ));
+    }
+
+    #[test]
+    fn stream_test_accepts_a_bounded_stability_duration() {
+        let cli = Cli::try_parse_from([
+            "misaka",
+            "stream-test",
+            "--endpoint",
+            "iroh://endpoint-address",
+            "--mode",
+            "stability",
+            "--duration-secs",
+            "1800",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::StreamTest {
+                mode,
+                duration_secs: Some(1800),
+                ..
+            } if mode == "stability"
         ));
     }
 

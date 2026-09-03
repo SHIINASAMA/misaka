@@ -70,7 +70,9 @@ lifecycle and rotation requirements.
   entry point. It reports the selected Iroh route, setup latency, RTT for the
   bidirectional probe, and bounded large-stream throughput. Passing `--json`
   emits one machine-readable report containing the selected-path RTT and the
-  mode-specific measurements. The measurement procedure and required real-host
+  mode-specific measurements. `--mode stability --duration-secs <seconds>`
+  adds one bounded bidirectional heartbeat per second for long-lived path
+  validation and fails on disconnect/timeout. The measurement procedure and required real-host
   matrix live in
   `docs/iroh-cross-domain-measurement.md`; no real cross-domain result is
   claimed by the local test suite.
@@ -116,4 +118,5 @@ Iroh transport identity; N15 verifies machine-readable measurements; N16
 verifies SisterId-based connection.
 N19 verifies bounded parallel Transfer v2 over real Iroh Sisters, and N20
 verifies receiver-local digest-addressed deduplication across two public copy
-commands. Neither scenario claims cross-domain or NAT reliability.
+commands. N21 verifies the bounded bidirectional stability probe and its JSON
+measurement fields. Neither scenario claims cross-domain or NAT reliability.

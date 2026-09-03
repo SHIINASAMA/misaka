@@ -83,7 +83,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Run the Network Stream, Transfer, Tunnel, Iroh, and observability scenarios (N01-N20).
+    /// Run the Network Stream, Transfer, Tunnel, Iroh, and observability scenarios (N01-N21).
     #[command(name = "network-verify")]
     NetworkVerify {
         #[arg(long)]
