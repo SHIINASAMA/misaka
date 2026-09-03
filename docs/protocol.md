@@ -14,14 +14,15 @@ pub struct Envelope {
 }
 ```
 
-`Envelope::new` sets the current `PROTOCOL_VERSION` automatically. A receiver rejects an unknown protocol version before dispatching the message. `from` and `to` are Sister IDs; `to = 0` is used for broadcast-style State messages.
+`Envelope::new` sets the current `PROTOCOL_VERSION` automatically. The Ping/Pong message types are part of protocol version 2; a receiver rejects an unknown or mismatched protocol version before dispatching the message. `from` and `to` are Sister IDs; `to = 0` is used for broadcast-style State messages.
 
 The payload in `data` is bincode-encoded message-specific data:
 
 - `HelloData`: identity and peer listen address;
 - `StateData`: identity, listen address, resources, queue counters, uptime, capabilities;
 - `JobData`: job ID, creator, executor, creator address, command, arguments, creation time;
-- `JobResultData`: job ID, creator, executor, output, exit code, success, timestamps.
+- `JobResultData`: job ID, creator, executor, output, exit code, success, timestamps;
+- `Ping`/`Pong`: empty payloads used for a read-only compatibility probe.
 
 ## Wire framing and encryption
 
@@ -37,7 +38,7 @@ The current development configuration uses a shared compatibility key. Identity-
 
 ## Message handling
 
-`Hello` records the sender's identity and declared listen address, then returns a Hello response. `State` replaces the sender's observed resource and job counters. `Job` is forwarded when an explicit executor differs from the receiving Sister; otherwise it enters the local queue. `JobRequest` transfers one queued job to an idle requester, or returns an Ack when no job is available. `JobResponse` resolves the creator's pending result.
+`Hello` records the sender's identity and declared listen address, then returns a Hello response. `Ping` returns `Pong` without recording the sender, touching the peer registry, persisting a PeerStore entry, or triggering discovery. `State` replaces the sender's observed resource and job counters. `Job` is forwarded when an explicit executor differs from the receiving Sister; otherwise it enters the local queue. `JobRequest` transfers one queued job to an idle requester, or returns an Ack when no job is available. `JobResponse` resolves the creator's pending result.
 
 Transport owns connect, framing, encryption, send, and receive. Handler owns message interpretation. Handler must not bypass transport framing or let an untrusted message mutate state outside its defined message semantics.
 

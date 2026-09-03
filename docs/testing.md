@@ -79,7 +79,7 @@ listen port, introspection port, config directory, and peer topology.
 
 `misaka ps` is a separate Network Knowledge view. It reads the local
 IdentityStore and PeerStore, includes self, and concurrently probes known
-peer addresses with the existing Misaka Hello handshake. It has no Testament
+peer addresses with the read-only Misaka Ping/Pong probe. It has no Testament
 or introspection dependency:
 
 ```bash

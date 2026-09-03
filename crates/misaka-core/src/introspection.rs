@@ -33,6 +33,7 @@ pub struct PeerSnapshot {
     pub memory_total: u64,
     pub running_jobs: usize,
     pub queued_jobs: usize,
+    pub uptime_secs: u64,
     pub online: bool,
 }
 
@@ -47,6 +48,7 @@ impl From<&PeerState> for PeerSnapshot {
             memory_total: p.memory_total,
             running_jobs: p.running_jobs,
             queued_jobs: p.queued_jobs,
+            uptime_secs: p.uptime_secs,
             online: true,
         }
     }

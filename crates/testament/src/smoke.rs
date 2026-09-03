@@ -6,6 +6,7 @@
 use crate::operator::{PsReport, SisterProcessStatus};
 use crate::run_manager::misaka_binary;
 use crate::types::{Manifest, SisterEntry};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -69,6 +70,9 @@ fn run_suite(root: &Path, testament: &Path, misaka: &Path) -> Result<Vec<&'stati
     passed.push("O03 testament_ps_dead");
 
     let before = manifest_entry(&manifest, "s3")?;
+    let restarted_id = before
+        .id
+        .ok_or_else(|| "O04 missing restarted Sister ID".to_string())?;
     invoke(root, testament, misaka, &["restart", "s3"])?;
     let restart_ps = ps(root, testament, misaka, &[])?;
     let restarted = restart_ps
@@ -76,11 +80,45 @@ fn run_suite(root: &Path, testament: &Path, misaka: &Path) -> Result<Vec<&'stati
         .iter()
         .find(|entry| entry.alias == "s3")
         .ok_or_else(|| "O04 missing s3 after restart".to_string())?;
+    let restarted_addr: SocketAddr = before
+        .introspection_addr
+        .as_deref()
+        .ok_or_else(|| "O04 missing restarted introspection address".to_string())?
+        .parse()
+        .map_err(|error| format!("O04 parse restarted introspection address: {error}"))?;
+    let restarted_snapshot =
+        crate::observer::fetch(restarted_addr, std::time::Duration::from_millis(500))
+            .map_err(|error| format!("O04 fetch restarted snapshot: {error}"))?;
+    let survivor_ids = manifest
+        .sisters
+        .iter()
+        .filter(|entry| entry.alias != "s3")
+        .filter_map(|entry| entry.id)
+        .collect::<Vec<_>>();
+    let restarted_sees_survivors = survivor_ids
+        .iter()
+        .all(|id| restarted_snapshot.peers.iter().any(|peer| peer.id == *id));
+    let survivor_reobserved = manifest
+        .sisters
+        .iter()
+        .filter(|entry| entry.alias != "s3")
+        .any(|entry| {
+            entry
+                .introspection_addr
+                .as_deref()
+                .and_then(|address| address.parse::<SocketAddr>().ok())
+                .and_then(|address| {
+                    crate::observer::fetch(address, std::time::Duration::from_millis(500)).ok()
+                })
+                .is_some_and(|snapshot| snapshot.peers.iter().any(|peer| peer.id == restarted_id))
+        });
     check(
         restarted.status == SisterProcessStatus::Online
             && restarted.sister_id == before.id
             && restarted.listen_addr == before.listen_addr
-            && restarted.introspection_addr == before.introspection_addr,
+            && restarted.introspection_addr == before.introspection_addr
+            && restarted_sees_survivors
+            && survivor_reobserved,
         "O04 testament_restart",
     )?;
     passed.push("O04 testament_restart");
@@ -106,6 +144,9 @@ fn run_suite(root: &Path, testament: &Path, misaka: &Path) -> Result<Vec<&'stati
     passed.push("O06 current_run");
 
     let config_dir = manifest_entry(&manifest, "s1")?.config_dir.clone();
+    let remote_config_dir = manifest_entry(&manifest, "s3")?.config_dir.clone();
+    let remote_peer_store = Path::new(&remote_config_dir).join("peers.json");
+    let peer_store_before = std::fs::read(&remote_peer_store).ok();
     let network_ps = Command::new(misaka)
         .current_dir(root)
         .env("MISAKA_CONFIG_DIR", &config_dir)
@@ -120,11 +161,29 @@ fn run_suite(root: &Path, testament: &Path, misaka: &Path) -> Result<Vec<&'stati
     }
     let value: serde_json::Value = serde_json::from_slice(&network_ps.stdout)
         .map_err(|error| format!("O07 decode misaka ps: {error}"))?;
+    let rows = value["sisters"]
+        .as_array()
+        .ok_or_else(|| "O07 missing sisters array".to_string())?;
+    let self_id = value["self"]
+        .as_u64()
+        .ok_or_else(|| "O07 missing self ID".to_string())?;
+    let stopped_id = manifest_entry(&manifest, "s2")?.id;
+    let self_online = rows.iter().any(|row| {
+        row["self"].as_bool() == Some(true)
+            && row["id"].as_u64() == Some(self_id)
+            && row["status"].as_str() == Some("online")
+    });
+    let restarted_online = rows.iter().any(|row| {
+        row["id"].as_u64() == Some(restarted_id)
+            && row["self"].as_bool() == Some(false)
+            && row["status"].as_str() == Some("online")
+    });
+    let stopped_offline = rows
+        .iter()
+        .any(|row| row["id"].as_u64() == stopped_id && row["status"].as_str() == Some("offline"));
+    let peer_store_after = std::fs::read(&remote_peer_store).ok();
     check(
-        value["self"].is_u64()
-            && value["sisters"]
-                .as_array()
-                .is_some_and(|rows| rows.len() >= 2),
+        self_online && restarted_online && stopped_offline && peer_store_before == peer_store_after,
         "O07 misaka_ps",
     )?;
     passed.push("O07 misaka_ps");

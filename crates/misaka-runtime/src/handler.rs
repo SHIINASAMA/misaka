@@ -14,6 +14,18 @@ pub(crate) async fn dispatch(
     stream: &mut TcpStream,
 ) -> crate::Result<()> {
     match env.msg_type {
+        MessageType::Ping => {
+            // Ping/Pong is intentionally side-effect free: unlike Hello, it
+            // never records the sender in the peer registry or PeerStore.
+            let reply = Envelope::new(
+                MessageType::Pong,
+                node.identity.id.as_u64(),
+                env.from,
+                vec![],
+            );
+            node.transport.reply(stream, &reply).await?;
+        }
+
         MessageType::Hello => {
             let hello: HelloData = bincode::deserialize(&env.data)?;
             node.remember_peer(&hello.identity, &hello.listen_addr)

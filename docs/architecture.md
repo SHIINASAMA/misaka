@@ -158,7 +158,7 @@ assert the graceful path, while T08/T09 and O03 exercise sudden failure.
 The `.testament/current` pointer is an operator convenience for selecting a
 run, not Network state. `testament` commands manage processes and artifacts;
 `misaka ps` independently reads IdentityStore/PeerStore and probes known
-Sisters with the Misaka Hello protocol.
+Sisters with the read-only Misaka Ping/Pong protocol.
 
 Testament never instantiates `SisterRuntime`, acts as a peer, joins discovery,
 or executes Misaka jobs in-process. Killing the harness must not be required

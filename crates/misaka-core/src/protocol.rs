@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Current version of the encrypted wire envelope.
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 
 /// 消息类型枚举 (对等网络，无主从之分)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -13,6 +13,8 @@ pub enum MessageType {
     JobRequest = 0x05,  // 请求任务 (Work Stealing)
     JobResponse = 0x06, // 任务结果返回
     Ack = 0x07,         // 通用确认
+    Ping = 0x08,        // 无副作用的 reachability probe
+    Pong = 0x09,        // Ping response
 }
 
 /// 网络层封装的消息 (对等)

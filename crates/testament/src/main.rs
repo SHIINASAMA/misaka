@@ -461,6 +461,92 @@ fn signal_one(alias: &str, explicit: Option<&str>, signal: &str, operation: &str
     0
 }
 
+struct SurvivorTarget {
+    alias: String,
+    id: u64,
+    introspection: std::net::SocketAddr,
+    prior_uptime: Option<u64>,
+}
+
+fn survivor_targets(
+    manifest: &Manifest,
+    restarted_alias: &str,
+    restarted_id: Option<u64>,
+) -> Vec<SurvivorTarget> {
+    manifest
+        .sisters
+        .iter()
+        .filter(|entry| entry.alias != restarted_alias)
+        .filter(|entry| entry.pid.is_some_and(testament::supervisor::pid_alive))
+        .filter_map(|entry| {
+            let id = entry.id?;
+            let introspection = entry.introspection_addr.as_deref()?.parse().ok()?;
+            let prior_uptime = restarted_id.and_then(|restarted_id| {
+                testament::observer::fetch(introspection, Duration::from_millis(300))
+                    .ok()
+                    .and_then(|snapshot| {
+                        snapshot
+                            .peers
+                            .iter()
+                            .find(|peer| peer.id == restarted_id)
+                            .map(|peer| peer.uptime_secs)
+                    })
+            });
+            Some(SurvivorTarget {
+                alias: entry.alias.clone(),
+                id,
+                introspection,
+                prior_uptime,
+            })
+        })
+        .collect()
+}
+
+fn wait_for_rejoin(
+    restarted_addr: std::net::SocketAddr,
+    restarted_id: u64,
+    survivors: &[SurvivorTarget],
+    timeout: Duration,
+) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let restarted_snapshot =
+            testament::observer::fetch(restarted_addr, Duration::from_millis(300)).ok();
+        let restarted_sees_survivors = restarted_snapshot.as_ref().is_some_and(|snapshot| {
+            survivors
+                .iter()
+                .all(|survivor| snapshot.peers.iter().any(|peer| peer.id == survivor.id))
+        });
+        let survivor_sees_restarted = survivors.iter().any(|survivor| {
+            testament::observer::fetch(survivor.introspection, Duration::from_millis(300))
+                .ok()
+                .is_some_and(|snapshot| {
+                    snapshot.peers.iter().any(|peer| {
+                        peer.id == restarted_id
+                            && survivor
+                                .prior_uptime
+                                .is_none_or(|prior| peer.uptime_secs != prior)
+                    })
+                })
+        });
+        if restarted_sees_survivors && (survivors.is_empty() || survivor_sees_restarted) {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            let expected = survivors
+                .iter()
+                .map(|survivor| survivor.alias.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!(
+                "restarted Sister did not rejoin; expected visibility for survivors [{}]",
+                expected
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 fn restart_one(alias: &str, explicit: Option<&str>) -> i32 {
     let (run_id, layout, mut manifest) = match selected_manifest(explicit) {
         Ok(value) => value,
@@ -495,6 +581,9 @@ fn restart_one(alias: &str, explicit: Option<&str>) -> i32 {
         }
     }
 
+    // Capture the survivor baseline after the old process has exited. This
+    // prevents a final pre-stop State update from looking like a rejoin.
+    let survivors = survivor_targets(&manifest, alias, entry.id);
     let binary = testament::run_manager::misaka_binary();
     let mut process = match testament::supervisor::spawn_from_entry(entry.clone(), &binary) {
         Ok(process) => process,
@@ -503,6 +592,18 @@ fn restart_one(alias: &str, explicit: Option<&str>) -> i32 {
             return 3;
         }
     };
+    if process.entry.listen_addr != entry.listen_addr
+        || process.entry.introspection_addr != entry.introspection_addr
+        || process.entry.config_dir != entry.config_dir
+        || process.entry.peer_addrs != entry.peer_addrs
+    {
+        eprintln!(
+            "testament: restart {}: persisted launch invariants changed",
+            alias
+        );
+        process.kill();
+        return 3;
+    }
     let Some(introspection) = entry
         .introspection_addr
         .as_deref()
@@ -527,6 +628,17 @@ fn restart_one(alias: &str, explicit: Option<&str>) -> i32 {
         .is_some_and(|id| id != snapshot.identity.id.as_u64())
     {
         eprintln!("testament: restart {}: identity changed", alias);
+        process.kill();
+        return 3;
+    }
+    let restarted_id = snapshot.identity.id.as_u64();
+    if let Err(error) = wait_for_rejoin(
+        introspection,
+        restarted_id,
+        &survivors,
+        Duration::from_secs(15),
+    ) {
+        eprintln!("testament: restart {}: {}", alias, error);
         process.kill();
         return 3;
     }

@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use misaka_core::protocol::{Envelope, HelloData, MessageType};
+use misaka_core::protocol::{Envelope, MessageType};
 use serde::Serialize;
 
 use misaka_runtime::error::MisakaError;
@@ -350,19 +350,13 @@ async fn probe_peer(identity: &misaka_core::SisterIdentity, addr: SocketAddr) ->
     let Ok(crypto) = misaka_runtime::crypto::Crypto::new(&default_encryption_key()) else {
         return false;
     };
-    let Ok(data) = bincode::serialize(&HelloData {
-        identity: identity.clone(),
-        listen_addr: format!("127.0.0.1:{}", identity.listen_port),
-    }) else {
-        return false;
-    };
-    let hello = Envelope::new(MessageType::Hello, identity.id.as_u64(), 0, data);
+    let ping = Envelope::new(MessageType::Ping, identity.id.as_u64(), 0, vec![]);
     let transport = misaka_runtime::network::PeerTransport::new(crypto);
-    tokio::time::timeout(Duration::from_millis(400), transport.send_to(addr, &hello))
+    tokio::time::timeout(Duration::from_millis(400), transport.send_to(addr, &ping))
         .await
         .ok()
         .and_then(Result::ok)
-        .is_some_and(|response| response.msg_type == MessageType::Hello)
+        .is_some_and(|response| response.msg_type == MessageType::Pong)
 }
 
 fn print_network_ps(report: &NetworkPsReport) {

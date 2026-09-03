@@ -63,7 +63,7 @@ A successful `up` stores the active run in `.testament/current`. `ps`,
 `online`, `unresponsive`, or `dead` from OS process state and loopback
 introspection, never from log grep. `misaka ps` is independent of Testament:
 it reads the local identity and PeerStore, then concurrently probes known
-Sisters with the Misaka handshake:
+Sisters with the read-only Misaka Ping/Pong probe:
 
 ```bash
 MISAKA_CONFIG_DIR=.testament/runs/<run-id>/sisters/s1/config \

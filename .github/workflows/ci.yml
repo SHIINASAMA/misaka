@@ -30,3 +30,5 @@ jobs:
         run: cargo build -p misaka
       - name: Run deterministic Testament scenarios
         run: cargo run -p testament -- verify --json
+      - name: Run Operator UX smoke suite
+        run: cargo run -p testament -- operator-verify
