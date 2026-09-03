@@ -558,3 +558,22 @@ QUIC bidirectional stream, without changing the runtime's Direct TCP default.
 - [x] Keep runtime routing, resolver selection, relay policy, and Testament
   scenarios unchanged.
 - [x] Run focused network tests, workspace checks, and update project memory.
+
+### Task 33: Persist and explicitly resolve Iroh transport identity
+
+**Files:**
+- Modify: `crates/misaka-network/src/iroh_backend.rs`
+- Modify: `crates/misaka-runtime/Cargo.toml`
+- Modify: `crates/misaka-runtime/src/lib.rs`
+- Create: `crates/misaka-runtime/src/iroh_identity_store.rs`
+- Modify: `crates/misaka-runtime/src/connection.rs`
+- Modify: `crates/misaka-cli/src/main.rs`
+- Modify: `docs/iroh-backend-spike-v0.md`
+- Modify: `docs/network-resolver-v0.md`
+
+- [x] Persist the Iroh secret key separately from Sister identity JSON.
+- [x] Bind the opt-in CLI Iroh backend with the persisted transport key.
+- [x] Add an explicit SisterId-based Iroh connector without pretending the
+  general resolver supports mixed backends.
+- [x] Reject malformed persisted keys without replacing them.
+- [x] Keep the key out of peer state and diagnostics.

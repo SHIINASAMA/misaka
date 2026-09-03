@@ -4,7 +4,7 @@
 //! behavior stay in `SisterNode`; this module assembles services, starts
 //! cancellable background loops, and accepts inbound connections.
 
-use crate::config::RuntimeConfig;
+use crate::config::{RuntimeConfig, StreamBackend};
 use crate::node::SisterNode;
 use crate::shutdown::Shutdown;
 use misaka_core::protocol::{
@@ -41,6 +41,7 @@ impl SisterRuntime {
         let introspection_addr = config.introspection_addr;
         let stream_port = config.stream_port;
         let stream_security = config.stream_security.clone();
+        let stream_backend = config.stream_backend.clone();
         let shutdown = Shutdown::new();
         let mut node = SisterNode::new(identity, encryption_key, config);
         node.set_shutdown_token(shutdown.token());
@@ -58,8 +59,8 @@ impl SisterRuntime {
         }
         let listener = node.start_listener().await?;
         let backend = misaka_network::DirectTcpBackend;
-        let stream_listener = match stream_port {
-            Some(port) => match stream_security {
+        let stream_listener = match (stream_port, stream_backend) {
+            (Some(port), StreamBackend::DirectTcp) => match stream_security {
                 crate::config::StreamSecurity::InsecureLoopback => Some(
                     backend
                         .listen(NetworkEndpoint::Tcp(format!("127.0.0.1:{port}").parse()?))
@@ -90,7 +91,27 @@ impl SisterRuntime {
                     )
                 }
             },
-            None => None,
+            (None, StreamBackend::DirectTcp) => None,
+            (stream_port, StreamBackend::Iroh(backend)) => {
+                if stream_security.is_secure() {
+                    return Err(crate::Error::Network(
+                        "--stream-secure is only valid with the direct-tcp backend".to_string(),
+                    ));
+                }
+                if stream_port.is_some() {
+                    tracing::debug!(
+                        event = "iroh_stream_port_ignored",
+                        "Iroh selects its own UDP bind port"
+                    );
+                }
+                let endpoint = NetworkEndpoint::Iroh(backend.endpoint_addr());
+                Some(
+                    backend
+                        .listen(endpoint)
+                        .await
+                        .map_err(|error| crate::Error::Network(error.to_string()))?,
+                )
+            }
         };
 
         // Configured peers are connected after `run` starts accepting inbound
@@ -112,6 +133,9 @@ impl SisterRuntime {
 
     /// Return the loopback address for the optional experimental stream listener.
     pub fn stream_addr(&self) -> Option<SocketAddr> {
+        if matches!(self.node.config.stream_backend, StreamBackend::Iroh(_)) {
+            return None;
+        }
         self.stream_listener.as_ref().map(|listener| {
             let port = listener.local_addr().port();
             SocketAddr::new(self.node.listen_addr.ip(), port)
@@ -472,9 +496,10 @@ pub fn default_encryption_key() -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::SisterRuntime;
-    use crate::config::{DiscoveryMode, RuntimeConfig, StreamSecurity};
+    use crate::config::{DiscoveryMode, RuntimeConfig, StreamBackend, StreamSecurity};
     use crate::runtime::default_encryption_key;
     use misaka_core::SisterIdentity;
+    use misaka_network::NetworkBackend;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[tokio::test]
@@ -521,6 +546,68 @@ mod tests {
 
         shutdown.cancel();
         task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn iroh_stream_backend_accepts_and_echoes_a_valid_stream() {
+        let server_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .alpns(vec![misaka_network::IROH_ALPN.to_vec()])
+            .bind_addr("127.0.0.1:0")
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let client_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .alpns(vec![misaka_network::IROH_ALPN.to_vec()])
+            .bind_addr("127.0.0.1:0")
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let server_backend =
+            misaka_network::IrohBackend::new(server_endpoint, misaka_network::IROH_ALPN);
+        let client_backend =
+            misaka_network::IrohBackend::new(client_endpoint, misaka_network::IROH_ALPN);
+        let server_address = iroh::EndpointAddr::new(server_backend.endpoint().id())
+            .with_ip_addr(server_backend.endpoint().bound_sockets()[0]);
+        let runtime = SisterRuntime::new(
+            SisterIdentity::new(
+                1,
+                "iroh-test".into(),
+                "host".into(),
+                "test".into(),
+                "0.1".into(),
+                0,
+            ),
+            default_encryption_key(),
+            RuntimeConfig {
+                listen_port: 0,
+                stream_backend: StreamBackend::Iroh(server_backend),
+                discovery: DiscoveryMode::Off,
+                ..Default::default()
+            },
+            vec![],
+        )
+        .await
+        .unwrap();
+        let shutdown = runtime.shutdown();
+        let task = tokio::spawn(runtime.run());
+
+        let mut stream = client_backend
+            .connect(misaka_network::NetworkEndpoint::Iroh(server_address))
+            .await
+            .unwrap();
+        let mut greeting = [0u8; 5];
+        stream.read_exact(&mut greeting).await.unwrap();
+        assert_eq!(&greeting, b"world");
+        stream.write_all(b"hello").await.unwrap();
+        let mut echo = [0u8; 5];
+        stream.read_exact(&mut echo).await.unwrap();
+        assert_eq!(&echo, b"hello");
+
+        shutdown.cancel();
+        task.await.unwrap().unwrap();
+        client_backend.close().await;
     }
 
     #[tokio::test]

@@ -1,7 +1,9 @@
 use misaka_core::SisterId;
 use misaka_network::resolver::{race_connect, rank_candidates, EndpointCandidate};
 use misaka_network::tls::{TlsClient, TlsIdentity};
-use misaka_network::{DirectTcpBackend, NetworkEndpoint, NetworkError, NetworkStream};
+use misaka_network::{
+    DirectTcpBackend, IrohBackend, NetworkBackend, NetworkEndpoint, NetworkError, NetworkStream,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 use thiserror::Error;
@@ -86,6 +88,67 @@ impl SisterConnector {
                 source: error,
             }),
         }
+    }
+}
+
+/// Resolves an advertised Iroh endpoint for a Sister and opens one stream.
+///
+/// This is intentionally separate from `SisterConnector`: the current
+/// resolver remains TCP-only, while Iroh is being introduced as an explicit
+/// opt-in transport. Keeping the two connectors separate prevents a TCP
+/// candidate from accidentally being handed to an Iroh endpoint (or vice
+/// versa) before multi-backend resolution has been designed.
+#[derive(Clone)]
+pub struct IrohSisterConnector {
+    peers: PeerService,
+    backend: IrohBackend,
+}
+
+impl IrohSisterConnector {
+    pub fn new(peers: PeerService, backend: IrohBackend) -> Self {
+        Self { peers, backend }
+    }
+
+    pub async fn connect_to_sister(
+        &self,
+        sister: SisterId,
+    ) -> Result<NetworkStream, ConnectionError> {
+        let peer = self
+            .peers
+            .get(sister.as_u64())
+            .await
+            .ok_or_else(|| ConnectionError::UnknownSister(sister.clone()))?;
+        if peer.stream_endpoints.is_empty() {
+            return Err(ConnectionError::NoStreamEndpoint(sister));
+        }
+
+        let mut last_error = None;
+        for raw_endpoint in peer.stream_endpoints {
+            let endpoint = match raw_endpoint.parse::<NetworkEndpoint>() {
+                Ok(endpoint) => endpoint,
+                Err(reason) => {
+                    last_error = Some(ConnectionError::InvalidEndpoint {
+                        sister: sister.clone(),
+                        endpoint: raw_endpoint,
+                        reason,
+                    });
+                    continue;
+                }
+            };
+            let NetworkEndpoint::Iroh(_) = endpoint else {
+                continue;
+            };
+            match self.backend.connect(endpoint).await {
+                Ok(stream) => return Ok(stream),
+                Err(error) => {
+                    last_error = Some(ConnectionError::Connect {
+                        sister: sister.clone(),
+                        source: error,
+                    });
+                }
+            }
+        }
+        Err(last_error.unwrap_or(ConnectionError::NoStreamEndpoint(sister)))
     }
 }
 
@@ -232,6 +295,7 @@ impl ConnectionManager {
 #[cfg(test)]
 mod tests {
     use misaka_core::{PeerState, SisterId};
+    use misaka_network::{IrohBackend, NetworkBackend, NetworkEndpoint};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[tokio::test]
@@ -346,6 +410,74 @@ mod tests {
         second.read_exact(&mut second_response).await.unwrap();
         assert_eq!(&second_response, b"second");
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn iroh_connector_resolves_a_sister_by_its_iroh_endpoint() {
+        let server_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .alpns(vec![misaka_network::IROH_ALPN.to_vec()])
+            .bind_addr("127.0.0.1:0")
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let client_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .alpns(vec![misaka_network::IROH_ALPN.to_vec()])
+            .bind_addr("127.0.0.1:0")
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let server_backend = IrohBackend::new(server_endpoint, misaka_network::IROH_ALPN);
+        let client_backend = IrohBackend::new(client_endpoint, misaka_network::IROH_ALPN);
+        let server_endpoint_addr = iroh::EndpointAddr::new(server_backend.endpoint().id())
+            .with_ip_addr(server_backend.endpoint().bound_sockets()[0]);
+        let listener = server_backend
+            .listen(NetworkEndpoint::Iroh(server_endpoint_addr.clone()))
+            .await
+            .unwrap();
+        let server_task = tokio::spawn(async move {
+            tokio::time::timeout(std::time::Duration::from_secs(5), listener.accept())
+                .await
+                .unwrap()
+                .unwrap()
+        });
+
+        let peer = PeerState {
+            id: 42,
+            nickname: "peer".into(),
+            hostname: "host".into(),
+            platform: "test".into(),
+            version: "0.1".into(),
+            stream_endpoints: vec![format!("{}", NetworkEndpoint::Iroh(server_endpoint_addr))],
+            stream_certificate: None,
+            addr: "127.0.0.1:31700".into(),
+            cpu_usage: 0.0,
+            memory_total: 0,
+            memory_used: 0,
+            running_jobs: 0,
+            queued_jobs: 0,
+            uptime_secs: 0,
+            capabilities: vec![],
+        };
+        let service = crate::peer_service::PeerService::new(
+            crate::peer_registry::PeerRegistry::new_seeded(vec![peer]),
+            std::path::PathBuf::from("."),
+        );
+        let connector = super::IrohSisterConnector::new(service, client_backend.clone());
+        let mut stream = connector.connect_to_sister(SisterId(42)).await.unwrap();
+
+        let mut response = [0u8; 8];
+        let (mut server_stream, _) = server_task.await.unwrap();
+        tokio::io::AsyncWriteExt::write_all(&mut server_stream, b"resolved")
+            .await
+            .unwrap();
+        tokio::io::AsyncReadExt::read_exact(&mut stream, &mut response)
+            .await
+            .unwrap();
+        assert_eq!(&response, b"resolved");
+        client_backend.close().await;
+        server_backend.close().await;
     }
 
     #[tokio::test]

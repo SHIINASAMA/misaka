@@ -2,6 +2,8 @@
 
 This checkpoint adds one optional Iroh backend to `misaka-network`. It is a
 connectivity spike and does not change the runtime's default Direct TCP path.
+The opt-in CLI path also persists the Iroh transport key, so a Sister keeps
+the same Iroh endpoint identity across restarts.
 
 ## Contract
 
@@ -21,13 +23,23 @@ traversal behavior is intentionally left to Iroh; Misaka does not introduce a
 relay authority or decrypt relay traffic. Application-level authorization is
 not part of this spike.
 
+`IrohIdentityStore` stores the 32-byte Iroh secret key as
+`iroh-stream-key.bin` with owner-only permissions. It is intentionally separate
+from `identity.json`: Sister identity and transport identity have different
+lifecycle and rotation requirements.
+
 ## Scope boundary
 
 - `DirectTcpBackend` remains the runtime and CLI default.
-- `IrohBackend::bind()` uses Iroh's N0 preset for future cross-domain runs;
-  tests use two loopback-bound endpoints with explicit direct addresses.
-- The backend is not wired into `SisterRuntime`, peer discovery, resolver
-  ranking, relay selection, or Testament network scenarios yet.
+- `IrohBackend::bind()` uses Iroh's N0 preset for tests and ephemeral tools;
+  `misaka start --stream-backend iroh` loads or creates the key in the active
+  `MISAKA_CONFIG_DIR` and binds with that key. Tests use two loopback-bound
+  endpoints with explicit direct addresses.
+- `IrohSisterConnector` can resolve an explicitly advertised Iroh endpoint by
+  Sister ID. The general resolver remains TCP-only; automatic mixed-backend
+  ranking and relay policy are still deliberately out of scope.
+- Iroh is wired into the opt-in `SisterRuntime` listener, but not into
+  Testament network scenarios or cross-domain measurement yet.
 - One logical operation still owns one `NetworkStream`; no session
   multiplexing or transparent reconnect is introduced.
 - The current listener compatibility metadata remains a `SocketAddr`; relay
@@ -39,4 +51,3 @@ not part of this spike.
 The unit test `iroh_backend_roundtrips_a_network_stream` runs two real Iroh
 endpoints, establishes the authenticated QUIC connection, validates the
 Misaka stream handshake, and exchanges bytes through `NetworkStream`.
-

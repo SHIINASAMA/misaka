@@ -38,7 +38,13 @@ impl IrohBackend {
 
     /// Bind an endpoint using Iroh's default relay/address-lookup preset.
     pub async fn bind() -> Result<Self> {
+        Self::bind_with_secret_key(iroh::SecretKey::generate()).await
+    }
+
+    /// Bind an endpoint with a persisted transport identity.
+    pub async fn bind_with_secret_key(secret_key: iroh::SecretKey) -> Result<Self> {
         let endpoint = Endpoint::builder(iroh::endpoint::presets::N0)
+            .secret_key(secret_key)
             .alpns(vec![IROH_ALPN.to_vec()])
             .bind()
             .await

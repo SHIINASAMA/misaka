@@ -13,6 +13,17 @@ pub enum StreamSecurity {
     },
 }
 
+/// Transport backend used by the optional long-lived stream listener.
+///
+/// Direct TCP stays the default for compatibility. Iroh is opt-in and owns
+/// its own endpoint identity, encryption, and path selection.
+#[derive(Clone, Debug, Default)]
+pub enum StreamBackend {
+    #[default]
+    DirectTcp,
+    Iroh(misaka_network::IrohBackend),
+}
+
 impl StreamSecurity {
     pub fn is_secure(&self) -> bool {
         matches!(self, Self::MutualTls { .. })
@@ -40,6 +51,8 @@ pub struct RuntimeConfig {
     pub listen_port: u16,
     /// 实验性 Network Stream 监听端口 (None = 禁用)
     pub stream_port: Option<u16>,
+    /// Backend for the optional Network Stream listener.
+    pub stream_backend: StreamBackend,
     /// Stream security mode. Raw streams remain loopback-only by default.
     pub stream_security: StreamSecurity,
     /// 告知 peer 的对外地址 (None = 用 listen_port 在回环/本机)
@@ -75,6 +88,7 @@ impl Default for RuntimeConfig {
         Self {
             listen_port: 31700,
             stream_port: None,
+            stream_backend: StreamBackend::DirectTcp,
             stream_security: StreamSecurity::InsecureLoopback,
             advertise_host: None,
             // 数据目录在 CLI 层通过 MISAKA_CONFIG_DIR 决定；这里放默认值
@@ -94,10 +108,18 @@ impl Default for RuntimeConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::RuntimeConfig;
+    use super::{RuntimeConfig, StreamBackend};
 
     #[test]
     fn stream_listener_is_opt_in() {
         assert_eq!(RuntimeConfig::default().stream_port, None);
+    }
+
+    #[test]
+    fn stream_backend_defaults_to_direct_tcp() {
+        assert!(matches!(
+            RuntimeConfig::default().stream_backend,
+            StreamBackend::DirectTcp
+        ));
     }
 }

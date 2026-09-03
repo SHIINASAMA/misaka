@@ -14,6 +14,7 @@ pub mod executor;
 pub mod handler;
 pub mod identity_store;
 pub mod introspection;
+pub mod iroh_identity_store;
 pub mod job_manager;
 pub mod network;
 pub mod node;

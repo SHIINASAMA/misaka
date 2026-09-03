@@ -41,6 +41,10 @@ enum Command {
         #[arg(long)]
         stream_secure: bool,
 
+        /// Stream backend (direct-tcp | iroh).
+        #[arg(long, default_value = "direct-tcp")]
+        stream_backend: String,
+
         /// DER certificate of a trusted peer; may be repeated in secure mode.
         #[arg(long, value_name = "PATH")]
         stream_trust_cert: Vec<PathBuf>,
@@ -180,6 +184,7 @@ async fn main() -> Result<(), MisakaError> {
             port,
             stream_port,
             stream_secure,
+            stream_backend,
             stream_trust_cert,
             peer,
             nickname,
@@ -221,6 +226,32 @@ async fn main() -> Result<(), MisakaError> {
             } else {
                 misaka_runtime::config::StreamSecurity::InsecureLoopback
             };
+            let stream_backend = match stream_backend.as_str() {
+                "direct-tcp" => misaka_runtime::config::StreamBackend::DirectTcp,
+                "iroh" => {
+                    if stream_secure {
+                        return Err(MisakaError::Other(
+                            "--stream-secure cannot be combined with --stream-backend iroh"
+                                .to_string(),
+                        ));
+                    }
+                    misaka_runtime::config::StreamBackend::Iroh(
+                        misaka_network::IrohBackend::bind_with_secret_key(
+                            misaka_runtime::iroh_identity_store::IrohIdentityStore::load_or_init(
+                                &data_dir,
+                            )
+                            .map_err(|error| MisakaError::Other(error.to_string()))?,
+                        )
+                        .await
+                        .map_err(|error| MisakaError::Other(error.to_string()))?,
+                    )
+                }
+                other => {
+                    return Err(MisakaError::Other(format!(
+                        "unsupported stream backend: {other}"
+                    )))
+                }
+            };
             if nickname.clone().is_some() {
                 tracing::info!(
                     event = "nickname_updated",
@@ -247,6 +278,7 @@ async fn main() -> Result<(), MisakaError> {
             let config = misaka_runtime::config::RuntimeConfig {
                 listen_port: port,
                 stream_port: (stream_port != 0).then_some(stream_port),
+                stream_backend,
                 stream_security,
                 data_dir,
                 heartbeat_interval: std::time::Duration::from_secs(heartbeat),

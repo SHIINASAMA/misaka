@@ -1,4 +1,4 @@
-use crate::config::RuntimeConfig;
+use crate::config::{RuntimeConfig, StreamBackend};
 use crate::crypto::Crypto;
 use crate::job_manager::JobManager;
 use crate::network::PeerTransport;
@@ -12,6 +12,7 @@ use crate::state::{LocalJob, LocalState};
 use misaka_core::introspection::{IntrospectionSnapshot, ResourceSnapshot};
 use misaka_core::protocol::*;
 use misaka_core::{PeerState, SisterIdentity};
+use misaka_network::NetworkEndpoint;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
@@ -117,6 +118,9 @@ impl SisterNode {
 
     /// Current stream endpoint candidate, kept separate from the control address.
     pub fn stream_addr(&self) -> Option<SocketAddr> {
+        if matches!(&self.config.stream_backend, StreamBackend::Iroh(_)) {
+            return None;
+        }
         let candidate = self
             .config
             .stream_port
@@ -125,7 +129,12 @@ impl SisterNode {
     }
 
     pub fn stream_endpoint(&self) -> Option<String> {
-        self.stream_addr().map(|addr| format!("tcp://{addr}"))
+        match &self.config.stream_backend {
+            StreamBackend::DirectTcp => self.stream_addr().map(|addr| format!("tcp://{addr}")),
+            StreamBackend::Iroh(backend) => {
+                Some(NetworkEndpoint::Iroh(backend.endpoint_addr()).to_string())
+            }
+        }
     }
 
     pub fn stream_certificate(&self) -> Option<Vec<u8>> {

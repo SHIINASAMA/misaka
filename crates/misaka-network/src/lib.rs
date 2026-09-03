@@ -68,7 +68,10 @@ impl std::fmt::Display for NetworkEndpoint {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Tcp(addr) => write!(formatter, "tcp://{addr}"),
-            Self::Iroh(addr) => write!(formatter, "iroh://{}", addr.id),
+            Self::Iroh(addr) => {
+                let encoded = serde_json::to_string(addr).map_err(|_| std::fmt::Error)?;
+                write!(formatter, "iroh://{encoded}")
+            }
         }
     }
 }
@@ -82,6 +85,11 @@ impl std::str::FromStr for NetworkEndpoint {
                 .parse::<SocketAddr>()
                 .map_err(|error| format!("invalid TCP endpoint {value}: {error}"))?;
             return Ok(Self::Tcp(addr));
+        }
+        if let Some(value) = value.strip_prefix("iroh://") {
+            let endpoint = serde_json::from_str(value)
+                .map_err(|error| format!("invalid Iroh endpoint {value}: {error}"))?;
+            return Ok(Self::Iroh(endpoint));
         }
         Err(format!("unsupported network endpoint: {value}"))
     }
