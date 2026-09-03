@@ -7,6 +7,8 @@ pub const PROTOCOL_VERSION: u16 = 2;
 pub const TRANSFER_MAGIC: &[u8; 4] = b"MTR0";
 /// Service preamble for the resumable file-transfer stream.
 pub const TRANSFER_V1_MAGIC: &[u8; 4] = b"MTR1";
+/// Service preamble for the opt-in parallel-chunk transfer stream.
+pub const TRANSFER_V2_MAGIC: &[u8; 4] = b"MTR2";
 /// Service preamble for the v0 TCP tunnel stream.
 pub const TUNNEL_MAGIC: &[u8; 4] = b"MTN0";
 /// Fixed v1 chunk size used by the resumable transfer protocol.
@@ -208,6 +210,46 @@ pub struct TransferV1Ack {
     pub error: Option<String>,
 }
 
+/// Operation carried by one Transfer v2 control or worker stream.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TransferV2Operation {
+    Prepare,
+    Chunk,
+    Finalize,
+}
+
+/// Request for the opt-in parallel-chunk transfer protocol.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TransferV2Request {
+    pub operation: TransferV2Operation,
+    pub destination: String,
+    pub size: u64,
+    pub digest: [u8; 32],
+    pub chunk_size: u32,
+    pub chunk_count: u64,
+    pub index: u64,
+    pub offset: u64,
+    pub len: u32,
+    pub chunk_digest: [u8; 32],
+}
+
+/// Durable completed chunk indexes returned by a Transfer v2 prepare request.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TransferV2Resume {
+    pub completed_indices: Vec<u64>,
+    pub complete: bool,
+    pub error: Option<String>,
+}
+
+/// Acknowledgement for one Transfer v2 worker or finalize request.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TransferV2Ack {
+    pub index: u64,
+    pub accepted: bool,
+    pub complete: bool,
+    pub error: Option<String>,
+}
+
 /// Request for a v0 TCP tunnel to a service reachable by the remote Sister.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TunnelRequest {
@@ -303,6 +345,76 @@ mod tests {
                 0x22, 0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61,
                 0xf2, 0x00, 0x15, 0xad,
             ]
+        );
+    }
+
+    #[test]
+    fn transfer_v2_contract_roundtrips_bincode() {
+        let requests = [
+            TransferV2Request {
+                operation: TransferV2Operation::Prepare,
+                destination: "/tmp/file".into(),
+                size: 131_072,
+                digest: [7; 32],
+                chunk_size: TRANSFER_V1_CHUNK_SIZE,
+                chunk_count: 2,
+                index: 0,
+                offset: 0,
+                len: 0,
+                chunk_digest: [0; 32],
+            },
+            TransferV2Request {
+                operation: TransferV2Operation::Chunk,
+                destination: "/tmp/file".into(),
+                size: 131_072,
+                digest: [7; 32],
+                chunk_size: TRANSFER_V1_CHUNK_SIZE,
+                chunk_count: 2,
+                index: 1,
+                offset: 65_536,
+                len: 65_536,
+                chunk_digest: [8; 32],
+            },
+            TransferV2Request {
+                operation: TransferV2Operation::Finalize,
+                destination: "/tmp/file".into(),
+                size: 131_072,
+                digest: [7; 32],
+                chunk_size: TRANSFER_V1_CHUNK_SIZE,
+                chunk_count: 2,
+                index: 0,
+                offset: 0,
+                len: 0,
+                chunk_digest: [0; 32],
+            },
+        ];
+        for request in requests {
+            let encoded = bincode::serialize(&request).unwrap();
+            let decoded: TransferV2Request = bincode::deserialize(&encoded).unwrap();
+            assert_eq!(decoded, request);
+        }
+
+        let resume = TransferV2Resume {
+            completed_indices: vec![0, 3],
+            complete: false,
+            error: None,
+        };
+        let encoded = bincode::serialize(&resume).unwrap();
+        assert_eq!(
+            bincode::deserialize::<TransferV2Resume>(&encoded).unwrap(),
+            resume
+        );
+
+        let ack = TransferV2Ack {
+            index: 1,
+            accepted: true,
+            complete: false,
+            error: None,
+        };
+        let encoded = bincode::serialize(&ack).unwrap();
+        assert_eq!(
+            bincode::deserialize::<TransferV2Ack>(&encoded).unwrap(),
+            ack
         );
     }
 

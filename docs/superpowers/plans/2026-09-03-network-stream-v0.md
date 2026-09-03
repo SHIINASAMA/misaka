@@ -892,3 +892,14 @@ QUIC bidirectional stream, without changing the runtime's Direct TCP default.
   the default candidate view unchanged.
 - [x] Verify active values and cleanup through the external N18 Testament
   scenario.
+
+### Task 54: Define the Transfer v2 parallel-chunk contract
+
+**Files:**
+- Modify: `crates/misaka-core/src/protocol.rs`
+- Create: `docs/superpowers/plans/2026-09-04-transfer-parallel-chunks-v2.md`
+
+- [x] Add `TRANSFER_V2_MAGIC`, operation, request, resume, and acknowledgement
+  contracts for prepare, chunk, and finalize streams.
+- [x] Keep Transfer v1 wire behavior unchanged and cover the new contract with
+  a bincode round-trip test.
