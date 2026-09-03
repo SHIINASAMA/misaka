@@ -135,7 +135,7 @@ The `.testament/` directory is ignored by Git. Logs are diagnostic artifacts onl
 ## Network Stream v0 suite
 
 `network-verify` launches isolated real Sisters with separate control,
-stream, and introspection ports. It runs N01–N14: connect, bidirectional
+stream, and introspection ports. It runs N01–N16: connect, bidirectional
 exchange, sustained single-connection exchange, a 64 MiB bounded-buffer
 stream, remote disconnect, and restart followed by a new stream. Testament
 asserts command results and process behavior; it does not import or execute
@@ -154,6 +154,9 @@ the public `misaka ps --json --introspect` command, then verifies registry
 cleanup after the client exits.
 N14 kills and restarts an Iroh Sister, checks that its Sister and transport
 identities remain stable, and verifies a new bidirectional stream afterward.
+N15 validates the public `stream-test --json` measurement output against real
+Iroh Sisters. N16 validates the public `misaka connect #<sister-id>` command
+against a stored Iroh candidate and checks the selected path.
 
 ## CI gate
 
