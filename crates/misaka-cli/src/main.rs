@@ -86,9 +86,17 @@ enum Command {
 
     /// Experimental Network Stream v0 black-box client.
     StreamTest {
-        /// Stream endpoint to connect to.
-        #[arg(long)]
-        addr: SocketAddr,
+        /// TCP stream endpoint to connect to (legacy form).
+        #[arg(
+            long,
+            conflicts_with = "endpoint",
+            required_unless_present = "endpoint"
+        )]
+        addr: Option<SocketAddr>,
+
+        /// Transport-neutral endpoint, for example iroh://<EndpointAddr>.
+        #[arg(long, conflicts_with = "addr", required_unless_present = "addr")]
+        endpoint: Option<String>,
 
         /// Test mode: connect | bidirectional | sustained | large | hold.
         #[arg(long, default_value = "connect")]
@@ -316,6 +324,7 @@ async fn main() -> Result<(), MisakaError> {
 
         Command::StreamTest {
             addr,
+            endpoint,
             mode,
             ready_file,
             secure,
@@ -323,7 +332,17 @@ async fn main() -> Result<(), MisakaError> {
             server_name,
         } => {
             run_stream_test(
-                addr,
+                match (addr, endpoint) {
+                    (Some(addr), None) => NetworkEndpoint::Tcp(addr),
+                    (None, Some(endpoint)) => endpoint
+                        .parse::<NetworkEndpoint>()
+                        .map_err(MisakaError::Other)?,
+                    _ => {
+                        return Err(MisakaError::Other(
+                            "exactly one of --addr or --endpoint is required".to_string(),
+                        ))
+                    }
+                },
                 &mode,
                 ready_file.as_deref(),
                 secure,
@@ -636,14 +655,18 @@ const FNV_OFFSET: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;
 
 async fn run_stream_test(
-    addr: SocketAddr,
+    endpoint: NetworkEndpoint,
     mode: &str,
     ready_file: Option<&Path>,
     secure: bool,
     trust_cert: Option<&Path>,
     server_name: Option<&str>,
 ) -> Result<(), String> {
+    let connect_started = tokio::time::Instant::now();
     let mut stream = if secure {
+        let NetworkEndpoint::Tcp(addr) = endpoint else {
+            return Err("--secure only supports a TCP endpoint".to_string());
+        };
         let trust_cert = trust_cert.ok_or("--trust-cert is required with --secure")?;
         let server_name = server_name.ok_or("--server-name is required with --secure")?;
         let data_dir = IdentityStore::config_dir().map_err(|error| error.to_string())?;
@@ -665,15 +688,46 @@ async fn run_stream_test(
         .map_err(|_| "secure stream connect timed out".to_string())?
         .map_err(|error| error.to_string())?
     } else {
-        let backend = misaka_network::DirectTcpBackend;
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            backend.connect(NetworkEndpoint::Tcp(addr)),
-        )
-        .await
-        .map_err(|_| "stream connect timed out".to_string())?
-        .map_err(|error| error.to_string())?
+        match endpoint {
+            NetworkEndpoint::Tcp(addr) => {
+                let backend = misaka_network::DirectTcpBackend;
+                tokio::time::timeout(
+                    Duration::from_secs(5),
+                    backend.connect(NetworkEndpoint::Tcp(addr)),
+                )
+                .await
+                .map_err(|_| "stream connect timed out".to_string())?
+                .map_err(|error| error.to_string())?
+            }
+            NetworkEndpoint::Iroh(endpoint) => {
+                let data_dir = IdentityStore::config_dir()
+                    .map_err(|error| format!("load Iroh config dir: {error}"))?;
+                let backend = misaka_network::IrohBackend::bind_with_secret_key(
+                    misaka_runtime::iroh_identity_store::IrohIdentityStore::load_or_init(&data_dir)
+                        .map_err(|error| error.to_string())?,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+                tokio::time::timeout(
+                    Duration::from_secs(10),
+                    backend.connect(NetworkEndpoint::Iroh(endpoint)),
+                )
+                .await
+                .map_err(|_| "Iroh stream connect timed out".to_string())?
+                .map_err(|error| error.to_string())?
+            }
+        }
     };
+
+    let connect_ms = connect_started.elapsed().as_millis();
+    let path = stream.path_info();
+    println!(
+        "Stream path: backend={} route={} local={} remote={} setup_ms={connect_ms}",
+        path.backend,
+        path.route,
+        path.local_endpoint.as_deref().unwrap_or("-"),
+        path.remote_endpoint.as_deref().unwrap_or("-"),
+    );
 
     let mut greeting = [0u8; 5];
     read_exact_timeout(&mut stream, &mut greeting).await?;
@@ -684,7 +738,12 @@ async fn run_stream_test(
     match mode {
         "connect" => mark_ready(ready_file),
         "bidirectional" => {
+            let started = std::time::Instant::now();
             exchange(&mut stream, b"hello").await?;
+            println!(
+                "Stream RTT: payload_bytes=5 rtt_ms={}",
+                started.elapsed().as_millis()
+            );
             mark_ready(ready_file)
         }
         "sustained" => {
@@ -1224,6 +1283,7 @@ async fn exchange(
 
 async fn sustained(stream: &mut misaka_network::NetworkStream) -> Result<(), String> {
     let payload = b"sustained-stream-message";
+    let started = std::time::Instant::now();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
     let mut exchanges = 0u64;
     while tokio::time::Instant::now() < deadline {
@@ -1233,10 +1293,16 @@ async fn sustained(stream: &mut misaka_network::NetworkStream) -> Result<(), Str
     if exchanges < 2 {
         return Err("sustained stream completed fewer than two exchanges".to_string());
     }
+    println!(
+        "Sustained stream: exchanges={} elapsed_ms={}",
+        exchanges,
+        started.elapsed().as_millis()
+    );
     Ok(())
 }
 
 async fn large_stream(stream: misaka_network::NetworkStream) -> Result<(), String> {
+    let started = std::time::Instant::now();
     let (mut reader, mut writer) = tokio::io::split(stream);
     let writer_task = tokio::spawn(async move {
         let mut buffer = [0u8; STREAM_CHUNK_SIZE];
@@ -1286,6 +1352,14 @@ async fn large_stream(stream: misaka_network::NetworkStream) -> Result<(), Strin
             "large stream verification failed: sent={LARGE_STREAM_SIZE}, received={received}, sent_hash={sent_hash}, received_hash={hash}"
         ));
     }
+    let elapsed = started.elapsed();
+    let throughput_mib_s =
+        received as f64 / elapsed.as_secs_f64().max(f64::EPSILON) / (1024.0 * 1024.0);
+    println!(
+        "Large stream: bytes={} elapsed_ms={} throughput_mib_s={throughput_mib_s:.2}",
+        received,
+        elapsed.as_millis()
+    );
     Ok(())
 }
 
@@ -1354,12 +1428,32 @@ mod stream_tests {
             cli.command,
             Command::StreamTest {
                 addr,
+                endpoint: None,
                 mode,
                 ready_file,
                 ..
-            } if addr == "127.0.0.1:31701".parse::<SocketAddr>().unwrap()
+            } if addr == Some("127.0.0.1:31701".parse::<SocketAddr>().unwrap())
                 && mode == "large"
                 && ready_file.as_deref().is_some_and(|path| path == std::path::Path::new("/tmp/misaka-stream-ready"))
+        ));
+    }
+
+    #[test]
+    fn stream_test_accepts_a_transport_neutral_endpoint() {
+        let cli = Cli::try_parse_from([
+            "misaka",
+            "stream-test",
+            "--endpoint",
+            "iroh://endpoint-address",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::StreamTest {
+                addr: None,
+                endpoint: Some(endpoint),
+                ..
+            } if endpoint == "iroh://endpoint-address"
         ));
     }
 

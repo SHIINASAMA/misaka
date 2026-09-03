@@ -700,3 +700,17 @@ QUIC bidirectional stream, without changing the runtime's Direct TCP default.
   destination bytes.
 - [x] Keep the scenario deterministic and restricted to the existing local
   Iroh connectivity fixture; cross-domain/relay measurements remain separate.
+
+### Task 42: Add Iroh cross-domain measurement tooling
+
+**Files:**
+- Modify: `crates/misaka-cli/src/main.rs`
+- Create: `docs/iroh-cross-domain-measurement.md`
+- Modify: `docs/iroh-backend-spike-v0.md`
+
+- [x] Let `stream-test` accept a transport-neutral `--endpoint` in addition to
+  the legacy TCP `--addr` form.
+- [x] Report selected path, setup latency, bidirectional RTT, and bounded
+  large-stream throughput.
+- [x] Document the real-host measurement matrix and distinguish local evidence
+  from cross-domain/relay results.

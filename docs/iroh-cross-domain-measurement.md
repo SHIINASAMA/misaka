@@ -1,0 +1,59 @@
+# Iroh Cross-domain Measurement Runbook
+
+The Iroh backend is now executable through the public CLI, but loopback tests
+do not prove NAT traversal, relay fallback, or real-world stability. This
+runbook defines the measurements to collect on two real hosts without changing
+the Sister protocol or introducing another backend.
+
+## Setup
+
+Use a separate `MISAKA_CONFIG_DIR` on each host. Start both Sisters with the
+opt-in Iroh backend and a manual control-plane peer address:
+
+```bash
+MISAKA_CONFIG_DIR=/path/to/sister-a-config \
+  misaka start --port 31700 --stream-backend iroh --discovery manual \
+  --peer <sister-b-control-ip>:31700 --introspect 31702
+
+MISAKA_CONFIG_DIR=/path/to/sister-b-config \
+  misaka start --port 31700 --stream-backend iroh --discovery manual \
+  --peer <sister-a-control-ip>:31700 --introspect 31702
+```
+
+After the control-plane Hello exchange, inspect the initiator's peer state:
+
+```bash
+MISAKA_CONFIG_DIR=/path/to/sister-a-config misaka ps --json
+```
+
+The target Sister's `stream` value is an `iroh://` endpoint candidate. Pass it
+to the transport-neutral stream probe:
+
+```bash
+IROH_ENDPOINT='iroh://<endpoint-json>'
+MISAKA_CONFIG_DIR=/path/to/sister-a-config \
+  misaka stream-test --endpoint "$IROH_ENDPOINT" --mode bidirectional
+
+MISAKA_CONFIG_DIR=/path/to/sister-a-config \
+  misaka stream-test --endpoint "$IROH_ENDPOINT" --mode large
+```
+
+The probe prints the selected backend/route, setup latency, round-trip time,
+and bounded large-stream throughput. `misaka cp --resume` can be used for a
+large-transfer confirmation over the same advertised endpoint.
+
+## Measurement record
+
+For each host pair and network condition, record:
+
+| condition | setup ms | RTT ms | throughput MiB/s | route | stable 30–60 min |
+| --- | ---: | ---: | ---: | --- | --- |
+| same-LAN direct | | | | | |
+| different ISP | | | | | |
+| UDP restricted | | | | | |
+| relay fallback | | | | | |
+
+The current repository contains local loopback evidence only. A row is not
+complete until it has been collected on the corresponding real network path;
+the CLI output is measurement input, not an automatic claim that relay
+fallback succeeded.

@@ -49,6 +49,12 @@ lifecycle and rotation requirements.
   protocol: `misaka cp --resume` can use Iroh, while parallel chunks,
   content addressing, and cross-domain transfer measurements remain future
   work.
+- `misaka stream-test --endpoint iroh://...` is the cross-domain measurement
+  entry point. It reports the selected Iroh route, setup latency, RTT for the
+  bidirectional probe, and bounded large-stream throughput. The measurement
+  procedure and required real-host matrix live in
+  `docs/iroh-cross-domain-measurement.md`; no real cross-domain result is
+  claimed by the local test suite.
 - `IrohBackend::connect_session`/`accept_session` expose an explicit
   long-lived QUIC connection; `IrohSession::open_stream` and
   `accept_stream` create multiple independently handshaken logical streams on
