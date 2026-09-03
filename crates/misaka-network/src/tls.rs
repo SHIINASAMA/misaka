@@ -1,8 +1,12 @@
-use crate::{NetworkEndpoint, NetworkError, NetworkStream, Result};
+use crate::{
+    NetworkEndpoint, NetworkError, NetworkListener, NetworkListenerDriver, NetworkStream, Result,
+    HANDSHAKE_TIMEOUT,
+};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
 use rustls::{ClientConfig, RootCertStore, ServerConfig};
+use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 /// A certificate and private key used for mutual TLS.
@@ -117,6 +121,47 @@ impl TlsServer {
             .map_err(|error| NetworkError::Tls(error.to_string()))?;
         Ok(NetworkStream::from_stream(stream))
     }
+
+    pub async fn listen(&self, endpoint: NetworkEndpoint) -> Result<NetworkListener> {
+        let NetworkEndpoint::Tcp(address) = endpoint;
+        let listener = TcpListener::bind(address)
+            .await
+            .map_err(NetworkError::Bind)?;
+        let bound = listener.local_addr().map_err(NetworkError::Bind)?;
+        tracing::info!(
+            event = "secure_stream_listener_started",
+            address = %bound,
+            "secure network stream listener started"
+        );
+        Ok(NetworkListener::from_driver(TlsListener {
+            inner: listener,
+            acceptor: self.acceptor.clone(),
+        }))
+    }
+}
+
+struct TlsListener {
+    inner: TcpListener,
+    acceptor: TlsAcceptor,
+}
+
+impl NetworkListenerDriver for TlsListener {
+    fn local_addr(&self) -> SocketAddr {
+        self.inner
+            .local_addr()
+            .expect("a bound TCP listener has a local address")
+    }
+
+    fn accept(&self) -> crate::ListenerFuture<'_> {
+        Box::pin(async move {
+            let (stream, address) = self.inner.accept().await.map_err(NetworkError::Io)?;
+            let stream = tokio::time::timeout(HANDSHAKE_TIMEOUT, self.acceptor.accept(stream))
+                .await
+                .map_err(|_| NetworkError::Tls("TLS handshake timed out".to_string()))?
+                .map_err(|error| NetworkError::Tls(error.to_string()))?;
+            Ok((NetworkStream::from_stream(stream), address))
+        })
+    }
 }
 
 #[cfg(test)]
@@ -155,11 +200,13 @@ mod tests {
         )
         .unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let endpoint = listener.local_addr().unwrap();
+        let listener = server
+            .listen(NetworkEndpoint::Tcp("127.0.0.1:0".parse().unwrap()))
+            .await
+            .unwrap();
+        let endpoint = listener.local_addr();
         let server_task = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut stream = server.accept(stream).await.unwrap();
+            let (mut stream, _) = listener.accept().await.unwrap();
             let mut request = [0u8; 5];
             stream.read_exact(&mut request).await.unwrap();
             assert_eq!(&request, b"hello");
