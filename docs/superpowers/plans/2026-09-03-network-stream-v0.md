@@ -635,3 +635,20 @@ QUIC bidirectional stream, without changing the runtime's Direct TCP default.
 - [x] Route opt-in runtime Iroh sessions to independent service stream tasks.
 - [x] Leave transparent recovery and cross-backend session ownership for a
   later checkpoint.
+
+### Task 38: Add resumable Transfer v1 over the selected stream
+
+**Files:**
+- Modify: `crates/misaka-core/src/protocol.rs`
+- Modify: `crates/misaka-runtime/src/runtime.rs`
+- Modify: `crates/misaka-cli/src/main.rs`
+- Modify: `docs/network-stream-v0.md`
+- Modify: `docs/iroh-backend-spike-v0.md`
+
+- [x] Add an `MTR1` request with a fixed 64 KiB chunk contract.
+- [x] Persist a destination-side `.misaka-part` file and matching JSON resume state.
+- [x] Verify each chunk before committing its offset and return an explicit ack.
+- [x] Resume only when size, digest, chunk size, and committed file length match.
+- [x] Add `misaka cp --resume` while keeping the Transfer v0 command unchanged.
+- [x] Verify disconnect/resume/finalization with a deterministic runtime test and
+  keep Transfer v1 transport-neutral so it works over Direct TCP or opt-in Iroh.

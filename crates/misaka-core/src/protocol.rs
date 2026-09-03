@@ -4,8 +4,12 @@ use serde::{Deserialize, Serialize};
 pub const PROTOCOL_VERSION: u16 = 2;
 /// Service preamble for the v0 file-transfer stream.
 pub const TRANSFER_MAGIC: &[u8; 4] = b"MTR0";
+/// Service preamble for the resumable file-transfer stream.
+pub const TRANSFER_V1_MAGIC: &[u8; 4] = b"MTR1";
 /// Service preamble for the v0 TCP tunnel stream.
 pub const TUNNEL_MAGIC: &[u8; 4] = b"MTN0";
+/// Fixed v1 chunk size used by the resumable transfer protocol.
+pub const TRANSFER_V1_CHUNK_SIZE: u32 = 64 * 1024;
 
 const TRANSFER_DIGEST_PRIME: u64 = 0x100000001b3;
 
@@ -163,6 +167,41 @@ pub struct TransferResult {
     pub error: Option<String>,
 }
 
+/// Header for a resumable file transfer. The payload is sent as separately
+/// framed chunks so a receiver can commit progress at chunk boundaries.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TransferV1Request {
+    pub destination: String,
+    pub size: u64,
+    pub digest: [u8; 32],
+    pub chunk_size: u32,
+}
+
+/// Receiver's durable progress for a resumable transfer.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TransferV1Resume {
+    pub offset: u64,
+    pub complete: bool,
+    pub error: Option<String>,
+}
+
+/// Metadata preceding one bounded transfer chunk.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TransferV1Chunk {
+    pub index: u64,
+    pub offset: u64,
+    pub len: u32,
+    pub digest: [u8; 32],
+}
+
+/// Receiver acknowledgement after committing one chunk.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TransferV1Ack {
+    pub next_offset: u64,
+    pub complete: bool,
+    pub error: Option<String>,
+}
+
 /// Request for a v0 TCP tunnel to a service reachable by the remote Sister.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TunnelRequest {
@@ -208,6 +247,30 @@ mod tests {
         let encoded = bincode::serialize(&request).unwrap();
         let decoded: TransferRequest = bincode::deserialize(&encoded).unwrap();
         assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn resumable_transfer_contract_roundtrips_bincode() {
+        let request = TransferV1Request {
+            destination: "/tmp/result.bin".into(),
+            size: 131072,
+            digest: [7; 32],
+            chunk_size: TRANSFER_V1_CHUNK_SIZE,
+        };
+        let encoded = bincode::serialize(&request).unwrap();
+        let decoded: TransferV1Request = bincode::deserialize(&encoded).unwrap();
+        assert_eq!(decoded, request);
+
+        let ack = TransferV1Ack {
+            next_offset: 65536,
+            complete: false,
+            error: None,
+        };
+        let encoded = bincode::serialize(&ack).unwrap();
+        assert_eq!(
+            bincode::deserialize::<TransferV1Ack>(&encoded).unwrap(),
+            ack
+        );
     }
 
     #[test]

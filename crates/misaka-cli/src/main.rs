@@ -1,10 +1,12 @@
 use clap::{Parser, Subcommand};
 use misaka_core::protocol::{
-    finalize_transfer_digest, update_transfer_digest, Envelope, MessageType, TransferRequest,
-    TransferResult, TunnelRequest, TRANSFER_MAGIC, TUNNEL_MAGIC,
+    finalize_transfer_digest, transfer_digest, update_transfer_digest, Envelope, MessageType,
+    TransferRequest, TransferResult, TransferV1Ack, TransferV1Chunk, TransferV1Request,
+    TransferV1Resume, TunnelRequest, TRANSFER_MAGIC, TRANSFER_V1_CHUNK_SIZE, TRANSFER_V1_MAGIC,
+    TUNNEL_MAGIC,
 };
 use misaka_network::{NetworkBackend, NetworkEndpoint};
-use serde::Serialize;
+use serde::{de::DeserializeOwned, Serialize};
 
 use misaka_runtime::error::MisakaError;
 use misaka_runtime::identity_store::IdentityStore;
@@ -116,6 +118,10 @@ enum Command {
 
         /// Remote target in the form #<sister-id>:/absolute/path.
         destination: String,
+
+        /// Resume from the remote Sister's durable chunk boundary.
+        #[arg(long)]
+        resume: bool,
     },
 
     /// Forward a local TCP port to a remote Sister-local TCP endpoint.
@@ -331,8 +337,9 @@ async fn main() -> Result<(), MisakaError> {
         Command::Cp {
             source,
             destination,
+            resume,
         } => {
-            run_copy(&source, &destination)
+            run_copy(&source, &destination, resume)
                 .await
                 .map_err(MisakaError::Other)?;
         }
@@ -709,7 +716,10 @@ async fn run_stream_test(
     }
 }
 
-async fn run_copy(source: &Path, destination: &str) -> Result<(), String> {
+async fn run_copy(source: &Path, destination: &str, resume: bool) -> Result<(), String> {
+    if resume {
+        return run_copy_v1(source, destination).await;
+    }
     let (peer_id, remote_path) = parse_copy_destination(destination)?;
     let peer = PeerStore::load_from_file()
         .into_iter()
@@ -797,6 +807,134 @@ async fn run_copy(source: &Path, destination: &str) -> Result<(), String> {
     }
     println!(
         "Copied {} bytes to Sister #{peer_id}:{}",
+        size,
+        remote_path.display()
+    );
+    Ok(())
+}
+
+async fn run_copy_v1(source: &Path, destination: &str) -> Result<(), String> {
+    let (peer_id, remote_path) = parse_copy_destination(destination)?;
+    let peer = PeerStore::load_from_file()
+        .into_iter()
+        .find(|peer| peer.id == peer_id)
+        .ok_or_else(|| format!("Sister #{peer_id} is not in the local peer store"))?;
+    let endpoint = peer
+        .stream_endpoints
+        .first()
+        .ok_or_else(|| format!("Sister #{peer_id} has no stream endpoint"))?
+        .parse::<NetworkEndpoint>()
+        .map_err(|error| error.to_string())?;
+    let mut stream =
+        connect_peer_stream(endpoint, peer_id, peer.stream_certificate.as_deref()).await?;
+
+    let mut file = tokio::fs::File::open(source)
+        .await
+        .map_err(|error| format!("open source {}: {error}", source.display()))?;
+    let size = file
+        .metadata()
+        .await
+        .map_err(|error| format!("stat source {}: {error}", source.display()))?
+        .len();
+    let digest = hash_file(&mut file).await?;
+    tokio::io::AsyncSeekExt::seek(&mut file, std::io::SeekFrom::Start(0))
+        .await
+        .map_err(|error| format!("rewind source: {error}"))?;
+
+    stream
+        .write_all(TRANSFER_V1_MAGIC)
+        .await
+        .map_err(|error| format!("write transfer v1 preamble: {error}"))?;
+    write_cli_bincode_frame(
+        &mut stream,
+        &TransferV1Request {
+            destination: remote_path.display().to_string(),
+            size,
+            digest,
+            chunk_size: TRANSFER_V1_CHUNK_SIZE,
+        },
+    )
+    .await?;
+    let resume: TransferV1Resume = read_cli_bincode_frame(&mut stream, 1024 * 1024).await?;
+    if let Some(error) = resume.error {
+        return Err(format!("remote transfer resume rejected: {error}"));
+    }
+    if resume.offset > size
+        || !resume
+            .offset
+            .is_multiple_of(u64::from(TRANSFER_V1_CHUNK_SIZE))
+    {
+        return Err(format!(
+            "remote returned invalid resume offset {}",
+            resume.offset
+        ));
+    }
+    if resume.complete {
+        return finish_copy_v1(&mut stream, peer_id, &remote_path, size, digest).await;
+    }
+
+    let mut sent = resume.offset;
+    tokio::io::AsyncSeekExt::seek(&mut file, std::io::SeekFrom::Start(sent))
+        .await
+        .map_err(|error| format!("seek to resume offset: {error}"))?;
+    let mut buffer = vec![0u8; TRANSFER_V1_CHUNK_SIZE as usize];
+    while sent < size {
+        let read = tokio::io::AsyncReadExt::read(&mut file, &mut buffer)
+            .await
+            .map_err(|error| format!("read source: {error}"))?;
+        if read == 0 {
+            return Err("source changed while it was being copied".to_string());
+        }
+        write_cli_bincode_frame(
+            &mut stream,
+            &TransferV1Chunk {
+                index: sent / u64::from(TRANSFER_V1_CHUNK_SIZE),
+                offset: sent,
+                len: read as u32,
+                digest: transfer_digest(&buffer[..read]),
+            },
+        )
+        .await?;
+        stream
+            .write_all(&buffer[..read])
+            .await
+            .map_err(|error| format!("write transfer v1 chunk: {error}"))?;
+        stream
+            .flush()
+            .await
+            .map_err(|error| format!("flush transfer v1 chunk: {error}"))?;
+        let ack: TransferV1Ack = read_cli_bincode_frame(&mut stream, 1024 * 1024).await?;
+        if let Some(error) = ack.error {
+            return Err(format!("remote transfer chunk rejected: {error}"));
+        }
+        let expected = sent + read as u64;
+        if ack.next_offset != expected {
+            return Err(format!(
+                "remote acknowledged offset {}, expected {expected}",
+                ack.next_offset
+            ));
+        }
+        sent = ack.next_offset;
+    }
+
+    finish_copy_v1(&mut stream, peer_id, &remote_path, size, digest).await
+}
+
+async fn finish_copy_v1(
+    stream: &mut misaka_network::NetworkStream,
+    peer_id: u64,
+    remote_path: &Path,
+    size: u64,
+    digest: [u8; 32],
+) -> Result<(), String> {
+    let result: TransferResult = read_cli_bincode_frame(stream, 1024 * 1024).await?;
+    if !result.success || result.bytes_written != size || result.digest != digest {
+        return Err(result
+            .error
+            .unwrap_or_else(|| "resumable transfer integrity check failed".to_string()));
+    }
+    println!(
+        "Resumed copy of {} bytes to Sister #{peer_id}:{}",
         size,
         remote_path.display()
     );
@@ -1028,6 +1166,41 @@ fn mark_ready(path: Option<&Path>) -> Result<(), String> {
             .map_err(|error| format!("write stream ready marker {}: {error}", path.display()))?;
     }
     Ok(())
+}
+
+async fn read_cli_bincode_frame<T: DeserializeOwned>(
+    stream: &mut misaka_network::NetworkStream,
+    max_len: usize,
+) -> Result<T, String> {
+    let mut length = [0u8; 4];
+    tokio::io::AsyncReadExt::read_exact(stream, &mut length)
+        .await
+        .map_err(|error| format!("read transfer frame length: {error}"))?;
+    let length = u32::from_be_bytes(length) as usize;
+    if length > max_len {
+        return Err("transfer frame exceeds limit".to_string());
+    }
+    let mut bytes = vec![0u8; length];
+    tokio::io::AsyncReadExt::read_exact(stream, &mut bytes)
+        .await
+        .map_err(|error| format!("read transfer frame: {error}"))?;
+    bincode::deserialize(&bytes).map_err(|error| format!("decode transfer frame: {error}"))
+}
+
+async fn write_cli_bincode_frame<T: Serialize>(
+    stream: &mut misaka_network::NetworkStream,
+    value: &T,
+) -> Result<(), String> {
+    let bytes =
+        bincode::serialize(value).map_err(|error| format!("encode transfer frame: {error}"))?;
+    stream
+        .write_all(&(bytes.len() as u32).to_be_bytes())
+        .await
+        .map_err(|error| format!("write transfer frame length: {error}"))?;
+    stream
+        .write_all(&bytes)
+        .await
+        .map_err(|error| format!("write transfer frame: {error}"))
 }
 
 async fn exchange(

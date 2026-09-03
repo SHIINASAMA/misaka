@@ -8,11 +8,13 @@ use crate::config::{RuntimeConfig, StreamBackend};
 use crate::node::SisterNode;
 use crate::shutdown::Shutdown;
 use misaka_core::protocol::{
-    finalize_transfer_digest, update_transfer_digest, TransferRequest, TransferResult,
-    TunnelRequest, TRANSFER_MAGIC, TUNNEL_MAGIC,
+    finalize_transfer_digest, transfer_digest, update_transfer_digest, TransferRequest,
+    TransferResult, TransferV1Ack, TransferV1Chunk, TransferV1Request, TransferV1Resume,
+    TunnelRequest, TRANSFER_MAGIC, TRANSFER_V1_CHUNK_SIZE, TRANSFER_V1_MAGIC, TUNNEL_MAGIC,
 };
 use misaka_core::SisterIdentity;
 use misaka_network::{NetworkBackend, NetworkEndpoint};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -455,6 +457,9 @@ async fn echo_stream(mut stream: misaka_network::NetworkStream) -> std::io::Resu
     if preamble == *TRANSFER_MAGIC {
         return receive_transfer(stream).await;
     }
+    if preamble == *TRANSFER_V1_MAGIC {
+        return receive_transfer_v1(stream).await;
+    }
     if preamble == *TUNNEL_MAGIC {
         return receive_tunnel(stream).await;
     }
@@ -531,6 +536,248 @@ async fn receive_transfer(mut stream: misaka_network::NetworkStream) -> std::io:
     stream.flush().await
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TransferV1State {
+    size: u64,
+    digest: [u8; 32],
+    chunk_size: u32,
+    offset: u64,
+}
+
+async fn receive_transfer_v1(mut stream: misaka_network::NetworkStream) -> std::io::Result<()> {
+    let request: TransferV1Request = read_bincode_frame(&mut stream, 1024 * 1024).await?;
+    if request.chunk_size != TRANSFER_V1_CHUNK_SIZE {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "unsupported transfer v1 chunk size",
+        ));
+    }
+
+    let destination = std::path::PathBuf::from(&request.destination);
+    let part_path = std::path::PathBuf::from(format!("{}.misaka-part", destination.display()));
+    let state_path =
+        std::path::PathBuf::from(format!("{}.misaka-part.json", destination.display()));
+    if let Some(parent) = part_path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+
+    let mut state = load_transfer_v1_state(&state_path).await?;
+    let part_exists = tokio::fs::try_exists(&part_path).await?;
+    if !state.as_ref().is_some_and(|state| {
+        state.size == request.size
+            && state.digest == request.digest
+            && state.chunk_size == request.chunk_size
+    }) || !part_exists
+    {
+        state = None;
+        let _ = tokio::fs::remove_file(&part_path).await;
+        let _ = tokio::fs::remove_file(&state_path).await;
+    }
+
+    let mut state = state.unwrap_or(TransferV1State {
+        size: request.size,
+        digest: request.digest,
+        chunk_size: request.chunk_size,
+        offset: 0,
+    });
+    if state.offset > request.size
+        || tokio::fs::metadata(&part_path)
+            .await
+            .map(|metadata| metadata.len() != state.offset)
+            .unwrap_or(true)
+    {
+        state.offset = 0;
+        let _ = tokio::fs::remove_file(&part_path).await;
+    }
+    if !tokio::fs::try_exists(&part_path).await? {
+        tokio::fs::File::create(&part_path).await?;
+    }
+
+    let complete =
+        state.offset == request.size && hash_file_path(&part_path).await? == request.digest;
+    if complete {
+        finalize_transfer_part(&part_path, &destination).await?;
+        let _ = tokio::fs::remove_file(&state_path).await;
+    } else if state.offset == request.size {
+        state.offset = 0;
+        tokio::fs::File::create(&part_path).await?;
+        save_transfer_v1_state(&state_path, &state).await?;
+    }
+
+    write_bincode_frame(
+        &mut stream,
+        &TransferV1Resume {
+            offset: state.offset,
+            complete,
+            error: None,
+        },
+    )
+    .await?;
+    if complete {
+        return write_transfer_result(
+            &mut stream,
+            TransferResult {
+                success: true,
+                bytes_written: request.size,
+                digest: request.digest,
+                error: None,
+            },
+        )
+        .await;
+    }
+
+    loop {
+        let chunk: TransferV1Chunk = read_bincode_frame(&mut stream, 64 * 1024).await?;
+        let expected_index = state.offset / u64::from(request.chunk_size);
+        if chunk.index != expected_index
+            || chunk.offset != state.offset
+            || chunk.len == 0
+            || chunk.len > request.chunk_size
+            || state.offset + u64::from(chunk.len) > request.size
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid transfer v1 chunk boundary",
+            ));
+        }
+        let mut payload = vec![0u8; chunk.len as usize];
+        stream.read_exact(&mut payload).await?;
+        if transfer_digest(&payload) != chunk.digest {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "transfer v1 chunk digest mismatch",
+            ));
+        }
+
+        let mut part = tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(&part_path)
+            .await?;
+        part.write_all(&payload).await?;
+        part.flush().await?;
+        state.offset += u64::from(chunk.len);
+        save_transfer_v1_state(&state_path, &state).await?;
+
+        let complete = state.offset == request.size;
+        write_bincode_frame(
+            &mut stream,
+            &TransferV1Ack {
+                next_offset: state.offset,
+                complete,
+                error: None,
+            },
+        )
+        .await?;
+        if complete {
+            let digest = hash_file_path(&part_path).await?;
+            let success = digest == request.digest;
+            let result = TransferResult {
+                success,
+                bytes_written: state.offset,
+                digest,
+                error: (!success).then(|| "SHA-256 digest mismatch".to_string()),
+            };
+            if success {
+                finalize_transfer_part(&part_path, &destination).await?;
+                let _ = tokio::fs::remove_file(&state_path).await;
+            }
+            return write_transfer_result(&mut stream, result).await;
+        }
+    }
+}
+
+async fn load_transfer_v1_state(
+    path: &std::path::Path,
+) -> std::io::Result<Option<TransferV1State>> {
+    if !tokio::fs::try_exists(path).await? {
+        return Ok(None);
+    }
+    let bytes = tokio::fs::read(path).await?;
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
+async fn save_transfer_v1_state(
+    path: &std::path::Path,
+    state: &TransferV1State,
+) -> std::io::Result<()> {
+    let bytes = serde_json::to_vec(state)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    tokio::fs::write(path, bytes).await
+}
+
+async fn hash_file_path(path: &std::path::Path) -> std::io::Result<[u8; 32]> {
+    let mut file = tokio::fs::File::open(path).await?;
+    let mut state = [
+        0xcbf29ce484222325,
+        0x84222325cbf29ce4,
+        0x9e3779b185ebca87,
+        0xd6e8feb86659fd93,
+    ];
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        update_transfer_digest(&mut state, &buffer[..read]);
+    }
+    Ok(finalize_transfer_digest(state))
+}
+
+async fn finalize_transfer_part(
+    part_path: &std::path::Path,
+    destination: &std::path::Path,
+) -> std::io::Result<()> {
+    match tokio::fs::rename(part_path, destination).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            tokio::fs::remove_file(destination).await?;
+            tokio::fs::rename(part_path, destination).await
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn read_bincode_frame<T: DeserializeOwned>(
+    stream: &mut misaka_network::NetworkStream,
+    max_len: usize,
+) -> std::io::Result<T> {
+    let mut length = [0u8; 4];
+    stream.read_exact(&mut length).await?;
+    let length = u32::from_be_bytes(length) as usize;
+    if length > max_len {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "transfer frame exceeds limit",
+        ));
+    }
+    let mut bytes = vec![0u8; length];
+    stream.read_exact(&mut bytes).await?;
+    bincode::deserialize(&bytes)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
+async fn write_bincode_frame<T: Serialize>(
+    stream: &mut misaka_network::NetworkStream,
+    value: &T,
+) -> std::io::Result<()> {
+    let bytes = bincode::serialize(value)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    stream
+        .write_all(&(bytes.len() as u32).to_be_bytes())
+        .await?;
+    stream.write_all(&bytes).await
+}
+
+async fn write_transfer_result(
+    stream: &mut misaka_network::NetworkStream,
+    result: TransferResult,
+) -> std::io::Result<()> {
+    write_bincode_frame(stream, &result).await
+}
+
 async fn receive_tunnel(mut stream: misaka_network::NetworkStream) -> std::io::Result<()> {
     let mut length = [0u8; 4];
     stream.read_exact(&mut length).await?;
@@ -580,6 +827,10 @@ mod tests {
     use super::SisterRuntime;
     use crate::config::{DiscoveryMode, RuntimeConfig, StreamBackend, StreamSecurity};
     use crate::runtime::default_encryption_key;
+    use misaka_core::protocol::{
+        transfer_digest, TransferResult, TransferV1Ack, TransferV1Chunk, TransferV1Request,
+        TransferV1Resume, TRANSFER_V1_CHUNK_SIZE,
+    };
     use misaka_core::SisterIdentity;
     use misaka_network::NetworkBackend;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -756,6 +1007,107 @@ mod tests {
         shutdown.cancel();
         task.await.unwrap().unwrap();
         client_backend.close().await;
+    }
+
+    #[tokio::test]
+    async fn transfer_v1_resumes_from_the_last_committed_chunk() {
+        let directory =
+            std::env::temp_dir().join(format!("misaka-transfer-v1-{}", uuid::Uuid::new_v4()));
+        let destination = directory.join("nested/result.bin");
+        let mut payload = vec![0u8; TRANSFER_V1_CHUNK_SIZE as usize + 1234];
+        for (index, byte) in payload.iter_mut().enumerate() {
+            *byte = (index % 251) as u8;
+        }
+        let request = TransferV1Request {
+            destination: destination.display().to_string(),
+            size: payload.len() as u64,
+            digest: transfer_digest(&payload),
+            chunk_size: TRANSFER_V1_CHUNK_SIZE,
+        };
+
+        let (server_io, mut client_io) = tokio::io::duplex(1024 * 1024);
+        let server_task = tokio::spawn(super::receive_transfer_v1(
+            misaka_network::NetworkStream::from_stream(server_io),
+        ));
+        // `receive_transfer_v1` is invoked after `echo_stream` has consumed the
+        // transfer preamble, so the direct handler test starts at the request.
+        write_test_frame(&mut client_io, &request).await;
+        let resume: TransferV1Resume = read_test_frame(&mut client_io).await;
+        assert_eq!(resume.offset, 0);
+        let first_len = TRANSFER_V1_CHUNK_SIZE as usize;
+        write_test_frame(
+            &mut client_io,
+            &TransferV1Chunk {
+                index: 0,
+                offset: 0,
+                len: first_len as u32,
+                digest: transfer_digest(&payload[..first_len]),
+            },
+        )
+        .await;
+        client_io.write_all(&payload[..first_len]).await.unwrap();
+        client_io.flush().await.unwrap();
+        let ack: TransferV1Ack = read_test_frame(&mut client_io).await;
+        assert_eq!(ack.next_offset, first_len as u64);
+        drop(client_io);
+        assert!(server_task.await.unwrap().is_err());
+
+        let (server_io, mut client_io) = tokio::io::duplex(1024 * 1024);
+        let server_task = tokio::spawn(super::receive_transfer_v1(
+            misaka_network::NetworkStream::from_stream(server_io),
+        ));
+        write_test_frame(&mut client_io, &request).await;
+        let resume: TransferV1Resume = read_test_frame(&mut client_io).await;
+        assert_eq!(resume.offset, first_len as u64);
+        assert!(!resume.complete);
+        let second_len = payload.len() - first_len;
+        write_test_frame(
+            &mut client_io,
+            &TransferV1Chunk {
+                index: 1,
+                offset: first_len as u64,
+                len: second_len as u32,
+                digest: transfer_digest(&payload[first_len..]),
+            },
+        )
+        .await;
+        client_io.write_all(&payload[first_len..]).await.unwrap();
+        client_io.flush().await.unwrap();
+        let ack: TransferV1Ack = read_test_frame(&mut client_io).await;
+        assert_eq!(ack.next_offset, payload.len() as u64);
+        assert!(ack.complete);
+        let result: TransferResult = read_test_frame(&mut client_io).await;
+        assert!(result.success);
+        assert_eq!(result.bytes_written, payload.len() as u64);
+        drop(client_io);
+        server_task.await.unwrap().unwrap();
+        assert_eq!(tokio::fs::read(&destination).await.unwrap(), payload);
+        assert!(
+            !std::path::PathBuf::from(format!("{}.misaka-part", destination.display())).exists()
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    async fn write_test_frame<T: serde::Serialize>(
+        stream: &mut (impl tokio::io::AsyncWrite + Unpin),
+        value: &T,
+    ) {
+        let bytes = bincode::serialize(value).unwrap();
+        stream
+            .write_all(&(bytes.len() as u32).to_be_bytes())
+            .await
+            .unwrap();
+        stream.write_all(&bytes).await.unwrap();
+    }
+
+    async fn read_test_frame<T: serde::de::DeserializeOwned>(
+        stream: &mut (impl tokio::io::AsyncRead + Unpin),
+    ) -> T {
+        let mut length = [0u8; 4];
+        stream.read_exact(&mut length).await.unwrap();
+        let mut bytes = vec![0u8; u32::from_be_bytes(length) as usize];
+        stream.read_exact(&mut bytes).await.unwrap();
+        bincode::deserialize(&bytes).unwrap()
     }
 
     #[tokio::test]

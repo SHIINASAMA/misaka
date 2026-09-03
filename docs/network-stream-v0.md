@@ -93,6 +93,13 @@ complete payload. N05 and N06 use `stream-test --ready-file` and bounded
 condition polling, so process teardown begins only after the handshake and
 initial echo have completed.
 
+Transfer v1 is layered above the selected `NetworkStream`: `MTR1` uses fixed
+64 KiB chunks, per-chunk integrity digests, explicit offset acknowledgements,
+and destination-side `.misaka-part` plus JSON resume state. The CLI opt-in is
+`misaka cp --resume`; Transfer v0 remains unchanged. A deterministic runtime
+test covers disconnect, resume, and finalization, and the protocol works over
+Direct TCP or opt-in Iroh.
+
 ## Security and non-goals
 
 The default raw Network Stream v0 path is **not secure**. It remains for
@@ -102,7 +109,7 @@ certificate pinning, and server-name identity validation; it is the LAN-style
 foundation for later transfer and tunnel work, not yet a general Internet
 transport.
 
-Multiplexing, resume, compression, NAT traversal, QUIC, and active relay path
-selection remain outside this checkpoint. The later Transfer, Tunnel, SSH,
-Relay, and Resolver snapshots are documented separately and are not part of
-the raw insecure v0 contract.
+Multiplexing, compression, NAT traversal, and active relay path selection
+remain outside the raw insecure v0 contract. Transfer v1 does not yet include
+parallel chunks, content addressing, or cross-domain measurements. The later
+Tunnel, SSH, Relay, and Resolver snapshots are documented separately.
