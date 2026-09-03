@@ -35,9 +35,9 @@ lifecycle and rotation requirements.
   `misaka start --stream-backend iroh` loads or creates the key in the active
   `MISAKA_CONFIG_DIR` and binds with that key. Tests use two loopback-bound
   endpoints with explicit direct addresses.
-- `IrohSisterConnector` can resolve an explicitly advertised Iroh endpoint by
-  Sister ID. The general resolver remains TCP-only; automatic mixed-backend
-  ranking and relay policy are still deliberately out of scope.
+- `SisterConnector` can resolve an explicitly advertised Iroh endpoint by
+  Sister ID when an `IrohBackend` is injected. Mixed TCP/Iroh candidates are
+  raced with Iroh ranked after direct TCP; relay policy remains out of scope.
 - Iroh is wired into the opt-in `SisterRuntime` listener, but not into
   Testament network scenarios or cross-domain measurement yet.
 - CLI `cp`, `tunnel`, and the SSH wrapper select Iroh endpoints through the

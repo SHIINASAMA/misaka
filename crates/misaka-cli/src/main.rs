@@ -542,9 +542,10 @@ async fn network_ps(
                 .first()
                 .and_then(|endpoint| endpoint.parse::<NetworkEndpoint>().ok())
                 .map(|endpoint| {
-                    match misaka_network::resolver::EndpointCandidate::tcp(endpoint).kind {
+                    match misaka_network::resolver::EndpointCandidate::for_endpoint(endpoint).kind {
                         misaka_network::resolver::PathKind::Lan => "lan".to_string(),
                         misaka_network::resolver::PathKind::Direct => "direct".to_string(),
+                        misaka_network::resolver::PathKind::Iroh => "iroh".to_string(),
                         misaka_network::resolver::PathKind::Relay => "relay".to_string(),
                     }
                 }),

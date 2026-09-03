@@ -14,6 +14,7 @@ use std::net::IpAddr;
 pub enum PathKind {
     Lan,
     Direct,
+    Iroh,
     Relay,
 }
 
@@ -25,6 +26,17 @@ pub struct EndpointCandidate {
 }
 
 impl EndpointCandidate {
+    pub fn for_endpoint(endpoint: NetworkEndpoint) -> Self {
+        match endpoint {
+            NetworkEndpoint::Tcp(_) => Self::tcp(endpoint),
+            NetworkEndpoint::Iroh(endpoint) => Self {
+                endpoint: NetworkEndpoint::Iroh(endpoint),
+                kind: PathKind::Iroh,
+                priority: 25,
+            },
+        }
+    }
+
     pub fn tcp(endpoint: NetworkEndpoint) -> Self {
         let NetworkEndpoint::Tcp(address) = endpoint.clone() else {
             panic!("EndpointCandidate::tcp requires a TCP endpoint");
@@ -37,6 +49,7 @@ impl EndpointCandidate {
         let priority = match kind {
             PathKind::Lan => 10,
             PathKind::Direct => 20,
+            PathKind::Iroh => 25,
             PathKind::Relay => 30,
         };
         Self {
@@ -111,6 +124,25 @@ mod tests {
             ranked[0].endpoint,
             NetworkEndpoint::Tcp("192.168.1.20:31701".parse::<SocketAddr>().unwrap())
         );
+    }
+
+    #[test]
+    fn iroh_candidates_rank_after_direct_tcp_before_relay() {
+        let iroh = EndpointCandidate::for_endpoint(NetworkEndpoint::Iroh(iroh::EndpointAddr::new(
+            iroh::SecretKey::generate().public(),
+        )));
+        let relay = EndpointCandidate {
+            endpoint: NetworkEndpoint::Tcp("127.0.0.1:31701".parse().unwrap()),
+            kind: PathKind::Relay,
+            priority: 30,
+        };
+        let direct = EndpointCandidate::tcp(NetworkEndpoint::Tcp(
+            "198.51.100.20:31701".parse::<SocketAddr>().unwrap(),
+        ));
+        let ranked = rank_candidates(vec![relay, iroh, direct]);
+        assert_eq!(ranked[0].kind, PathKind::Direct);
+        assert_eq!(ranked[1].kind, PathKind::Iroh);
+        assert_eq!(ranked[2].kind, PathKind::Relay);
     }
 
     #[tokio::test]

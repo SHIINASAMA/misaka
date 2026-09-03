@@ -590,3 +590,16 @@ QUIC bidirectional stream, without changing the runtime's Direct TCP default.
   variant instead of hard-coding Direct TCP.
 - [x] Keep TLS certificate handling explicit and reject incompatible mixed
   security configuration.
+
+### Task 35: Add explicit TCP/Iroh candidate resolution
+
+**Files:**
+- Modify: `crates/misaka-network/src/resolver.rs`
+- Modify: `crates/misaka-runtime/src/connection.rs`
+- Modify: `docs/network-resolver-v0.md`
+- Modify: `docs/iroh-backend-spike-v0.md`
+
+- [x] Add Iroh as a ranked candidate kind after direct TCP and before relay.
+- [x] Let `SisterConnector` race TCP and explicitly injected Iroh candidates.
+- [x] Preserve Direct TCP-only behavior when no Iroh backend is configured.
+- [x] Keep relay and other backend implementations out of this checkpoint.

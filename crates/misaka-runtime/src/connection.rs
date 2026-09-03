@@ -1,5 +1,6 @@
+use futures_util::{stream::FuturesUnordered, StreamExt};
 use misaka_core::SisterId;
-use misaka_network::resolver::{race_connect, rank_candidates, EndpointCandidate};
+use misaka_network::resolver::{rank_candidates, EndpointCandidate};
 use misaka_network::tls::{TlsClient, TlsIdentity};
 use misaka_network::{
     DirectTcpBackend, IrohBackend, NetworkBackend, NetworkEndpoint, NetworkError, NetworkStream,
@@ -39,6 +40,7 @@ pub enum ConnectionError {
 pub struct SisterConnector {
     peers: PeerService,
     backend: DirectTcpBackend,
+    iroh_backend: Option<IrohBackend>,
 }
 
 impl SisterConnector {
@@ -46,7 +48,13 @@ impl SisterConnector {
         Self {
             peers,
             backend: DirectTcpBackend,
+            iroh_backend: None,
         }
+    }
+
+    pub fn with_iroh_backend(mut self, backend: IrohBackend) -> Self {
+        self.iroh_backend = Some(backend);
+        self
     }
 
     pub async fn connect_to_sister(
@@ -76,18 +84,40 @@ impl SisterConnector {
                     continue;
                 }
             };
-            candidates.push(EndpointCandidate::tcp(endpoint));
+            candidates.push(EndpointCandidate::for_endpoint(endpoint));
         }
         if candidates.is_empty() {
             return Err(invalid_error.unwrap_or(ConnectionError::NoStreamEndpoint(sister)));
         }
-        match race_connect(&self.backend, rank_candidates(candidates)).await {
-            Ok((stream, _candidate)) => Ok(stream),
-            Err(error) => Err(ConnectionError::Connect {
-                sister,
-                source: error,
-            }),
+        let mut attempts = FuturesUnordered::new();
+        for candidate in rank_candidates(candidates) {
+            let direct = self.backend;
+            let iroh = self.iroh_backend.clone();
+            attempts.push(async move {
+                let result = match candidate.endpoint.clone() {
+                    NetworkEndpoint::Tcp(_) => direct.connect(candidate.endpoint.clone()).await,
+                    NetworkEndpoint::Iroh(endpoint) => match iroh {
+                        Some(backend) => backend.connect(NetworkEndpoint::Iroh(endpoint)).await,
+                        None => Err(NetworkError::UnsupportedEndpoint(
+                            "Iroh candidate requires an explicitly configured Iroh backend"
+                                .to_string(),
+                        )),
+                    },
+                };
+                (candidate, result)
+            });
         }
+        let mut last_error = None;
+        while let Some((_, result)) = attempts.next().await {
+            match result {
+                Ok(stream) => return Ok(stream),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(ConnectionError::Connect {
+            sister,
+            source: last_error.expect("non-empty candidates produce an attempt"),
+        })
     }
 }
 
@@ -246,6 +276,10 @@ impl ConnectionManager {
             connector,
             states: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    pub fn new_with_iroh_backend(peers: PeerService, backend: IrohBackend) -> Self {
+        Self::new(SisterConnector::new(peers).with_iroh_backend(backend))
     }
 
     pub async fn state(&self, sister: &SisterId) -> ConnectionState {
@@ -464,7 +498,8 @@ mod tests {
             crate::peer_registry::PeerRegistry::new_seeded(vec![peer]),
             std::path::PathBuf::from("."),
         );
-        let connector = super::IrohSisterConnector::new(service, client_backend.clone());
+        let connector =
+            super::SisterConnector::new(service).with_iroh_backend(client_backend.clone());
         let mut stream = connector.connect_to_sister(SisterId(42)).await.unwrap();
 
         let mut response = [0u8; 8];
