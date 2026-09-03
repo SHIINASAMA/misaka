@@ -52,6 +52,8 @@
 - [x] Keep partial/bitmap state cleanup after successful object commit and leave the old fallback behavior available to direct unit callers.
 - [x] Run the focused integration test; the full runtime suite will run in Task 62.
 - [x] Commit `feat(transfer): finalize through content store`.
+- [x] Extend prepare/finalize to skip network transfer when the verified
+  digest-named object already exists.
 
 ### Task 61: Verify deduplication through external Iroh processes
 

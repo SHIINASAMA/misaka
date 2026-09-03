@@ -16,6 +16,14 @@ impl ContentStore {
         self.root.join(hex_digest(digest))
     }
 
+    pub async fn contains(&self, digest: [u8; 32]) -> std::io::Result<bool> {
+        let object = self.object_path(digest);
+        if !tokio::fs::try_exists(&object).await? {
+            return Ok(false);
+        }
+        Ok(hash_file(&object).await? == digest)
+    }
+
     /// Verify a partial file, then make it available under its digest path.
     /// The source is removed only after the canonical object is safe.
     pub async fn commit_verified_file(

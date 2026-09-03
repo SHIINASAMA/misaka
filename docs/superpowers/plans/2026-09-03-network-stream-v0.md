@@ -975,5 +975,7 @@ QUIC bidirectional stream, without changing the runtime's Direct TCP default.
   retaining a destination-local fallback for direct unit callers.
 - [x] Commit verified v2 partial content before materializing the requested
   destination and remove bitmap state only after successful materialization.
+- [x] Skip duplicate v2 payloads when the verified digest-named object already
+  exists, returning a complete prepare bitmap and materializing on finalize.
 - [x] Verify the same digest can finalize to two destinations while reusing one
   canonical object.
