@@ -270,8 +270,8 @@ It keeps identity and connectivity separate and supports TCP only.
 
 This phase adds the smallest useful addressing layer on top of Endpoint Model
 v0. It stores stream endpoint candidates separately from the legacy control
-address and provides `SisterId`-based resolution. mDNS advertisement changes,
-reconnect policy, authentication, and session ownership remain separate
+address and provides `SisterId`-based resolution. mDNS metadata is included,
+but reconnect policy, authentication, and session ownership remain separate
 follow-up phases.
 
 ### Task 16: Persist stream endpoint candidates
@@ -310,6 +310,6 @@ follow-up phases.
 - Modify: `'/Users/kaoru/Documents/Obsidian Vault/Misaka Network — Network Stream v0.md'`
 
 - [x] Document control endpoint versus stream endpoint candidates and the
-  current absence of mDNS stream advertisement.
+  metadata-only mDNS stream advertisement boundary.
 - [x] Run the complete Rust and Testament verification gates.
-- [x] Record the addressing result and the next mDNS/connection-lifecycle phase.
+- [x] Record the addressing result and the next ConnectionManager lifecycle phase.

@@ -116,9 +116,11 @@ impl SisterNode {
 
     /// Current stream endpoint candidate, kept separate from the control address.
     pub fn stream_addr(&self) -> Option<SocketAddr> {
-        self.config
+        let candidate = self
+            .config
             .stream_port
-            .map(|port| SocketAddr::new(self.listen_addr.ip(), port))
+            .map(|port| SocketAddr::new(self.listen_addr.ip(), port));
+        candidate.filter(|addr| addr.ip().is_loopback())
     }
 
     pub fn stream_endpoint(&self) -> Option<String> {
@@ -436,6 +438,7 @@ impl SisterNode {
                 &self.identity.hostname,
                 &self.identity.platform,
                 self.listen_addr,
+                self.stream_addr().map(|addr| addr.port()),
                 tx,
             ) {
                 Ok(s) => s,
@@ -466,7 +469,9 @@ impl SisterNode {
             };
             let Some(instance) = instance else { break };
             // 忽略自己 (instance 名等于本机 nickname; 同时 id 相同则跳过)
-            if let Some((peer_id, _nick, addr)) = crate::discovery::instance_to_peer(&instance) {
+            if let Some(peer) = crate::discovery::instance_to_peer(&instance) {
+                let peer_id = peer.id;
+                let addr = peer.control_addr;
                 if peer_id == self.identity.id.as_u64() {
                     continue;
                 }
@@ -509,7 +514,11 @@ impl SisterNode {
                             hostname: host,
                             platform,
                             version: String::new(),
-                            stream_endpoints: vec![],
+                            stream_endpoints: peer
+                                .stream_endpoint
+                                .into_iter()
+                                .map(|endpoint| endpoint.to_string())
+                                .collect(),
                             addr: addr.to_string(),
                             cpu_usage: 0.0,
                             memory_total: 0,

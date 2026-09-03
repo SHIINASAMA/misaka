@@ -42,9 +42,11 @@ until their respective backend designs exist.
 
 The initial addressing layer stores stream candidates separately from the
 control-plane address and exposes `SisterConnector::connect_to_sister(SisterId)`
-in `misaka-runtime`. It tries stored TCP candidates in order. mDNS stream
-advertisement, reconnection policy, session ownership, and authentication are
-not part of this layer; the current insecure stream remains loopback-only.
+in `misaka-runtime`. It tries stored TCP candidates in order. mDNS now carries
+the stream port as metadata and feeds the same peer state, but does not open a
+stream itself; non-loopback stream candidates are withheld while the stream is
+insecure and loopback-only. Reconnection policy, session ownership, and
+authentication are not part of this layer.
 
 The handshake contains only the `MISAKA_STREAM` magic and protocol version 1.
 It carries no Sister identity, credentials, permissions, service metadata, or
