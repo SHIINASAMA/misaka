@@ -652,3 +652,16 @@ QUIC bidirectional stream, without changing the runtime's Direct TCP default.
 - [x] Add `misaka cp --resume` while keeping the Transfer v0 command unchanged.
 - [x] Verify disconnect/resume/finalization with a deterministic runtime test and
   keep Transfer v1 transport-neutral so it works over Direct TCP or opt-in Iroh.
+
+### Task 39: Add Testament black-box coverage for Transfer v1
+
+**Files:**
+- Modify: `crates/testament/src/scenario.rs`
+- Modify: `crates/testament/src/main.rs`
+- Modify: `docs/testing.md`
+- Modify: `docs/network-stream-v0.md`
+
+- [x] Add `N10_transfer_v1_resume` to the focused network suite.
+- [x] Launch the public `misaka cp --resume` CLI against isolated real Sister
+  processes and assert exact destination bytes.
+- [x] Assert completed transfers do not leave partial or resume metadata.

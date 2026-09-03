@@ -647,6 +647,10 @@ pub fn network_scenarios() -> Vec<ScenarioDef> {
             name: "N09_tunnel_v0",
             run: Box::new(n09_tunnel_v0),
         },
+        ScenarioDef {
+            name: "N10_transfer_v1_resume",
+            run: Box::new(n10_transfer_v1_resume),
+        },
     ]
 }
 
@@ -1380,6 +1384,44 @@ fn n08_transfer_v0(ctx: &mut Context) -> Result<(), ScenarioError> {
     let received = std::fs::read(&destination)
         .map_err(|error| ScenarioError::assertion(format!("read received file: {error}")))?;
     assert::assert_eq(received, payload, "transferred bytes")?;
+    Ok(())
+}
+
+/// N10: exercise the external `cp --resume` client against a real Sister.
+/// The runtime unit test covers an interrupted first attempt; this scenario
+/// proves that the public CLI speaks the same resumable protocol end to end.
+fn n10_transfer_v1_resume(ctx: &mut Context) -> Result<(), ScenarioError> {
+    start_stream_pair(ctx)?;
+    let a_introspect = introspect_addr_of(ctx, "a")?;
+    let b_id = ctx.introspect("b")?.identity.id.as_u64();
+    assert::eventually(
+        a_introspect,
+        "a learns b resumable transfer candidate",
+        Duration::from_secs(8),
+        |s| s.peers.iter().any(|peer| peer.id == b_id),
+    )?;
+
+    let source = ctx.layout.root.join("transfer-v1-source.bin");
+    let destination = ctx.layout.root.join("transfer-v1-destination.bin");
+    let payload = (0..(64 * 1024 + 1234))
+        .map(|index| (index % 251) as u8)
+        .collect::<Vec<_>>();
+    std::fs::write(&source, &payload)
+        .map_err(|error| ScenarioError::infra(format!("write transfer v1 source: {error}")))?;
+    let source_arg = source.to_string_lossy().to_string();
+    let destination_arg = format!("#{b_id}:{}", destination.display());
+    let output = ctx.run_cli("a", &["cp", "--resume", &source_arg, &destination_arg])?;
+    assert::assert_contains(&output, "Resumed copy", "transfer v1 completion output")?;
+    let received = std::fs::read(&destination)
+        .map_err(|error| ScenarioError::assertion(format!("read v1 received file: {error}")))?;
+    assert::assert_eq(received, payload, "resumable transferred bytes")?;
+    if PathBuf::from(format!("{}.misaka-part", destination.display())).exists()
+        || PathBuf::from(format!("{}.misaka-part.json", destination.display())).exists()
+    {
+        return Err(ScenarioError::assertion(
+            "transfer v1 left durable partial state after completion",
+        ));
+    }
     Ok(())
 }
 

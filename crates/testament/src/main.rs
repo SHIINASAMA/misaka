@@ -83,7 +83,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Run the Network Stream, Transfer, and Tunnel v0 black-box scenarios (N01-N09).
+    /// Run the Network Stream, Transfer, and Tunnel black-box scenarios (N01-N10).
     #[command(name = "network-verify")]
     NetworkVerify {
         #[arg(long)]
