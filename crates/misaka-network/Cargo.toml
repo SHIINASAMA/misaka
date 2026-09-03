@@ -9,6 +9,7 @@ serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+futures-util.workspace = true
 rustls.workspace = true
 tokio-rustls.workspace = true
 

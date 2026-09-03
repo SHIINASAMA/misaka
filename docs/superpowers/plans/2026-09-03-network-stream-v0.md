@@ -518,3 +518,19 @@ metadata followed by fixed-size chunks, and verifies the receiver's result.
 - [x] Do not invent a custom mux protocol.
 - [x] Expose known candidate stream/path kind in `misaka ps` while clearly
   distinguishing candidates from active connections.
+
+## Phase 13: Connection Racing
+
+### Task 31: Race Direct TCP candidates
+
+**Files:**
+- Modify: `crates/misaka-network/Cargo.toml`
+- Modify: `crates/misaka-network/src/resolver.rs`
+- Modify: `crates/misaka-runtime/src/connection.rs`
+- Create: `docs/connection-racing-v0.md`
+
+- [x] Start candidate connection futures concurrently.
+- [x] Return the first successful stream and cancel losers by dropping them.
+- [x] Keep secure certificate-aware fallback behavior explicit.
+- [x] Add a deterministic racing test with one failing and one healthy TCP
+  candidate.

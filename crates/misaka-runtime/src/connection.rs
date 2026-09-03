@@ -1,9 +1,7 @@
 use misaka_core::SisterId;
-use misaka_network::resolver::{rank_candidates, EndpointCandidate};
+use misaka_network::resolver::{race_connect, rank_candidates, EndpointCandidate};
 use misaka_network::tls::{TlsClient, TlsIdentity};
-use misaka_network::{
-    DirectTcpBackend, NetworkBackend, NetworkEndpoint, NetworkError, NetworkStream,
-};
+use misaka_network::{DirectTcpBackend, NetworkEndpoint, NetworkError, NetworkStream};
 use std::collections::HashMap;
 use std::sync::Arc;
 use thiserror::Error;
@@ -62,13 +60,13 @@ impl SisterConnector {
             return Err(ConnectionError::NoStreamEndpoint(sister));
         }
 
-        let mut last_error = None;
+        let mut invalid_error = None;
         let mut candidates = Vec::new();
         for raw_endpoint in peer.stream_endpoints {
             let endpoint = match raw_endpoint.parse::<NetworkEndpoint>() {
                 Ok(endpoint) => endpoint,
                 Err(reason) => {
-                    last_error = Some(ConnectionError::InvalidEndpoint {
+                    invalid_error = Some(ConnectionError::InvalidEndpoint {
                         sister: sister.clone(),
                         endpoint: raw_endpoint,
                         reason,
@@ -78,19 +76,16 @@ impl SisterConnector {
             };
             candidates.push(EndpointCandidate::tcp(endpoint));
         }
-        for candidate in rank_candidates(candidates) {
-            match self.backend.connect(candidate.endpoint).await {
-                Ok(stream) => return Ok(stream),
-                Err(error) => {
-                    last_error = Some(ConnectionError::Connect {
-                        sister: sister.clone(),
-                        source: error,
-                    })
-                }
-            }
+        if candidates.is_empty() {
+            return Err(invalid_error.unwrap_or(ConnectionError::NoStreamEndpoint(sister)));
         }
-
-        Err(last_error.expect("non-empty endpoint candidates produce an error"))
+        match race_connect(&self.backend, rank_candidates(candidates)).await {
+            Ok((stream, _candidate)) => Ok(stream),
+            Err(error) => Err(ConnectionError::Connect {
+                sister,
+                source: error,
+            }),
+        }
     }
 }
 
