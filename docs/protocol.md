@@ -34,7 +34,12 @@ Peer TCP traffic is a sequence of length-prefixed encrypted envelopes:
 
 The length is the encrypted payload length. `misaka-runtime::network` checks it against `MAX_FRAME_LENGTH` (4 MiB) before allocating a receive buffer. Invalid, truncated, or oversized frames fail the connection. AES-GCM authentication failure is fatal to that message.
 
-The current development configuration uses a shared compatibility key. Identity-bound key exchange is intentionally outside this normalization pass and must be designed before production deployment.
+The control-plane development configuration still uses a shared compatibility
+key. Network Stream Security v0 uses TLS 1.3 with mutual certificate
+authentication, pinned peer certificates, and server-name identity checks;
+rustls owns the key exchange and record encryption. The secure wrapper is
+available as a separate stream primitive and is not yet the default runtime
+transport.
 
 ## Message handling
 
@@ -44,7 +49,11 @@ Transport owns connect, framing, encryption, send, and receive. Handler owns mes
 
 ## Discovery
 
-mDNS advertises `_misaka._tcp.local` with the Sister ID, nickname, hostname, platform, and peer listen address. Introspection is never advertised. `manual` discovery uses configured peer addresses and is the deterministic mode for Testament; `off` disables discovery while retaining local execution and direct configured operations.
+mDNS advertises `_misaka._tcp.local` with the Sister ID, nickname, hostname,
+platform, peer listen address, and optional loopback stream-port metadata.
+Introspection is never advertised. `manual` discovery uses configured peer
+addresses and is the deterministic mode for Testament; `off` disables
+discovery while retaining local execution and direct configured operations.
 
 ## Introspection (not peer protocol)
 

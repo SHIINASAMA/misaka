@@ -15,6 +15,8 @@ pub const MAGIC: &[u8; 13] = b"MISAKA_STREAM";
 pub const PROTOCOL_VERSION: u8 = 1;
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
+pub mod tls;
+
 #[derive(Debug, Error)]
 pub enum NetworkError {
     #[error("bind failed: {0}")]
@@ -23,6 +25,8 @@ pub enum NetworkError {
     Connect(#[source] io::Error),
     #[error("handshake failed: {reason}")]
     Handshake { reason: String },
+    #[error("TLS failed: {0}")]
+    Tls(String),
     #[error("unsupported protocol version: expected {expected}, got {actual}")]
     UnsupportedVersion { expected: u8, actual: u8 },
     #[error("I/O failed: {0}")]

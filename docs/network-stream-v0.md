@@ -50,6 +50,13 @@ lifecycle state and fresh-stream reconnect after callers mark a previous
 stream disconnected; it does not transparently recover sessions or retry in
 the background. Authentication remains a separate phase.
 
+Security v0 now provides an independent TLS 1.3/mTLS wrapper in
+`misaka-network::tls`. It uses certificate pinning plus the TLS server-name
+check for peer identity binding and delegates key exchange/record protection
+to rustls. The existing raw Direct TCP stream remains intentionally insecure
+and loopback-only until the LAN integration phase wires this secure transport
+into runtime listener and connector paths.
+
 The handshake contains only the `MISAKA_STREAM` magic and protocol version 1.
 It carries no Sister identity, credentials, permissions, service metadata, or
 capability list.

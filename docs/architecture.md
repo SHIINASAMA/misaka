@@ -121,6 +121,12 @@ encoded with bincode, encrypted with AES-256-GCM, and framed as:
 The maximum frame length is bounded before allocation. Every envelope carries
 a protocol version.
 
+Secure Network Streams use TLS 1.3 with mutual certificate authentication via
+`misaka-network::tls`. A Sister pins the expected peer certificate as a trust
+root and validates the peer's certificate identity name; the TLS library owns
+the key exchange and record encryption. This secure stream primitive is not
+yet wired into the default loopback-only echo listener or LAN advertisement.
+
 ## Network Stream v0 boundary
 
 The optional `misaka-network` crate provides a separate Direct TCP
@@ -130,8 +136,9 @@ Tokio byte IO. `NetworkBackend` is the transport boundary, with
 remain compatibility wrappers. `SisterRuntime` binds its experimental stream
 listener to loopback (`127.0.0.1`) on the independent `--stream-port`, and
 server-side handshakes time out after five seconds. It does not migrate or
-unify the control-plane `PeerTransport`, add stream addresses to peer
-knowledge, or route by SisterId.
+unify the control-plane `PeerTransport`, or route by SisterId. Stream
+addresses are stored separately as connection candidates, and the secure TLS
+wrapper remains opt-in until LAN integration.
 
 Endpoint Model v0 introduces `NetworkEndpoint::Tcp(SocketAddr)` at the
 backend boundary. This endpoint is a connection candidate and is deliberately

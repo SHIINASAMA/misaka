@@ -345,3 +345,43 @@ the previous one disconnected.
   recovery.
 - [x] Run the complete Rust and Testament verification gates.
 - [x] Create a snapshot commit for ConnectionManager v0.
+
+## Phase 5: Security v0
+
+Security v0 uses a standard TLS 1.3 implementation with mutual certificate
+authentication. The stream layer pins the expected peer certificate and
+validates the peer identity name; it does not invent a custom handshake or
+record protocol. Wiring this secure primitive into LAN-capable runtime paths
+and persisting production Sister credentials remain the next integration
+boundary.
+
+### Task 21: Add the secure stream primitive
+
+**Files:**
+- Modify: `Cargo.toml`
+- Modify: `Cargo.lock`
+- Modify: `crates/misaka-network/Cargo.toml`
+- Modify: `crates/misaka-network/src/lib.rs`
+- Create: `crates/misaka-network/src/tls.rs`
+
+- [x] Add TLS 1.3 client/server wrappers using rustls and tokio-rustls.
+- [x] Require a trusted client certificate on the server side.
+- [x] Pin the expected peer certificate and validate the server identity name.
+- [x] Return the established TLS channel through the transport-neutral
+  `NetworkStream` contract.
+- [x] Add successful mTLS, untrusted-client, and wrong-identity tests.
+
+### Task 22: Verify and document Security v0
+
+**Files:**
+- Modify: `docs/architecture.md`
+- Modify: `docs/network-stream-v0.md`
+- Modify: `docs/protocol.md`
+- Modify: `docs/superpowers/plans/2026-09-03-network-stream-v0.md`
+- Modify: `'/Users/kaoru/Documents/Obsidian Vault/Misaka Network — Network Stream v0.md'`
+
+- [x] Document that rustls owns key exchange and record encryption.
+- [x] Document that the existing raw listener remains loopback-only until LAN
+  integration uses the secure wrapper.
+- [x] Run the complete Rust and Testament verification gates.
+- [x] Create a snapshot commit for Security v0.
