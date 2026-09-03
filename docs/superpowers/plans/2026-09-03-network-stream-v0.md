@@ -994,4 +994,4 @@ QUIC bidirectional stream, without changing the runtime's Direct TCP default.
   gates.
 - [x] Synchronize the object-store result and remaining external-network gaps
   to the Obsidian project notes.
-- [ ] Commit the final documentation gate snapshot.
+- [x] Commit the final documentation gate snapshot as `b02bc89`.

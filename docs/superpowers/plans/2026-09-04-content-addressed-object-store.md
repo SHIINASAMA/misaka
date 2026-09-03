@@ -81,4 +81,4 @@
 
 - [x] Run formatting, Clippy, workspace tests, `cargo build -p misaka`, Testament verify, and operator verify.
 - [x] Record the object-store commits, test counts, N20 result, and remaining cross-domain/path-switch gaps in Obsidian.
-- [ ] Commit the final documentation gate snapshot.
+- [x] Commit the final documentation gate snapshot as `b02bc89`.
