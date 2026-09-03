@@ -118,6 +118,10 @@ enum Command {
         /// TLS server name to validate, for example sister-42.
         #[arg(long)]
         server_name: Option<String>,
+
+        /// Emit one machine-readable measurement report as JSON.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Copy one local file to a known Sister over its stream endpoint.
@@ -335,6 +339,7 @@ async fn main() -> Result<(), MisakaError> {
             secure,
             trust_cert,
             server_name,
+            json,
         } => {
             run_stream_test(
                 match (addr, endpoint) {
@@ -353,6 +358,7 @@ async fn main() -> Result<(), MisakaError> {
                 secure,
                 trust_cert.as_deref(),
                 server_name.as_deref(),
+                json,
             )
             .await
             .map_err(MisakaError::Other)?;
@@ -709,6 +715,31 @@ const LARGE_STREAM_SIZE: u64 = 64 * 1024 * 1024;
 const FNV_OFFSET: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;
 
+#[derive(Debug, Clone, Serialize)]
+struct StreamProbeReport {
+    mode: String,
+    backend: String,
+    route: String,
+    rtt_ms: Option<u64>,
+    local_endpoint: Option<String>,
+    remote_endpoint: Option<String>,
+    setup_ms: u128,
+    probe_rtt_ms: Option<u128>,
+    exchanges: Option<u64>,
+    bytes: Option<u64>,
+    elapsed_ms: Option<u128>,
+    throughput_mib_s: Option<f64>,
+}
+
+#[derive(Debug, Default)]
+struct StreamProbeMetrics {
+    probe_rtt_ms: Option<u128>,
+    exchanges: Option<u64>,
+    bytes: Option<u64>,
+    elapsed_ms: Option<u128>,
+    throughput_mib_s: Option<f64>,
+}
+
 async fn run_stream_test(
     endpoint: NetworkEndpoint,
     mode: &str,
@@ -716,6 +747,7 @@ async fn run_stream_test(
     secure: bool,
     trust_cert: Option<&Path>,
     server_name: Option<&str>,
+    json: bool,
 ) -> Result<(), String> {
     let connect_started = tokio::time::Instant::now();
     let mut stream = if secure {
@@ -776,16 +808,18 @@ async fn run_stream_test(
 
     let connect_ms = connect_started.elapsed().as_millis();
     let path = stream.path_info();
-    println!(
-        "Stream path: backend={} route={} rtt_ms={} local={} remote={} setup_ms={connect_ms}",
-        path.backend,
-        path.route,
-        path.rtt_ms
-            .map(|rtt| rtt.to_string())
-            .unwrap_or_else(|| "-".to_string()),
-        path.local_endpoint.as_deref().unwrap_or("-"),
-        path.remote_endpoint.as_deref().unwrap_or("-"),
-    );
+    if !json {
+        println!(
+            "Stream path: backend={} route={} rtt_ms={} local={} remote={} setup_ms={connect_ms}",
+            path.backend,
+            path.route,
+            path.rtt_ms
+                .map(|rtt| rtt.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            path.local_endpoint.as_deref().unwrap_or("-"),
+            path.remote_endpoint.as_deref().unwrap_or("-"),
+        );
+    }
 
     let mut greeting = [0u8; 5];
     read_exact_timeout(&mut stream, &mut greeting).await?;
@@ -793,28 +827,68 @@ async fn run_stream_test(
         return Err(format!("unexpected stream greeting: {greeting:?}"));
     }
 
-    match mode {
-        "connect" => mark_ready(ready_file),
+    let metrics = match mode {
+        "connect" => {
+            mark_ready(ready_file)?;
+            StreamProbeMetrics::default()
+        }
         "bidirectional" => {
             let started = std::time::Instant::now();
             exchange(&mut stream, b"hello").await?;
-            println!(
-                "Stream RTT: payload_bytes=5 rtt_ms={}",
-                started.elapsed().as_millis()
-            );
-            mark_ready(ready_file)
+            let probe_rtt_ms = started.elapsed().as_millis();
+            if !json {
+                println!("Stream RTT: payload_bytes=5 rtt_ms={probe_rtt_ms}");
+            }
+            mark_ready(ready_file)?;
+            StreamProbeMetrics {
+                probe_rtt_ms: Some(probe_rtt_ms),
+                ..StreamProbeMetrics::default()
+            }
         }
         "sustained" => {
-            sustained(&mut stream).await?;
-            mark_ready(ready_file)
+            let metrics = sustained(&mut stream).await?;
+            if !json {
+                println!(
+                    "Sustained stream: exchanges={} elapsed_ms={}",
+                    metrics.exchanges.expect("sustained exchanges"),
+                    metrics.elapsed_ms.expect("sustained elapsed")
+                );
+            }
+            mark_ready(ready_file)?;
+            metrics
         }
         "large" => {
-            large_stream(stream).await?;
-            mark_ready(ready_file)
+            let metrics = large_stream(stream).await?;
+            if !json {
+                println!(
+                    "Large stream: bytes={} elapsed_ms={} throughput_mib_s={:.2}",
+                    metrics.bytes.expect("large stream bytes"),
+                    metrics.elapsed_ms.expect("large stream elapsed"),
+                    metrics.throughput_mib_s.expect("large stream throughput")
+                );
+            }
+            mark_ready(ready_file)?;
+            metrics
         }
         "hold" => {
             exchange(&mut stream, b"hold-open").await?;
             mark_ready(ready_file)?;
+            if json {
+                print_stream_probe_report(&StreamProbeReport {
+                    mode: mode.to_string(),
+                    backend: path.backend.clone(),
+                    route: path.route.clone(),
+                    rtt_ms: path.rtt_ms,
+                    local_endpoint: path.local_endpoint.clone(),
+                    remote_endpoint: path.remote_endpoint.clone(),
+                    setup_ms: connect_ms,
+                    probe_rtt_ms: None,
+                    exchanges: None,
+                    bytes: None,
+                    elapsed_ms: None,
+                    throughput_mib_s: None,
+                })?;
+            }
             let mut buffer = [0u8; STREAM_CHUNK_SIZE];
             loop {
                 let read = tokio::time::timeout(
@@ -829,8 +903,35 @@ async fn run_stream_test(
                 }
             }
         }
-        other => Err(format!("unknown stream test mode: {other}")),
+        other => return Err(format!("unknown stream test mode: {other}")),
+    };
+
+    if json {
+        print_stream_probe_report(&StreamProbeReport {
+            mode: mode.to_string(),
+            backend: path.backend.clone(),
+            route: path.route.clone(),
+            rtt_ms: path.rtt_ms,
+            local_endpoint: path.local_endpoint.clone(),
+            remote_endpoint: path.remote_endpoint.clone(),
+            setup_ms: connect_ms,
+            probe_rtt_ms: metrics.probe_rtt_ms,
+            exchanges: metrics.exchanges,
+            bytes: metrics.bytes,
+            elapsed_ms: metrics.elapsed_ms,
+            throughput_mib_s: metrics.throughput_mib_s,
+        })?;
     }
+    Ok(())
+}
+
+fn print_stream_probe_report(report: &StreamProbeReport) -> Result<(), String> {
+    println!(
+        "{}",
+        serde_json::to_string(report)
+            .map_err(|error| format!("serialize stream report: {error}"))?
+    );
+    Ok(())
 }
 
 async fn run_copy(source: &Path, destination: &str, resume: bool) -> Result<(), String> {
@@ -1339,7 +1440,9 @@ async fn exchange(
     Ok(())
 }
 
-async fn sustained(stream: &mut misaka_network::NetworkStream) -> Result<(), String> {
+async fn sustained(
+    stream: &mut misaka_network::NetworkStream,
+) -> Result<StreamProbeMetrics, String> {
     let payload = b"sustained-stream-message";
     let started = std::time::Instant::now();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
@@ -1351,15 +1454,14 @@ async fn sustained(stream: &mut misaka_network::NetworkStream) -> Result<(), Str
     if exchanges < 2 {
         return Err("sustained stream completed fewer than two exchanges".to_string());
     }
-    println!(
-        "Sustained stream: exchanges={} elapsed_ms={}",
-        exchanges,
-        started.elapsed().as_millis()
-    );
-    Ok(())
+    Ok(StreamProbeMetrics {
+        exchanges: Some(exchanges),
+        elapsed_ms: Some(started.elapsed().as_millis()),
+        ..StreamProbeMetrics::default()
+    })
 }
 
-async fn large_stream(stream: misaka_network::NetworkStream) -> Result<(), String> {
+async fn large_stream(stream: misaka_network::NetworkStream) -> Result<StreamProbeMetrics, String> {
     let started = std::time::Instant::now();
     let (mut reader, mut writer) = tokio::io::split(stream);
     let writer_task = tokio::spawn(async move {
@@ -1413,12 +1515,12 @@ async fn large_stream(stream: misaka_network::NetworkStream) -> Result<(), Strin
     let elapsed = started.elapsed();
     let throughput_mib_s =
         received as f64 / elapsed.as_secs_f64().max(f64::EPSILON) / (1024.0 * 1024.0);
-    println!(
-        "Large stream: bytes={} elapsed_ms={} throughput_mib_s={throughput_mib_s:.2}",
-        received,
-        elapsed.as_millis()
-    );
-    Ok(())
+    Ok(StreamProbeMetrics {
+        bytes: Some(received),
+        elapsed_ms: Some(elapsed.as_millis()),
+        throughput_mib_s: Some(throughput_mib_s),
+        ..StreamProbeMetrics::default()
+    })
 }
 
 async fn read_exact_timeout(
@@ -1465,7 +1567,7 @@ fn check_online(addr: Option<SocketAddr>) -> bool {
 
 #[cfg(test)]
 mod stream_tests {
-    use super::{deterministic_hash, fill_deterministic, Cli, Command};
+    use super::{deterministic_hash, fill_deterministic, Cli, Command, StreamProbeReport};
     use clap::Parser;
     use std::net::SocketAddr;
 
@@ -1513,6 +1615,47 @@ mod stream_tests {
                 ..
             } if endpoint == "iroh://endpoint-address"
         ));
+    }
+
+    #[test]
+    fn stream_test_accepts_json_measurement_output() {
+        let cli = Cli::try_parse_from([
+            "misaka",
+            "stream-test",
+            "--addr",
+            "127.0.0.1:31701",
+            "--mode",
+            "bidirectional",
+            "--json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::StreamTest { json: true, .. }
+        ));
+    }
+
+    #[test]
+    fn stream_probe_report_uses_nullable_optional_measurements() {
+        let report = StreamProbeReport {
+            mode: "connect".into(),
+            backend: "direct-tcp".into(),
+            route: "direct".into(),
+            rtt_ms: None,
+            local_endpoint: Some("127.0.0.1:40000".into()),
+            remote_endpoint: Some("127.0.0.1:31701".into()),
+            setup_ms: 4,
+            probe_rtt_ms: None,
+            exchanges: None,
+            bytes: None,
+            elapsed_ms: None,
+            throughput_mib_s: None,
+        };
+        let json = serde_json::to_value(report).unwrap();
+        assert_eq!(json["mode"], "connect");
+        assert_eq!(json["setup_ms"], 4);
+        assert!(json["rtt_ms"].is_null());
+        assert!(json["throughput_mib_s"].is_null());
     }
 
     #[test]

@@ -39,14 +39,25 @@ MISAKA_CONFIG_DIR=/path/to/sister-a-config \
 ```
 
 The probe prints the selected backend/route, setup latency, round-trip time,
-and bounded large-stream throughput. `misaka cp --resume` can be used for a
-large-transfer confirmation over the same advertised endpoint.
+and bounded large-stream throughput. Add `--json` to emit one machine-readable
+report, for example:
+
+```bash
+MISAKA_CONFIG_DIR=/path/to/sister-a-config \
+  misaka stream-test --endpoint "$IROH_ENDPOINT" --mode large --json \
+  > iroh-large-$(date +%s).json
+```
+
+The JSON report contains `setup_ms`, selected-path `rtt_ms`, and mode-specific
+measurements such as `probe_rtt_ms`, `exchanges`, or `throughput_mib_s`.
+`misaka cp --resume` can be used for a large-transfer confirmation over the
+same advertised endpoint.
 
 ## Measurement record
 
 For each host pair and network condition, record:
 
-| condition | setup ms | RTT ms | throughput MiB/s | route | stable 30–60 min |
+| condition | setup ms | path RTT ms | throughput MiB/s | route | stable 30–60 min |
 | --- | ---: | ---: | ---: | --- | --- |
 | same-LAN direct | | | | | |
 | different ISP | | | | | |

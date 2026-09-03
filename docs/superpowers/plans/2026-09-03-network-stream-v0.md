@@ -747,3 +747,15 @@ QUIC bidirectional stream, without changing the runtime's Direct TCP default.
 - [x] Read RTT from the selected Iroh QUIC path; keep direct TCP RTT as null.
 - [x] Display RTT in `misaka stream-test` and active `misaka ps` output.
 - [x] Verify selected Iroh RTT through the N13 external-process scenario.
+
+### Task 45: Make stream measurements machine-readable
+
+**Files:**
+- Modify: `crates/misaka-cli/src/main.rs`
+- Modify: `docs/iroh-cross-domain-measurement.md`
+- Modify: `docs/iroh-backend-spike-v0.md`
+
+- [x] Add `stream-test --json` without changing the default human-readable output.
+- [x] Include setup latency, selected-path RTT, probe RTT, sustained exchanges,
+  and large-stream throughput when available.
+- [x] Add CLI parsing and nullable-field serialization coverage.

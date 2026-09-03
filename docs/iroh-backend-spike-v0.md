@@ -53,8 +53,10 @@ lifecycle and rotation requirements.
   work.
 - `misaka stream-test --endpoint iroh://...` is the cross-domain measurement
   entry point. It reports the selected Iroh route, setup latency, RTT for the
-  bidirectional probe, and bounded large-stream throughput. The measurement
-  procedure and required real-host matrix live in
+  bidirectional probe, and bounded large-stream throughput. Passing `--json`
+  emits one machine-readable report containing the selected-path RTT and the
+  mode-specific measurements. The measurement procedure and required real-host
+  matrix live in
   `docs/iroh-cross-domain-measurement.md`; no real cross-domain result is
   claimed by the local test suite.
 - `IrohBackend::connect_session`/`accept_session` expose an explicit
