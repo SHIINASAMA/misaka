@@ -26,6 +26,10 @@ use tokio::io::AsyncWriteExt;
 struct Cli {
     #[command(subcommand)]
     command: Command,
+
+    /// Override the relay used by Iroh transport endpoints.
+    #[arg(long, global = true, value_name = "URL")]
+    iroh_relay: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -208,6 +212,14 @@ enum Command {
 #[tokio::main]
 async fn main() -> Result<(), MisakaError> {
     let cli = Cli::parse();
+    let iroh_relay = cli
+        .iroh_relay
+        .map(|value| {
+            value
+                .parse::<iroh::RelayUrl>()
+                .map_err(|error| MisakaError::Other(format!("invalid --iroh-relay URL: {error}")))
+        })
+        .transpose()?;
     match cli.command {
         Command::Start {
             port,
@@ -265,14 +277,9 @@ async fn main() -> Result<(), MisakaError> {
                         ));
                     }
                     misaka_runtime::config::StreamBackend::Iroh(
-                        misaka_network::IrohBackend::bind_with_secret_key(
-                            misaka_runtime::iroh_identity_store::IrohIdentityStore::load_or_init(
-                                &data_dir,
-                            )
+                        bind_iroh_backend(&data_dir, iroh_relay.clone())
+                            .await
                             .map_err(|error| MisakaError::Other(error.to_string()))?,
-                        )
-                        .await
-                        .map_err(|error| MisakaError::Other(error.to_string()))?,
                     )
                 }
                 other => {
@@ -360,18 +367,23 @@ async fn main() -> Result<(), MisakaError> {
                     }
                 },
                 &mode,
-                ready_file.as_deref(),
-                secure,
-                trust_cert.as_deref(),
-                server_name.as_deref(),
-                json,
+                StreamTestOptions {
+                    ready_file: ready_file.as_deref(),
+                    secure,
+                    trust_cert: trust_cert.as_deref(),
+                    server_name: server_name.as_deref(),
+                    json,
+                    iroh_relay: iroh_relay.clone(),
+                },
             )
             .await
             .map_err(MisakaError::Other)?;
         }
 
         Command::Connect { sister } => {
-            run_connect(&sister).await.map_err(MisakaError::Other)?;
+            run_connect(&sister, iroh_relay.clone())
+                .await
+                .map_err(MisakaError::Other)?;
         }
 
         Command::Cp {
@@ -379,7 +391,7 @@ async fn main() -> Result<(), MisakaError> {
             destination,
             resume,
         } => {
-            run_copy(&source, &destination, resume)
+            run_copy(&source, &destination, resume, iroh_relay.clone())
                 .await
                 .map_err(MisakaError::Other)?;
         }
@@ -389,7 +401,7 @@ async fn main() -> Result<(), MisakaError> {
             local,
             remote,
         } => {
-            run_tunnel(sister, local, remote)
+            run_tunnel(sister, local, remote, iroh_relay.clone())
                 .await
                 .map_err(MisakaError::Other)?;
         }
@@ -399,7 +411,7 @@ async fn main() -> Result<(), MisakaError> {
             user,
             remote_port,
         } => {
-            run_ssh(&sister, user.as_deref(), remote_port)
+            run_ssh(&sister, user.as_deref(), remote_port, iroh_relay.clone())
                 .await
                 .map_err(MisakaError::Other)?;
         }
@@ -750,15 +762,28 @@ struct StreamProbeMetrics {
     throughput_mib_s: Option<f64>,
 }
 
+struct StreamTestOptions<'a> {
+    ready_file: Option<&'a Path>,
+    secure: bool,
+    trust_cert: Option<&'a Path>,
+    server_name: Option<&'a str>,
+    json: bool,
+    iroh_relay: Option<iroh::RelayUrl>,
+}
+
 async fn run_stream_test(
     endpoint: NetworkEndpoint,
     mode: &str,
-    ready_file: Option<&Path>,
-    secure: bool,
-    trust_cert: Option<&Path>,
-    server_name: Option<&str>,
-    json: bool,
+    options: StreamTestOptions<'_>,
 ) -> Result<(), String> {
+    let StreamTestOptions {
+        ready_file,
+        secure,
+        trust_cert,
+        server_name,
+        json,
+        iroh_relay,
+    } = options;
     let connect_started = tokio::time::Instant::now();
     let mut stream = if secure {
         let NetworkEndpoint::Tcp(addr) = endpoint else {
@@ -799,12 +824,7 @@ async fn run_stream_test(
             NetworkEndpoint::Iroh(endpoint) => {
                 let data_dir = IdentityStore::config_dir()
                     .map_err(|error| format!("load Iroh config dir: {error}"))?;
-                let backend = misaka_network::IrohBackend::bind_with_secret_key(
-                    misaka_runtime::iroh_identity_store::IrohIdentityStore::load_or_init(&data_dir)
-                        .map_err(|error| error.to_string())?,
-                )
-                .await
-                .map_err(|error| error.to_string())?;
+                let backend = bind_iroh_backend(&data_dir, iroh_relay).await?;
                 tokio::time::timeout(
                     Duration::from_secs(10),
                     backend.connect(NetworkEndpoint::Iroh(endpoint)),
@@ -944,7 +964,7 @@ fn print_stream_probe_report(report: &StreamProbeReport) -> Result<(), String> {
     Ok(())
 }
 
-async fn run_connect(sister: &str) -> Result<(), String> {
+async fn run_connect(sister: &str, iroh_relay: Option<iroh::RelayUrl>) -> Result<(), String> {
     let sister_id = parse_sister_id(sister)?;
     let peer = PeerStore::load_from_file()
         .into_iter()
@@ -963,7 +983,14 @@ async fn run_connect(sister: &str) -> Result<(), String> {
                 continue;
             }
         };
-        match connect_peer_stream(endpoint, sister_id, peer.stream_certificate.as_deref()).await {
+        match connect_peer_stream(
+            endpoint,
+            sister_id,
+            peer.stream_certificate.as_deref(),
+            iroh_relay.clone(),
+        )
+        .await
+        {
             Ok(mut stream) => {
                 exchange(&mut stream, b"connect").await?;
                 let path = stream.path_info();
@@ -986,9 +1013,14 @@ async fn run_connect(sister: &str) -> Result<(), String> {
         .unwrap_or_else(|| format!("all stream endpoints for Sister #{sister_id} failed")))
 }
 
-async fn run_copy(source: &Path, destination: &str, resume: bool) -> Result<(), String> {
+async fn run_copy(
+    source: &Path,
+    destination: &str,
+    resume: bool,
+    iroh_relay: Option<iroh::RelayUrl>,
+) -> Result<(), String> {
     if resume {
-        return run_copy_v1(source, destination).await;
+        return run_copy_v1(source, destination, iroh_relay).await;
     }
     let (peer_id, remote_path) = parse_copy_destination(destination)?;
     let peer = PeerStore::load_from_file()
@@ -1001,8 +1033,13 @@ async fn run_copy(source: &Path, destination: &str, resume: bool) -> Result<(), 
         .ok_or_else(|| format!("Sister #{peer_id} has no stream endpoint"))?
         .parse::<NetworkEndpoint>()
         .map_err(|error| error.to_string())?;
-    let mut stream =
-        connect_peer_stream(endpoint, peer_id, peer.stream_certificate.as_deref()).await?;
+    let mut stream = connect_peer_stream(
+        endpoint,
+        peer_id,
+        peer.stream_certificate.as_deref(),
+        iroh_relay,
+    )
+    .await?;
 
     let mut file = tokio::fs::File::open(source)
         .await
@@ -1083,7 +1120,11 @@ async fn run_copy(source: &Path, destination: &str, resume: bool) -> Result<(), 
     Ok(())
 }
 
-async fn run_copy_v1(source: &Path, destination: &str) -> Result<(), String> {
+async fn run_copy_v1(
+    source: &Path,
+    destination: &str,
+    iroh_relay: Option<iroh::RelayUrl>,
+) -> Result<(), String> {
     let (peer_id, remote_path) = parse_copy_destination(destination)?;
     let peer = PeerStore::load_from_file()
         .into_iter()
@@ -1095,8 +1136,13 @@ async fn run_copy_v1(source: &Path, destination: &str) -> Result<(), String> {
         .ok_or_else(|| format!("Sister #{peer_id} has no stream endpoint"))?
         .parse::<NetworkEndpoint>()
         .map_err(|error| error.to_string())?;
-    let mut stream =
-        connect_peer_stream(endpoint, peer_id, peer.stream_certificate.as_deref()).await?;
+    let mut stream = connect_peer_stream(
+        endpoint,
+        peer_id,
+        peer.stream_certificate.as_deref(),
+        iroh_relay,
+    )
+    .await?;
 
     let mut file = tokio::fs::File::open(source)
         .await
@@ -1211,7 +1257,12 @@ async fn finish_copy_v1(
     Ok(())
 }
 
-async fn run_tunnel(sister_id: u64, local_port: u16, remote: SocketAddr) -> Result<(), String> {
+async fn run_tunnel(
+    sister_id: u64,
+    local_port: u16,
+    remote: SocketAddr,
+    iroh_relay: Option<iroh::RelayUrl>,
+) -> Result<(), String> {
     let peer = PeerStore::load_from_file()
         .into_iter()
         .find(|peer| peer.id == sister_id)
@@ -1226,7 +1277,15 @@ async fn run_tunnel(sister_id: u64, local_port: u16, remote: SocketAddr) -> Resu
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", local_port))
         .await
         .map_err(|error| format!("bind local tunnel port {local_port}: {error}"))?;
-    serve_tunnel(sister_id, endpoint, peer_certificate, remote, listener).await
+    serve_tunnel(
+        sister_id,
+        endpoint,
+        peer_certificate,
+        remote,
+        listener,
+        iroh_relay,
+    )
+    .await
 }
 
 async fn serve_tunnel(
@@ -1235,6 +1294,7 @@ async fn serve_tunnel(
     peer_certificate: Option<Vec<u8>>,
     remote: SocketAddr,
     listener: tokio::net::TcpListener,
+    iroh_relay: Option<iroh::RelayUrl>,
 ) -> Result<(), String> {
     let local_port = listener
         .local_addr()
@@ -1248,8 +1308,18 @@ async fn serve_tunnel(
                 let (local, _) = accepted.map_err(|error| format!("accept tunnel client: {error}"))?;
                 let endpoint = endpoint.clone();
                 let peer_certificate = peer_certificate.clone();
+                let iroh_relay = iroh_relay.clone();
                 tokio::spawn(async move {
-                    if let Err(error) = proxy_tunnel(local, endpoint, sister_id, peer_certificate.as_deref(), remote).await {
+                    if let Err(error) = proxy_tunnel(
+                        local,
+                        endpoint,
+                        sister_id,
+                        peer_certificate.as_deref(),
+                        remote,
+                        iroh_relay,
+                    )
+                    .await
+                    {
                         tracing::debug!(sister_id, error = %error, "tunnel connection closed");
                     }
                 });
@@ -1260,7 +1330,12 @@ async fn serve_tunnel(
     Ok(())
 }
 
-async fn run_ssh(sister: &str, user: Option<&str>, remote_port: u16) -> Result<(), String> {
+async fn run_ssh(
+    sister: &str,
+    user: Option<&str>,
+    remote_port: u16,
+    iroh_relay: Option<iroh::RelayUrl>,
+) -> Result<(), String> {
     let sister_id = parse_sister_id(sister)?;
     let peer = PeerStore::load_from_file()
         .into_iter()
@@ -1286,6 +1361,7 @@ async fn run_ssh(sister: &str, user: Option<&str>, remote_port: u16) -> Result<(
         peer.stream_certificate,
         remote,
         listener,
+        iroh_relay,
     ));
     let destination = user
         .map(|user| format!("{user}@127.0.0.1"))
@@ -1320,8 +1396,9 @@ async fn proxy_tunnel(
     sister_id: u64,
     peer_certificate: Option<&[u8]>,
     remote: SocketAddr,
+    iroh_relay: Option<iroh::RelayUrl>,
 ) -> Result<(), String> {
-    let mut stream = connect_peer_stream(endpoint, sister_id, peer_certificate).await?;
+    let mut stream = connect_peer_stream(endpoint, sister_id, peer_certificate, iroh_relay).await?;
     let request = bincode::serialize(&TunnelRequest {
         remote: remote.to_string(),
     })
@@ -1362,18 +1439,14 @@ async fn connect_peer_stream(
     endpoint: NetworkEndpoint,
     peer_id: u64,
     peer_certificate: Option<&[u8]>,
+    iroh_relay: Option<iroh::RelayUrl>,
 ) -> Result<misaka_network::NetworkStream, String> {
     let stream = if matches!(&endpoint, NetworkEndpoint::Iroh(_)) {
         if peer_certificate.is_some() {
             return Err("Iroh streams use endpoint-authenticated encryption; do not provide a TLS certificate".to_string());
         }
         let data_dir = IdentityStore::config_dir().map_err(|error| error.to_string())?;
-        let backend = misaka_network::IrohBackend::bind_with_secret_key(
-            misaka_runtime::iroh_identity_store::IrohIdentityStore::load_or_init(&data_dir)
-                .map_err(|error| error.to_string())?,
-        )
-        .await
-        .map_err(|error| error.to_string())?;
+        let backend = bind_iroh_backend(&data_dir, iroh_relay).await?;
         tokio::time::timeout(Duration::from_secs(10), backend.connect(endpoint))
             .await
             .map_err(|_| "Iroh stream connect timed out".to_string())?
@@ -1408,6 +1481,21 @@ async fn connect_peer_stream(
         return Err(format!("unexpected stream greeting: {greeting:?}"));
     }
     Ok(stream)
+}
+
+async fn bind_iroh_backend(
+    data_dir: &Path,
+    iroh_relay: Option<iroh::RelayUrl>,
+) -> Result<misaka_network::IrohBackend, String> {
+    let secret_key = misaka_runtime::iroh_identity_store::IrohIdentityStore::load_or_init(data_dir)
+        .map_err(|error| error.to_string())?;
+    match iroh_relay {
+        Some(relay_url) => {
+            misaka_network::IrohBackend::bind_with_secret_key_and_relay(secret_key, relay_url).await
+        }
+        None => misaka_network::IrohBackend::bind_with_secret_key(secret_key).await,
+    }
+    .map_err(|error| error.to_string())
 }
 
 async fn hash_file(file: &mut tokio::fs::File) -> Result<[u8; 32], String> {
@@ -1667,6 +1755,20 @@ mod stream_tests {
                 ..
             } if endpoint == "iroh://endpoint-address"
         ));
+    }
+
+    #[test]
+    fn stream_test_accepts_an_explicit_iroh_relay() {
+        let cli = Cli::try_parse_from([
+            "misaka",
+            "stream-test",
+            "--endpoint",
+            "iroh://endpoint-address",
+            "--iroh-relay",
+            "https://relay.example",
+        ])
+        .unwrap();
+        assert_eq!(cli.iroh_relay.as_deref(), Some("https://relay.example"));
     }
 
     #[test]

@@ -18,6 +18,9 @@ MISAKA_CONFIG_DIR=/path/to/sister-a-config \
 MISAKA_CONFIG_DIR=/path/to/sister-b-config \
   misaka start --port 31700 --stream-backend iroh --discovery manual \
   --peer <sister-a-control-ip>:31700 --introspect 31702
+
+# Optional: force both hosts to use one trusted Iroh relay.
+# Add --iroh-relay https://<relay-host> to each start command.
 ```
 
 After the control-plane Hello exchange, inspect the initiator's peer state:
@@ -33,6 +36,9 @@ to the transport-neutral stream probe:
 IROH_ENDPOINT='iroh://<endpoint-json>'
 MISAKA_CONFIG_DIR=/path/to/sister-a-config \
   misaka stream-test --endpoint "$IROH_ENDPOINT" --mode bidirectional
+
+# For a controlled relay measurement, append:
+#   --iroh-relay https://<relay-host>
 
 MISAKA_CONFIG_DIR=/path/to/sister-a-config \
   misaka stream-test --endpoint "$IROH_ENDPOINT" --mode large

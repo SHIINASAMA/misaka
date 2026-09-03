@@ -34,7 +34,9 @@ lifecycle and rotation requirements.
 - `IrohBackend::bind()` uses Iroh's N0 preset for tests and ephemeral tools;
   `misaka start --stream-backend iroh` loads or creates the key in the active
   `MISAKA_CONFIG_DIR` and binds with that key. Tests use two loopback-bound
-  endpoints with explicit direct addresses.
+  endpoints with explicit direct addresses. `--iroh-relay <URL>` optionally
+  replaces the default relay map for start and client commands; it is useful
+  for controlled UDP-restricted or external relay measurements.
 - `SisterConnector` can resolve an explicitly advertised Iroh endpoint by
   Sister ID when an `IrohBackend` is injected. Mixed TCP/Iroh candidates are
   raced with Iroh ranked after direct TCP; relay policy remains out of scope.
@@ -59,6 +61,10 @@ lifecycle and rotation requirements.
   matrix live in
   `docs/iroh-cross-domain-measurement.md`; no real cross-domain result is
   claimed by the local test suite.
+- The same `--iroh-relay <URL>` override is available to `stream-test`,
+  `connect`, `cp`, `tunnel`, and `ssh`, so an experiment can pin both the
+  Sister listener and its client-side transport to one known relay without
+  changing the Sister protocol.
 - `IrohBackend::connect_session`/`accept_session` expose an explicit
   long-lived QUIC connection; `IrohSession::open_stream` and
   `accept_stream` create multiple independently handshaken logical streams on

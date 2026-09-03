@@ -37,7 +37,9 @@ functions remain compatibility wrappers for callers that do not need to
 select a backend yet and accept `SocketAddr` through `Into<NetworkEndpoint>`.
 `IrohBackend` is an opt-in connectivity spike documented in
 `docs/iroh-backend-spike-v0.md`; the runtime and CLI select it only when
-`--stream-backend iroh` or an `iroh://` candidate is explicitly used.
+`--stream-backend iroh` or an `iroh://` candidate is explicitly used. An
+optional `--iroh-relay <URL>` pins Iroh to a known relay for controlled
+measurements; without it, Iroh's default relay map is used.
 
 `NetworkEndpoint` is deliberately separate from `SisterId`: the endpoint is a
 connection candidate, not an identity. It currently supports direct TCP and

@@ -801,3 +801,19 @@ QUIC bidirectional stream, without changing the runtime's Direct TCP default.
   and bidirectional bytes through the existing `NetworkStream` contract.
 - [x] Keep the result explicitly separate from real external NAT,
   cross-domain, and long-stability measurements.
+
+### Task 49: Make Iroh relay selection explicit
+
+**Files:**
+- Modify: `crates/misaka-network/src/iroh_backend.rs`
+- Modify: `crates/misaka-cli/Cargo.toml`
+- Modify: `crates/misaka-cli/src/main.rs`
+- Modify: `docs/iroh-backend-spike-v0.md`
+- Modify: `docs/iroh-cross-domain-measurement.md`
+- Modify: `docs/network-stream-v0.md`
+
+- [x] Add an Iroh backend constructor for a caller-selected relay URL.
+- [x] Expose `--iroh-relay <URL>` across Iroh listener and client commands
+  while preserving the default relay behavior.
+- [x] Document explicit relay use as a measurement control, not as a new
+  backend or an automatic claim of external connectivity.
