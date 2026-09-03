@@ -90,3 +90,32 @@ pub struct JobResultData {
     pub started_at: u64,
     pub finished_at: u64,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn envelope_roundtrips_bincode() {
+        let env = Envelope::new(MessageType::State, 10032, 0, vec![1, 2, 3]);
+        let bytes = bincode::serialize(&env).unwrap();
+        let back: Envelope = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(back.msg_type, MessageType::State);
+        assert_eq!(back.from, 10032);
+        assert_eq!(back.data, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn job_data_full_command() {
+        let j = JobData {
+            id: "j1".into(),
+            creator: 1,
+            executor: 0,
+            creator_addr: "127.0.0.1:1".into(),
+            command: "echo".into(),
+            arguments: vec!["a".into(), "b".into()],
+            created_at: 0,
+        };
+        assert_eq!(j.full_command(), "echo a b");
+    }
+}

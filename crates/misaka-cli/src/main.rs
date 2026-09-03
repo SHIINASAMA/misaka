@@ -1,7 +1,9 @@
 use clap::{Parser, Subcommand};
-use misaka_core::SisterIdentity;
+
 use misaka_runtime::error::MisakaError;
+use misaka_runtime::identity_store::IdentityStore;
 use misaka_runtime::node::SisterNode;
+use misaka_runtime::peer_store::PeerStore;
 use std::net::SocketAddr;
 
 #[derive(Parser)]
@@ -63,8 +65,7 @@ async fn main() -> Result<(), MisakaError> {
             nickname,
         } => {
             // 加载或生成身份 (持久化)
-            let identity = SisterIdentity::load_or_init(nickname.clone(), port)
-                .await
+            let identity = IdentityStore::load_or_init(nickname.clone(), port)
                 .map_err(|e| MisakaError::Other(e.to_string()))?;
             if nickname.clone().is_some() {
                 println!("[Misaka] nickname updated: {}", identity.nickname);
@@ -121,20 +122,13 @@ async fn main() -> Result<(), MisakaError> {
         }
 
         Command::Nickname { nickname } => {
-            let mut identity = SisterIdentity::load()
-                .map_err(|e| MisakaError::Other(e.to_string()))?
-                .ok_or_else(|| {
-                    MisakaError::Other("No identity found. Run 'misaka start' first.".into())
-                })?;
-            identity.nickname = nickname;
-            identity
-                .save()
+            let identity = IdentityStore::update_nickname(nickname)
                 .map_err(|e| MisakaError::Other(e.to_string()))?;
             println!("[Misaka] nickname updated to {}", identity.nickname);
         }
 
         Command::Status => {
-            let identity = SisterIdentity::load()
+            let identity = IdentityStore::load()
                 .map_err(|e| MisakaError::Other(e.to_string()))?
                 .ok_or_else(|| {
                     MisakaError::Other("Not running. Run 'misaka start' first.".into())
@@ -164,7 +158,7 @@ async fn main() -> Result<(), MisakaError> {
             println!("  Queued   : {} job(s)", state.queued_jobs);
 
             // 附近 Sister (来自 peers.json)
-            let nearby = misaka_core::PeerStateTable::load_from_file();
+            let nearby = PeerStore::load_from_file();
             println!("\nNearby Sisters");
             println!("────────────────────────────────");
             if nearby.is_empty() {
@@ -189,7 +183,7 @@ async fn main() -> Result<(), MisakaError> {
             local,
             sister,
         } => {
-            let identity = SisterIdentity::load()
+            let identity = IdentityStore::load()
                 .map_err(|e| MisakaError::Other(e.to_string()))?
                 .ok_or_else(|| {
                     MisakaError::Other("Not running. Run 'misaka start' first.".into())

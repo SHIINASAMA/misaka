@@ -1,3 +1,4 @@
+use misaka_core::JobStatus;
 use serde::{Deserialize, Serialize};
 
 pub const PEER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
@@ -30,11 +31,6 @@ impl LocalState {
 
     /// 刷新系统指标
     pub fn refresh(&mut self, system: &mut sysinfo::System) {
-        // sysinfo 0.30 API:
-        // - refresh_cpu() 刷新 CPU 使用率
-        // - global_cpu_info() 返回 &Cpu，其 cpu_usage() 返回 f32
-        // - total_memory() / used_memory() 单位是字节
-        // - uptime 使用 System::uptime()
         system.refresh_cpu();
         system.refresh_memory();
         self.cpu_usage = system.global_cpu_info().cpu_usage();
@@ -64,7 +60,7 @@ fn detect_capabilities() -> Vec<String> {
 pub struct LocalJob {
     pub id: String,
     pub command: String,
-    pub status: String, // queued | running | completed | failed
+    pub status: JobStatus,
     pub started_at: Option<u64>,
     pub finished_at: Option<u64>,
     pub result_output: Option<String>,
@@ -79,7 +75,7 @@ impl LocalJob {
         Self {
             id,
             command,
-            status: "queued".into(),
+            status: JobStatus::Queued,
             started_at: None,
             finished_at: None,
             result_output: None,

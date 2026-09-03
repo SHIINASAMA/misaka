@@ -8,9 +8,11 @@
 //! and exposed through machine-readable introspection.
 
 pub mod identity;
+pub mod job;
 pub mod peer;
 pub mod protocol;
 
-pub use identity::{IdentityError, SisterIdentity};
+pub use identity::{Nickname, SisterId, SisterIdentity};
+pub use job::{JobId, JobStatus};
 pub use peer::{PeerBlueprint, PeerState, PeerStateTable};
 pub use protocol::*;

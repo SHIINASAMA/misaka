@@ -52,8 +52,10 @@ impl From<&PeerState> for PeerBlueprint {
     }
 }
 
-/// Peer 表，维护当前节点已知的所有 neighbor 状态
-#[derive(Debug, Clone)]
+/// Peer 表，维护当前节点已知的所有 neighbor 状态 (in-memory, deterministic).
+///
+/// 只负责内存知识；文件系统持久化由运行时层的 PeerStore 分离处理。
+#[derive(Debug, Clone, Default)]
 pub struct PeerStateTable {
     peers: std::collections::HashMap<u64, PeerState>,
     /// 记录每个 peer 最后一次收到消息的时间，用于 offline 检测
@@ -62,10 +64,7 @@ pub struct PeerStateTable {
 
 impl PeerStateTable {
     pub fn new() -> Self {
-        Self {
-            peers: std::collections::HashMap::new(),
-            last_seen: std::collections::HashMap::new(),
-        }
+        Self::default()
     }
 
     pub fn upsert(&mut self, state: PeerState) {
@@ -128,40 +127,45 @@ impl PeerStateTable {
         }
         removed
     }
-
-    /// 把所有已知 peers 序列化持久化到磁盘 (供独立进程解析地址)
-    pub fn save_to_file(&self) -> std::io::Result<()> {
-        let dir = crate::identity::SisterIdentity::config_dir()
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
-        std::fs::create_dir_all(&dir)?;
-        let path = dir.join("peers.json");
-        let blues: Vec<PeerBlueprint> = self.peers.values().map(PeerBlueprint::from).collect();
-        let json = serde_json::to_string_pretty(&blues)
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
-        std::fs::write(path, json)
-    }
-
-    /// 从磁盘加载已知 peers 的地址映射 (供独立进程使用)
-    pub fn load_from_file() -> Vec<PeerBlueprint> {
-        let dir = if let Ok(d) = crate::identity::SisterIdentity::config_dir() {
-            d
-        } else {
-            return vec![];
-        };
-        let path = dir.join("peers.json");
-        if !path.exists() {
-            return vec![];
-        }
-        let json = match std::fs::read_to_string(&path) {
-            Ok(j) => j,
-            Err(_) => return vec![],
-        };
-        serde_json::from_str(&json).unwrap_or_default()
-    }
 }
 
-impl Default for PeerStateTable {
-    fn default() -> Self {
-        Self::new()
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state(id: u64, addr: &str) -> PeerState {
+        PeerState {
+            id,
+            nickname: format!("misaka-{}", id),
+            hostname: "h".into(),
+            platform: "p".into(),
+            version: "v".into(),
+            addr: addr.into(),
+            cpu_usage: 10.0,
+            memory_total: 0,
+            memory_used: 0,
+            running_jobs: 0,
+            queued_jobs: 0,
+            uptime_secs: 0,
+            capabilities: vec![],
+        }
+    }
+
+    #[test]
+    fn insert_update_remove() {
+        let mut t = PeerStateTable::new();
+        t.upsert(state(1, "127.0.0.1:1"));
+        assert!(t.contains(1));
+        assert_eq!(t.len(), 1);
+
+        // 更新同名 peer，不重复插入。addr 保持第一次的值 (延续旧语义)。
+        t.upsert(state(1, "127.0.0.1:2"));
+        assert_eq!(t.len(), 1);
+        assert_eq!(t.get(1).unwrap().addr, "127.0.0.1:1");
+
+        // 移除离线
+        let removed = t.prune_offline(std::time::Duration::from_secs(0));
+        assert_eq!(removed, vec![1]);
+        assert!(t.is_empty());
     }
 }
