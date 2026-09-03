@@ -157,6 +157,9 @@ identities remain stable, and verifies a new bidirectional stream afterward.
 N15 validates the public `stream-test --json` measurement output against real
 Iroh Sisters. N16 validates the public `misaka connect #<sister-id>` command
 against a stored Iroh candidate and checks the selected path.
+The `misaka-network` unit suite additionally forces Iroh through a local native
+relay with IP transports disabled; this proves the Iroh relay path and is not
+an external NAT or cross-domain claim.
 
 ## CI gate
 

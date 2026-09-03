@@ -18,3 +18,4 @@ iroh.workspace = true
 [dev-dependencies]
 serde_json.workspace = true
 rcgen = "0.13"
+iroh-relay = { version = "1.1", default-features = false, features = ["server", "test-utils"] }

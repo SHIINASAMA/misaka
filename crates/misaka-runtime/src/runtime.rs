@@ -839,6 +839,10 @@ mod tests {
     use misaka_network::NetworkBackend;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    fn install_test_crypto_provider() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+
     #[tokio::test]
     async fn optional_stream_listener_accepts_and_echoes_a_valid_stream() {
         let runtime = SisterRuntime::new(
@@ -1116,6 +1120,7 @@ mod tests {
 
     #[tokio::test]
     async fn secure_stream_listener_accepts_only_mutually_authenticated_clients() {
+        install_test_crypto_provider();
         let server_dir =
             std::env::temp_dir().join(format!("misaka-runtime-server-{}", uuid::Uuid::new_v4()));
         let client_dir =

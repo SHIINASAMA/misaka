@@ -109,6 +109,9 @@ parseable measurement record with setup, path RTT, probe RTT, and endpoint
 metadata.
 N16 verifies that the public `misaka connect #<sister-id>` command resolves
 the stored Iroh candidate and establishes a stream by Sister identity.
+The `misaka-network` unit suite also verifies an Iroh-native relay path with IP
+transports disabled; this local fixture is not a substitute for external
+cross-domain or NAT measurements.
 
 Transfer v1 is layered above the selected `NetworkStream`: `MTR1` uses fixed
 64 KiB chunks, per-chunk integrity digests, explicit offset acknowledgements,

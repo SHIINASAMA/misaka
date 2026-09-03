@@ -70,12 +70,19 @@ lifecycle and rotation requirements.
 - The current listener compatibility metadata remains a `SocketAddr`; relay
   acceptances report `0.0.0.0:0` because their meaningful identity is the
   authenticated Iroh endpoint ID, not a TCP peer address.
+- Iroh's native relay path is covered by a deterministic in-process fixture
+  that disables IP transports, connects two endpoints through a local
+  `iroh-relay`, and verifies the selected route and byte exchange. This is
+  transport coverage only; it does not claim public-internet NAT traversal or
+  cross-domain reliability.
 
 ## Verification
 
-The unit test `iroh_backend_roundtrips_a_network_stream` runs two real Iroh
-endpoints, establishes the authenticated QUIC connection, validates the
-Misaka stream handshake, and exchanges bytes through `NetworkStream`.
-Testament N12 verifies Transfer v1 over Iroh in external Sister processes;
-N13 verifies active path, RTT, and cleanup telemetry; N14 verifies restart and
-fresh-stream behavior with the persisted Iroh transport identity.
+The unit tests `iroh_backend_roundtrips_a_network_stream` and
+`iroh_backend_uses_native_relay_path_when_ip_transports_are_disabled` run real
+Iroh endpoints, validate the Misaka stream handshake, and exchange bytes
+through direct and native relay paths. Testament N12 verifies Transfer v1 over
+Iroh in external Sister processes; N13 verifies active path, RTT, and cleanup
+telemetry; N14 verifies restart and fresh-stream behavior with the persisted
+Iroh transport identity; N15 verifies machine-readable measurements; N16
+verifies SisterId-based connection.

@@ -329,6 +329,10 @@ mod tests {
     use misaka_network::{IrohBackend, NetworkBackend, NetworkEndpoint};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    fn install_test_crypto_provider() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+
     #[tokio::test]
     async fn connects_to_a_sister_using_its_stream_endpoint() {
         let listener =
@@ -514,6 +518,7 @@ mod tests {
 
     #[tokio::test]
     async fn secure_connector_pins_the_peer_certificate_and_identity_name() {
+        install_test_crypto_provider();
         let server_dir =
             std::env::temp_dir().join(format!("misaka-server-{}", uuid::Uuid::new_v4()));
         let client_dir =

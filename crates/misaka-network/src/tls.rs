@@ -244,8 +244,15 @@ mod tests {
         )
     }
 
+    fn install_test_crypto_provider() {
+        // The Iroh relay test fixture enables both rustls providers. Install
+        // one explicitly so rustls builders do not depend on test order.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+
     #[tokio::test]
     async fn mutual_tls_authenticates_and_encrypts_a_stream() {
+        install_test_crypto_provider();
         let server_identity = identity("sister-server");
         let client_identity = identity("sister-client");
         let server = TlsServer::new(
@@ -287,6 +294,7 @@ mod tests {
 
     #[tokio::test]
     async fn mutual_tls_rejects_an_untrusted_client() {
+        install_test_crypto_provider();
         let server_identity = identity("sister-server");
         let client_identity = identity("sister-client");
         let server = TlsServer::new(
@@ -329,6 +337,7 @@ mod tests {
 
     #[tokio::test]
     async fn tls_rejects_a_wrong_server_identity_name() {
+        install_test_crypto_provider();
         let server_identity = identity("sister-server");
         let client_identity = identity("sister-client");
         let server = TlsServer::new(

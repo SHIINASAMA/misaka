@@ -785,3 +785,19 @@ QUIC bidirectional stream, without changing the runtime's Direct TCP default.
 - [x] Verify the handshake and an echo exchange before reporting the selected
   path.
 - [x] Add N16 coverage with isolated real Iroh Sister processes.
+
+### Task 48: Verify Iroh native relay fallback
+
+**Files:**
+- Modify: `crates/misaka-network/Cargo.toml`
+- Modify: `crates/misaka-network/src/lib.rs`
+- Modify: `docs/iroh-backend-spike-v0.md`
+- Modify: `docs/testing.md`
+- Modify: `docs/network-stream-v0.md`
+
+- [x] Add a deterministic local `iroh-relay` fixture for the Iroh backend
+  test suite.
+- [x] Disable IP transports and verify relay-selected route, RTT, handshake,
+  and bidirectional bytes through the existing `NetworkStream` contract.
+- [x] Keep the result explicitly separate from real external NAT,
+  cross-domain, and long-stability measurements.

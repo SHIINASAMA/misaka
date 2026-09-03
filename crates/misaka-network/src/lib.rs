@@ -468,7 +468,7 @@ mod tests {
         connect, listen, IrohBackend, ListenerFuture, NetworkBackend, NetworkEndpoint,
         NetworkError, NetworkListener, NetworkListenerDriver, NetworkStream, IROH_ALPN,
     };
-    use std::net::SocketAddr;
+    use std::net::{Ipv4Addr, SocketAddr};
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -558,6 +558,102 @@ mod tests {
 
         server.close().await;
         client.close().await;
+    }
+
+    #[tokio::test]
+    async fn iroh_backend_uses_native_relay_path_when_ip_transports_are_disabled() {
+        let (relay_certs, relay_tls) =
+            iroh_relay::server::testing::self_signed_tls_certs_and_config();
+        let mut relay_config = iroh_relay::server::testing::relay_config();
+        relay_config.tls = Some(iroh_relay::server::TlsConfig::new(
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            iroh_relay::server::CertConfig::Manual {
+                server_config: relay_tls,
+            },
+        ));
+        let mut quic_config = iroh_relay::server::testing::quic_config();
+        quic_config.server_config = None;
+        let mut server_config = iroh_relay::server::testing::server_config();
+        server_config.relay = Some(relay_config);
+        server_config.quic = Some(quic_config);
+        let relay_server = iroh_relay::server::Server::spawn(server_config)
+            .await
+            .unwrap();
+        let relay_url = format!(
+            "https://{}",
+            relay_server
+                .https_addr()
+                .expect("test relay HTTPS address is available")
+        )
+        .parse::<iroh::RelayUrl>()
+        .unwrap();
+        let relay_quic = relay_server
+            .quic_addr()
+            .map(|address| iroh_relay::RelayQuicConfig::new(address.port()));
+        let relay_map =
+            iroh::RelayMap::from(iroh_relay::RelayConfig::new(relay_url.clone(), relay_quic));
+
+        let server_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .secret_key(iroh::SecretKey::generate())
+            .alpns(vec![IROH_ALPN.to_vec()])
+            .relay_mode(iroh::RelayMode::Custom(relay_map.clone()))
+            .ca_tls_config(iroh::tls::CaTlsConfig::custom_roots(relay_certs.clone()))
+            .clear_ip_transports()
+            .bind()
+            .await
+            .unwrap();
+        let client_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .secret_key(iroh::SecretKey::generate())
+            .alpns(vec![IROH_ALPN.to_vec()])
+            .relay_mode(iroh::RelayMode::Custom(relay_map))
+            .ca_tls_config(iroh::tls::CaTlsConfig::custom_roots(relay_certs))
+            .clear_ip_transports()
+            .bind()
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), server_endpoint.online())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), client_endpoint.online())
+            .await
+            .unwrap();
+
+        let server = IrohBackend::new(server_endpoint, IROH_ALPN);
+        let client = IrohBackend::new(client_endpoint, IROH_ALPN);
+        let server_address =
+            iroh::EndpointAddr::new(server.endpoint().id()).with_relay_url(relay_url);
+        let listener = server
+            .listen(NetworkEndpoint::Iroh(server_address.clone()))
+            .await
+            .unwrap();
+        let accept_task = tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_secs(5), listener.accept())
+                .await
+                .unwrap()
+                .unwrap()
+        });
+
+        let mut outgoing = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.connect(NetworkEndpoint::Iroh(server_address)),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let path = outgoing.path_info();
+        assert_eq!(path.backend, "iroh");
+        assert_eq!(path.route, "relay");
+        assert!(path.rtt_ms.is_some());
+        let (mut incoming, _) = accept_task.await.unwrap();
+
+        outgoing.write_all(b"relay-ok").await.unwrap();
+        let mut received = [0u8; 8];
+        incoming.read_exact(&mut received).await.unwrap();
+        assert_eq!(&received, b"relay-ok");
+
+        server.close().await;
+        client.close().await;
+        drop(relay_server);
     }
 
     #[tokio::test]
