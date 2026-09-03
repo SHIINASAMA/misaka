@@ -333,19 +333,25 @@ impl ConnectionManager {
         }
 
         let sister_id = sister.as_u64();
-        if let Some(session) = self.iroh_sessions.lock().await.get(&sister_id).cloned() {
-            match tokio::time::timeout(misaka_network::HANDSHAKE_TIMEOUT, session.open_stream())
-                .await
-            {
-                Ok(Ok(stream)) => {
-                    self.states
-                        .lock()
-                        .await
-                        .insert(sister_id, ConnectionState::Connected);
-                    return Ok(stream);
-                }
-                _ => {
-                    self.iroh_sessions.lock().await.remove(&sister_id);
+        let cached_session = self.iroh_sessions.lock().await.get(&sister_id).cloned();
+        if let Some(session) = cached_session {
+            if session.is_closed() {
+                self.iroh_sessions.lock().await.remove(&sister_id);
+            } else {
+                match tokio::time::timeout(misaka_network::HANDSHAKE_TIMEOUT, session.open_stream())
+                    .await
+                {
+                    Ok(Ok(stream)) => {
+                        self.states
+                            .lock()
+                            .await
+                            .insert(sister_id, ConnectionState::Connected);
+                        return Ok(stream);
+                    }
+                    _ => {
+                        session.close();
+                        self.iroh_sessions.lock().await.remove(&sister_id);
+                    }
                 }
             }
         }
@@ -599,6 +605,124 @@ mod tests {
         second.read_exact(&mut second_response).await.unwrap();
         assert_eq!(&second_response, b"second");
         second.write_all(b"ack").await.unwrap();
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn connection_manager_reconnects_after_an_iroh_session_closes() {
+        let server_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .alpns(vec![misaka_network::IROH_ALPN.to_vec()])
+            .bind_addr("127.0.0.1:0")
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let client_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .alpns(vec![misaka_network::IROH_ALPN.to_vec()])
+            .bind_addr("127.0.0.1:0")
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let server_backend = IrohBackend::new(server_endpoint, misaka_network::IROH_ALPN);
+        let client_backend = IrohBackend::new(client_endpoint, misaka_network::IROH_ALPN);
+        let server_endpoint_addr = iroh::EndpointAddr::new(server_backend.endpoint().id())
+            .with_ip_addr(server_backend.endpoint().bound_sockets()[0]);
+        let server_task = tokio::spawn(async move {
+            let first_session = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                server_backend.accept_session(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let mut first_stream = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                first_session.accept_stream(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            first_stream.write_all(b"first").await.unwrap();
+            first_stream.flush().await.unwrap();
+            let mut ack = [0u8; 3];
+            first_stream.read_exact(&mut ack).await.unwrap();
+            assert_eq!(&ack, b"ack");
+            drop(first_stream);
+            first_session.close();
+
+            let second_session = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                server_backend.accept_session(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let mut second_stream = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                second_session.accept_stream(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            second_stream.write_all(b"second").await.unwrap();
+            second_stream.flush().await.unwrap();
+            let mut ack = [0u8; 3];
+            second_stream.read_exact(&mut ack).await.unwrap();
+            assert_eq!(&ack, b"ack");
+        });
+
+        let peer = PeerState {
+            id: 42,
+            nickname: "peer".into(),
+            hostname: "host".into(),
+            platform: "test".into(),
+            version: "0.1".into(),
+            stream_endpoints: vec![format!("{}", NetworkEndpoint::Iroh(server_endpoint_addr))],
+            stream_certificate: None,
+            addr: "127.0.0.1:31700".into(),
+            cpu_usage: 0.0,
+            memory_total: 0,
+            memory_used: 0,
+            running_jobs: 0,
+            queued_jobs: 0,
+            uptime_secs: 0,
+            capabilities: vec![],
+        };
+        let service = crate::peer_service::PeerService::new(
+            crate::peer_registry::PeerRegistry::new_seeded(vec![peer]),
+            std::path::PathBuf::from("."),
+        );
+        let manager = super::ConnectionManager::new_with_iroh_backend(service, client_backend);
+        let sister = SisterId(42);
+
+        let mut first = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            manager.open_stream(sister.clone()),
+        )
+        .await
+        .expect("first Iroh stream timed out")
+        .unwrap();
+        let mut first_response = [0u8; 5];
+        first.read_exact(&mut first_response).await.unwrap();
+        assert_eq!(&first_response, b"first");
+        first.write_all(b"ack").await.unwrap();
+        first.flush().await.unwrap();
+        drop(first);
+        manager.mark_disconnected(&sister).await;
+
+        let mut second = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            manager.open_stream(sister),
+        )
+        .await
+        .expect("second Iroh stream timed out")
+        .unwrap();
+        let mut second_response = [0u8; 6];
+        second.read_exact(&mut second_response).await.unwrap();
+        assert_eq!(&second_response, b"second");
+        second.write_all(b"ack").await.unwrap();
+        second.flush().await.unwrap();
         server_task.await.unwrap();
     }
 

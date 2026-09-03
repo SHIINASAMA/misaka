@@ -855,3 +855,19 @@ QUIC bidirectional stream, without changing the runtime's Direct TCP default.
   behavior unchanged.
 - [x] Verify the digest contract and resumable Transfer v1 path with unit and
   runtime tests.
+
+### Task 52: Recover new Iroh streams after session closure
+
+**Files:**
+- Modify: `crates/misaka-network/src/iroh_backend.rs`
+- Modify: `crates/misaka-runtime/src/connection.rs`
+- Modify: `docs/network-stream-v0.md`
+- Modify: `docs/iroh-backend-spike-v0.md`
+
+- [x] Expose the minimum Iroh session close/liveness operations needed by the
+  runtime without making the backend own application recovery.
+- [x] Read the cached session from a short-lived mutex scope, bound cached
+  logical-stream handshakes, and evict/close the session before fresh-candidate
+  fallback.
+- [x] Verify that existing logical streams are allowed to fail while a later
+  `ConnectionManager::open_stream` establishes a new Iroh session.

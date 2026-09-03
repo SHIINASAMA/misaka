@@ -75,10 +75,12 @@ lifecycle and rotation requirements.
   later logical streams on it. A caller's explicit `mark_disconnected` only
   marks logical-stream state; it does not tear down a healthy Iroh session.
   Failed logical-stream handshakes are bounded by the five-second handshake
-  timeout before candidate connection fallback.
-- One logical operation still owns one `NetworkStream`; Iroh session reuse is
-  explicit inside `ConnectionManager`, with no transparent stream migration
-  or background reconnect.
+  timeout, close and evict the failed session, and then fall back to a fresh
+  candidate connection. A closed session can therefore be replaced for a
+  later logical operation.
+- One logical operation still owns one `NetworkStream`; Iroh session reuse and
+  fresh-session fallback are explicit inside `ConnectionManager`, with no
+  transparent stream migration or background reconnect.
 - The current listener compatibility metadata remains a `SocketAddr`; relay
   acceptances report `0.0.0.0:0` because their meaningful identity is the
   authenticated Iroh endpoint ID, not a TCP peer address.

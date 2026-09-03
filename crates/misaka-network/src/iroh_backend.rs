@@ -139,6 +139,16 @@ impl IrohSession {
         self.connection.remote_id()
     }
 
+    /// Whether the underlying QUIC connection has observed a close reason.
+    pub fn is_closed(&self) -> bool {
+        self.connection.close_reason().is_some()
+    }
+
+    /// Close the logical session and make future stream opens fail promptly.
+    pub fn close(&self) {
+        self.connection.close(0u32.into(), b"Misaka session closed");
+    }
+
     pub async fn open_stream(&self) -> Result<NetworkStream> {
         let (mut send, mut recv) = self
             .connection

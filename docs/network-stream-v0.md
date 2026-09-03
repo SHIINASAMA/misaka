@@ -56,9 +56,10 @@ non-loopback stream candidates are withheld while the raw stream is insecure
 and loopback-only. `ConnectionManager` adds explicit per-Sister lifecycle
 state; for Iroh it reuses one established session for subsequent logical
 streams, while Direct TCP retains one connection per logical stream. A failed
-cached Iroh stream handshake is bounded before the manager falls back to a
-fresh candidate connection. It does not transparently recover application
-streams or retry in the background.
+cached Iroh stream handshake is bounded, closes and evicts the failed session,
+and then falls back to a fresh candidate connection. A caller can therefore
+open a new stream after an Iroh session failure; existing application streams
+still fail and are not transparently migrated or retried in the background.
 The public `misaka connect #<sister-id>` command exercises the same identity
 to-candidate boundary for a one-shot verified stream connection.
 Authentication remains a separate phase.
@@ -117,7 +118,8 @@ the stored Iroh candidate and establishes a stream by Sister identity.
 The `misaka-network` unit suite also verifies an Iroh-native relay path with IP
 transports disabled; this local fixture is not a substitute for external
 cross-domain or NAT measurements. The runtime unit suite verifies that
-`ConnectionManager` reuses one Iroh session for two explicit logical streams.
+`ConnectionManager` reuses one Iroh session for two explicit logical streams
+and establishes a fresh Iroh session after the old session is closed.
 
 Transfer v1 is layered above the selected `NetworkStream`: `MTR1` uses fixed
 64 KiB chunks, per-chunk integrity checks, a SHA-256 content digest, explicit
