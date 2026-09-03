@@ -1,11 +1,13 @@
 use crate::config::RuntimeConfig;
 use crate::crypto::Crypto;
-use crate::introspection::{IntrospectionSnapshot, JobSnapshot, PeerSnapshot, ResourceSnapshot};
 use crate::network::PeerTransport;
 use crate::peer_store::PeerStore;
 use crate::queue::JobQueue;
 use crate::scheduler::Scheduler;
 use crate::state::{LocalJob, LocalState};
+use misaka_core::introspection::{
+    IntrospectionSnapshot, JobSnapshot, PeerSnapshot, ResourceSnapshot,
+};
 use misaka_core::protocol::*;
 use misaka_core::JobStatus;
 use misaka_core::SisterIdentity;
@@ -118,7 +120,18 @@ impl SisterNode {
 
     /// 组装当前只读 snapshot (供 Testament 等外部 harness 观测)
     pub async fn introspection_snapshot(&self) -> IntrospectionSnapshot {
-        let resources = { ResourceSnapshot::from(&*self.local_state.read().await) };
+        let resources = {
+            let s = self.local_state.read().await;
+            ResourceSnapshot {
+                cpu_usage: s.cpu_usage,
+                memory_total: s.memory_total,
+                memory_used: s.memory_used,
+                running_jobs: s.running_jobs,
+                queued_jobs: s.queued_jobs,
+                uptime_secs: s.uptime_secs,
+                capabilities: s.capabilities.clone(),
+            }
+        };
         let peers = {
             let p = self.peers.read().await;
             p.all().iter().map(PeerSnapshot::from).collect()
@@ -297,19 +310,19 @@ impl SisterNode {
                 let requester = env.from;
                 let peer_addr = self.peer_addr(requester).await;
                 if let Some(job) = self.job_queue.pop() {
-                    let job_data = JobData {
-                        id: job.id.clone(),
-                        creator: job.creator,
-                        executor: requester,
-                        creator_addr: job
-                            .creator_addr
-                            .clone()
-                            .unwrap_or_else(|| self.listen_addr.to_string()),
-                        command: job.command.clone(),
-                        arguments: vec![],
-                        created_at: now_secs(),
-                    };
                     if let Some(addr) = peer_addr {
+                        let job_data = JobData {
+                            id: job.id.clone(),
+                            creator: job.creator,
+                            executor: requester,
+                            creator_addr: job
+                                .creator_addr
+                                .clone()
+                                .unwrap_or_else(|| self.listen_addr.to_string()),
+                            command: job.command.clone(),
+                            arguments: vec![],
+                            created_at: now_secs(),
+                        };
                         println!(
                             "[Misaka] {} stealing job {} out to #{}",
                             self.identity.nickname.as_str(),
@@ -322,7 +335,17 @@ impl SisterNode {
                             requester,
                             bincode::serialize(&job_data)?,
                         );
-                        let _ = self.send_fire(addr, &env).await;
+                        if self.send_fire(addr, &env).await.is_ok() {
+                            let mut jobs = self.local_jobs.write().await;
+                            if let Some(local_job) = jobs.get_mut(&job.id) {
+                                local_job.status = JobStatus::Transferred;
+                            }
+                        } else {
+                            // 保留任务，等待下一次请求重试。
+                            self.job_queue.push(job);
+                        }
+                    } else {
+                        self.job_queue.push(job);
                     }
                 } else if let Some(addr) = peer_addr {
                     // 没有 → 回 Ack 表示无活
@@ -527,13 +550,7 @@ impl SisterNode {
             }
         }
         println!("[Misaka] executing locally: {}", command);
-        let result = crate::commands::CommandExecutor::execute(command).unwrap_or_else(|e| {
-            crate::commands::CommandResult {
-                stdout: format!("Error: {}", e),
-                stderr: String::new(),
-                exit_code: -1,
-            }
-        });
+        let result = execute_blocking(command.to_string()).await;
         let finished = now_secs();
 
         let job_result = JobResultData {
@@ -823,12 +840,7 @@ impl SisterNode {
                 drop(jobs);
 
                 println!("[Misaka] executing locally: {}", job.command);
-                let result = crate::commands::CommandExecutor::execute(&job.command)
-                    .unwrap_or_else(|e| crate::commands::CommandResult {
-                        stdout: format!("Error: {}", e),
-                        stderr: String::new(),
-                        exit_code: -1,
-                    });
+                let result = execute_blocking(job.command.clone()).await;
 
                 let finished = now_secs();
                 let job_result = JobResultData {
@@ -878,6 +890,24 @@ impl SisterNode {
                 tokio::time::sleep(self.config.executor_poll_interval).await;
             }
         }
+    }
+}
+
+async fn execute_blocking(command: String) -> crate::commands::CommandResult {
+    match tokio::task::spawn_blocking(move || crate::commands::CommandExecutor::execute(&command))
+        .await
+    {
+        Ok(Ok(result)) => result,
+        Ok(Err(e)) => crate::commands::CommandResult {
+            stdout: format!("Error: {}", e),
+            stderr: String::new(),
+            exit_code: -1,
+        },
+        Err(e) => crate::commands::CommandResult {
+            stdout: format!("Error: command worker failed: {}", e),
+            stderr: String::new(),
+            exit_code: -1,
+        },
     }
 }
 

@@ -11,91 +11,16 @@
 //! - read-only
 //! - not advertised through mDNS
 //! - not used by Sisters
+//!
+//! The snapshot data types live in misaka-core so external harnesses can
+//! deserialize them without depending on this crate.
 
-use misaka_core::{PeerState, SisterIdentity};
-use serde::Serialize;
+use misaka_core::introspection::IntrospectionSnapshot;
 use std::net::SocketAddr;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 
 type BoxFuture<T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send>>;
-
-/// 资源快照 (来自本地 sysinfo 观测)
-#[derive(Debug, Clone, Serialize)]
-pub struct ResourceSnapshot {
-    pub cpu_usage: f32,
-    pub memory_total: u64,
-    pub memory_used: u64,
-    pub running_jobs: usize,
-    pub queued_jobs: usize,
-    pub uptime_secs: u64,
-    pub capabilities: Vec<String>,
-}
-
-impl From<&crate::state::LocalState> for ResourceSnapshot {
-    fn from(s: &crate::state::LocalState) -> Self {
-        Self {
-            cpu_usage: s.cpu_usage,
-            memory_total: s.memory_total,
-            memory_used: s.memory_used,
-            running_jobs: s.running_jobs,
-            queued_jobs: s.queued_jobs,
-            uptime_secs: s.uptime_secs,
-            capabilities: s.capabilities.clone(),
-        }
-    }
-}
-
-/// Peer 快照
-#[derive(Debug, Clone, Serialize)]
-pub struct PeerSnapshot {
-    pub id: u64,
-    pub nickname: String,
-    pub addr: String,
-    pub cpu_usage: f32,
-    pub memory_used: u64,
-    pub memory_total: u64,
-    pub running_jobs: usize,
-    pub queued_jobs: usize,
-    pub online: bool,
-}
-
-impl From<&PeerState> for PeerSnapshot {
-    fn from(p: &PeerState) -> Self {
-        Self {
-            id: p.id,
-            nickname: p.nickname.clone(),
-            addr: p.addr.clone(),
-            cpu_usage: p.cpu_usage,
-            memory_used: p.memory_used,
-            memory_total: p.memory_total,
-            running_jobs: p.running_jobs,
-            queued_jobs: p.queued_jobs,
-            online: true,
-        }
-    }
-}
-
-/// Job 快照
-#[derive(Debug, Clone, Serialize)]
-pub struct JobSnapshot {
-    pub id: String,
-    pub command: String,
-    pub status: String,
-    pub creator: u64,
-    pub started_at: Option<u64>,
-    pub finished_at: Option<u64>,
-}
-
-/// 完整 introspection snapshot —— Testament 的稳定观测面
-#[derive(Debug, Clone, Serialize)]
-pub struct IntrospectionSnapshot {
-    pub identity: SisterIdentity,
-    pub resources: ResourceSnapshot,
-    pub peers: Vec<PeerSnapshot>,
-    pub jobs: Vec<JobSnapshot>,
-    pub queue_depth: usize,
-}
 
 /// 在 loopback 上起一个极简 TCP 服务器：每次连接读取一行，返回一行 JSON snapshot。
 /// 返回实际绑定的地址。

@@ -794,6 +794,7 @@ dependencies = [
 name = "testament"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "misaka-core",
  "serde",
  "serde_json",
