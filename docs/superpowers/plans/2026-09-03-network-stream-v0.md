@@ -701,6 +701,22 @@ QUIC bidirectional stream, without changing the runtime's Direct TCP default.
 - [x] Keep the scenario deterministic and restricted to the existing local
   Iroh connectivity fixture; cross-domain/relay measurements remain separate.
 
+### Task 43: Show active paths through `misaka ps`
+
+**Files:**
+- Modify: `crates/misaka-cli/src/main.rs`
+- Modify: `crates/testament/src/scenario.rs`
+- Modify: `docs/testing.md`
+- Modify: `docs/network-stream-v0.md`
+- Modify: `docs/network-resolver-v0.md`
+- Modify: `docs/connection-racing-v0.md`
+
+- [x] Add explicit `ps --introspect <loopback-address>` access to the local
+  active-stream snapshot.
+- [x] Keep the default `ps` candidate view unchanged and keep introspection
+  loopback-only/read-only.
+- [x] Verify the public JSON output while a real stream is open.
+
 ### Task 42: Add Iroh cross-domain measurement tooling
 
 **Files:**

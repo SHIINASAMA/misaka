@@ -22,7 +22,9 @@ reserved kind for the relay integration boundary. `SisterConnector` and
 `SecureSisterConnector` use this ordering while preserving invalid-candidate
 diagnostics and sequential fallback.
 
-Connection racing and active path telemetry are intentionally separate future
-steps. The stream boundary now captures `PathInfo` for the selected backend,
-but a candidate is not evidence that a stream is connected and no active-path
-registry exists yet.
+`SisterConnector` races TCP and explicitly injected Iroh candidates while
+preserving Direct TCP-only behavior when no Iroh backend is configured. The
+stream boundary captures `PathInfo` for the selected backend, and the runtime
+keeps a separate in-memory active-stream registry exposed only through
+loopback introspection; a candidate is never treated as evidence that a stream
+is connected.

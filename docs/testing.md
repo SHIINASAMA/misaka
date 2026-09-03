@@ -142,6 +142,8 @@ asserts command results and process behavior; it does not import or execute
 `misaka-network` in-process. N10 invokes the public `misaka cp --resume`
 client against a real Sister and checks exact destination bytes. N11 checks
 live active-stream telemetry and cleanup through loopback introspection. The
+same N11 path also verifies that `misaka ps --json --introspect` exposes the
+active stream through the public CLI. The
 Iroh scenario launches real Sisters with the opt-in Iroh backend and verifies
 Transfer v1 over the advertised Iroh endpoint. The disconnect scenarios pass a
 ready-file to the external stream client and poll

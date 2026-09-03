@@ -1604,6 +1604,20 @@ fn n11_active_stream_observability(ctx: &mut Context) -> Result<(), ScenarioErro
             "active stream telemetry incomplete: {active:?}"
         )));
     }
+    let introspect_arg = b_introspect.to_string();
+    let ps_output = ctx.run_cli("b", &["ps", "--json", "--introspect", &introspect_arg])?;
+    let ps: serde_json::Value = serde_json::from_str(&ps_output)
+        .map_err(|error| ScenarioError::assertion(format!("decode misaka ps JSON: {error}")))?;
+    let ps_active = ps
+        .get("active_streams")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|streams| streams.first())
+        .ok_or_else(|| ScenarioError::assertion("misaka ps did not report active stream"))?;
+    assert::assert_eq(
+        ps_active.get("backend").and_then(serde_json::Value::as_str),
+        Some("direct-tcp"),
+        "misaka ps active backend",
+    )?;
 
     client.terminate();
     let _ = client

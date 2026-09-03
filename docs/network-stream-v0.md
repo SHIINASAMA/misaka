@@ -36,7 +36,8 @@ The runtime's v0 implementation remains `DirectTcpBackend`; the free
 functions remain compatibility wrappers for callers that do not need to
 select a backend yet and accept `SocketAddr` through `Into<NetworkEndpoint>`.
 `IrohBackend` is an opt-in connectivity spike documented in
-`docs/iroh-backend-spike-v0.md` and is not selected by the runtime.
+`docs/iroh-backend-spike-v0.md`; the runtime and CLI select it only when
+`--stream-backend iroh` or an `iroh://` candidate is explicitly used.
 
 `NetworkEndpoint` is deliberately separate from `SisterId`: the endpoint is a
 connection candidate, not an identity. It currently supports direct TCP and
@@ -101,6 +102,11 @@ and destination-side `.misaka-part` plus JSON resume state. The CLI opt-in is
 `misaka cp --resume`; Transfer v0 remains unchanged. A deterministic runtime
 test covers disconnect, resume, and finalization, and the protocol works over
 Direct TCP or opt-in Iroh.
+
+When a Sister has enabled loopback introspection, `misaka ps --json
+--introspect 127.0.0.1:<port>` includes the local active stream registry. The
+default `misaka ps` output intentionally remains a Network Knowledge view and
+only reports persisted candidates.
 
 ## Security and non-goals
 

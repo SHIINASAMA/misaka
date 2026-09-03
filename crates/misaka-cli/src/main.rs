@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use misaka_core::introspection::{ActiveStreamSnapshot, IntrospectionSnapshot};
 use misaka_core::protocol::{
     finalize_transfer_digest, transfer_digest, update_transfer_digest, Envelope, MessageType,
     TransferRequest, TransferResult, TransferV1Ack, TransferV1Chunk, TransferV1Request,
@@ -173,6 +174,10 @@ enum Command {
     Ps {
         #[arg(long)]
         json: bool,
+
+        /// Optional local loopback introspection address for active streams.
+        #[arg(long, value_name = "ADDR")]
+        introspect: Option<SocketAddr>,
     },
 
     /// Submit a job (use --local to force local execution).
@@ -441,14 +446,18 @@ async fn main() -> Result<(), MisakaError> {
             }
         }
 
-        Command::Ps { json } => {
+        Command::Ps { json, introspect } => {
             let identity = IdentityStore::load()
                 .map_err(|e| MisakaError::Other(e.to_string()))?
                 .ok_or_else(|| {
                     MisakaError::Other("Not initialized. Run 'misaka start' first.".into())
                 })?;
             let known = PeerStore::load_from_file();
-            let report = network_ps(identity, known).await;
+            let active_streams = match introspect {
+                Some(addr) => fetch_introspection(addr).await?.active_streams,
+                None => Vec::new(),
+            };
+            let report = network_ps(identity, known, active_streams).await;
             if json {
                 println!(
                     "{}",
@@ -516,11 +525,13 @@ struct NetworkPsReport {
     #[serde(rename = "self")]
     self_id: u64,
     sisters: Vec<NetworkPsEntry>,
+    active_streams: Vec<ActiveStreamSnapshot>,
 }
 
 async fn network_ps(
     identity: misaka_core::SisterIdentity,
     known: Vec<misaka_core::PeerBlueprint>,
+    active_streams: Vec<ActiveStreamSnapshot>,
 ) -> NetworkPsReport {
     let self_id = identity.id.as_u64();
     let mut sisters = vec![NetworkPsEntry {
@@ -579,7 +590,31 @@ async fn network_ps(
             is_self: false,
         });
     }
-    NetworkPsReport { self_id, sisters }
+    NetworkPsReport {
+        self_id,
+        sisters,
+        active_streams,
+    }
+}
+
+async fn fetch_introspection(addr: SocketAddr) -> Result<IntrospectionSnapshot, MisakaError> {
+    let mut stream =
+        tokio::time::timeout(Duration::from_secs(2), tokio::net::TcpStream::connect(addr))
+            .await
+            .map_err(|_| MisakaError::Other(format!("introspection connection timed out: {addr}")))?
+            .map_err(|error| {
+                MisakaError::Other(format!("connect introspection {addr}: {error}"))
+            })?;
+    let mut bytes = Vec::new();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut bytes),
+    )
+    .await
+    .map_err(|_| MisakaError::Other(format!("introspection read timed out: {addr}")))?
+    .map_err(|error| MisakaError::Other(format!("read introspection {addr}: {error}")))?;
+    serde_json::from_slice(&bytes)
+        .map_err(|error| MisakaError::Other(format!("decode introspection {addr}: {error}")))
 }
 
 async fn probe_peer(identity: &misaka_core::SisterIdentity, addr: SocketAddr) -> bool {
@@ -613,6 +648,22 @@ fn print_network_ps(report: &NetworkPsReport) {
         .filter(|sister| sister.status == "online")
         .count();
     println!("\n{} online / {} known", online, report.sisters.len());
+    if !report.active_streams.is_empty() {
+        println!("\nACTIVE STREAMS");
+        println!("────────────────────────────────");
+        for stream in &report.active_streams {
+            println!(
+                "  #{}  {} / {}  remote={}  tx={}  rx={}  age={}ms",
+                stream.stream_id,
+                stream.backend,
+                stream.route,
+                stream.remote_endpoint.as_deref().unwrap_or("-"),
+                stream.tx_bytes,
+                stream.rx_bytes,
+                stream.connected_for_ms,
+            );
+        }
+    }
 }
 
 fn init_tracing(format: &str) {
