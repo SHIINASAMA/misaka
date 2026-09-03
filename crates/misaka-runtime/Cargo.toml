@@ -1,0 +1,18 @@
+[package]
+name = "misaka-runtime"
+version.workspace = true
+edition.workspace = true
+description = "Misaka Network runtime - the life of one Sister"
+
+[dependencies]
+misaka-core = { path = "../misaka-core" }
+serde.workspace = true
+serde_json.workspace = true
+bincode.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+aes-gcm.workspace = true
+rand.workspace = true
+sysinfo.workspace = true
+simple-mdns.workspace = true
+futures-util.workspace = true

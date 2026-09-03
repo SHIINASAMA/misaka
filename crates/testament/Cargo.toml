@@ -1,0 +1,12 @@
+[package]
+name = "testament"
+version.workspace = true
+edition.workspace = true
+description = "Misaka Network external experiment harness - never part of the network"
+
+[dependencies]
+misaka-core = { path = "../misaka-core" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true

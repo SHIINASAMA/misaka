@@ -1,5 +1,5 @@
-use crate::peer::PeerState;
 use crate::state::LocalState;
+use misaka_core::PeerState;
 
 /// 调度器：根据 peer 状态选择一个目标 Sister 执行任务。
 pub struct Scheduler {

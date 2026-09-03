@@ -1,0 +1,17 @@
+[package]
+name = "misaka"
+version.workspace = true
+edition.workspace = true
+description = "Misaka Network CLI"
+
+[[bin]]
+name = "misaka"
+path = "src/main.rs"
+
+[dependencies]
+misaka-core = { path = "../misaka-core" }
+misaka-runtime = { path = "../misaka-runtime" }
+clap.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+sysinfo.workspace = true

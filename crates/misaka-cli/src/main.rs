@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
-use misaka::error::MisakaError;
-use misaka::identity::SisterIdentity;
-use misaka::node::SisterNode;
+use misaka_core::SisterIdentity;
+use misaka_runtime::error::MisakaError;
+use misaka_runtime::node::SisterNode;
 use std::net::SocketAddr;
 
 #[derive(Parser)]
@@ -141,7 +141,7 @@ async fn main() -> Result<(), MisakaError> {
                 })?;
 
             // 本机实时资源
-            let mut state = misaka::state::LocalState::new();
+            let mut state = misaka_runtime::state::LocalState::new();
             state.refresh(&mut sysinfo::System::new());
             let mem_gb = |b: u64| b as f64 / 1024.0 / 1024.0 / 1024.0;
 
@@ -164,7 +164,7 @@ async fn main() -> Result<(), MisakaError> {
             println!("  Queued   : {} job(s)", state.queued_jobs);
 
             // 附近 Sister (来自 peers.json)
-            let nearby = misaka::peer::PeerStateTable::load_from_file();
+            let nearby = misaka_core::PeerStateTable::load_from_file();
             println!("\nNearby Sisters");
             println!("────────────────────────────────");
             if nearby.is_empty() {
@@ -217,7 +217,7 @@ async fn main() -> Result<(), MisakaError> {
     Ok(())
 }
 
-fn print_result(result: &misaka::protocol::JobResultData) {
+fn print_result(result: &misaka_core::protocol::JobResultData) {
     println!("────────────────────────────────");
     println!(
         "Job {} completed by #{}{}",

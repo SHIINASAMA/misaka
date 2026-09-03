@@ -1,10 +1,10 @@
 use crate::crypto::Crypto;
-use crate::identity::SisterIdentity;
-use crate::peer::{PeerState, PeerStateTable};
-use crate::protocol::*;
 use crate::queue::JobQueue;
 use crate::scheduler::Scheduler;
 use crate::state::{LocalJob, LocalState, HEARTBEAT_INTERVAL, PEER_TIMEOUT};
+use misaka_core::protocol::*;
+use misaka_core::SisterIdentity;
+use misaka_core::{PeerState, PeerStateTable};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -569,7 +569,7 @@ impl SisterNode {
                     let _ = self.add_known_peer(addr).await;
                     // 记录 host/platform (handshake 会更新 version 等，这里补齐 host/platform)
                     let mut peers = self.peers.write().await;
-                    peers.upsert(crate::peer::PeerState {
+                    peers.upsert(misaka_core::PeerState {
                         id: peer_id,
                         nickname: nick,
                         hostname: host,
