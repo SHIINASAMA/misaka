@@ -7,5 +7,6 @@ attempts.
 
 The current runtime uses this for Direct TCP candidates only. Secure TLS
 candidate attempts still use their existing sequential fallback because their
-connector carries peer-specific certificate and server-name state. Relay and
-Iroh candidates remain future backend work.
+connector carries peer-specific certificate and server-name state. Relay
+candidates and Iroh candidates remain outside runtime resolver racing; Iroh
+currently exists only as the standalone backend spike.

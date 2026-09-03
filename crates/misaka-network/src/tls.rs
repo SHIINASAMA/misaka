@@ -115,7 +115,11 @@ impl TlsClient {
     }
 
     pub async fn connect(&self, endpoint: NetworkEndpoint) -> Result<NetworkStream> {
-        let NetworkEndpoint::Tcp(address) = endpoint;
+        let NetworkEndpoint::Tcp(address) = endpoint else {
+            return Err(NetworkError::UnsupportedEndpoint(
+                "TlsClient requires tcp:// endpoint".to_string(),
+            ));
+        };
         let stream = TcpStream::connect(address)
             .await
             .map_err(NetworkError::Connect)?;
@@ -150,7 +154,11 @@ impl TlsServer {
     }
 
     pub async fn listen(&self, endpoint: NetworkEndpoint) -> Result<NetworkListener> {
-        let NetworkEndpoint::Tcp(address) = endpoint;
+        let NetworkEndpoint::Tcp(address) = endpoint else {
+            return Err(NetworkError::UnsupportedEndpoint(
+                "TlsServer requires tcp:// endpoint".to_string(),
+            ));
+        };
         let listener = TcpListener::bind(address)
             .await
             .map_err(NetworkError::Bind)?;

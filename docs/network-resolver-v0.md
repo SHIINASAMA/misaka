@@ -13,9 +13,11 @@ EndpointCandidate
 LAN → direct → relay
 ```
 
-The current `NetworkEndpoint` variant is only TCP. Loopback/private TCP
-addresses rank as `Lan`; other TCP addresses rank as `Direct`; `Relay` is a
-reserved kind for the relay integration boundary. `SisterConnector` and
+Runtime resolver candidates currently use TCP. The transport layer also has
+an opt-in Iroh endpoint variant, but Iroh candidates are not yet resolved or
+ranked by this resolver. Loopback/private TCP addresses rank as `Lan`; other
+TCP addresses rank as `Direct`; `Relay` is a reserved kind for the relay
+integration boundary. `SisterConnector` and
 `SecureSisterConnector` use this ordering while preserving invalid-candidate
 diagnostics and sequential fallback.
 

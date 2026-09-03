@@ -26,7 +26,9 @@ pub struct EndpointCandidate {
 
 impl EndpointCandidate {
     pub fn tcp(endpoint: NetworkEndpoint) -> Self {
-        let NetworkEndpoint::Tcp(address) = endpoint;
+        let NetworkEndpoint::Tcp(address) = endpoint.clone() else {
+            panic!("EndpointCandidate::tcp requires a TCP endpoint");
+        };
         let kind = if address.ip().is_loopback() || is_private(address.ip()) {
             PathKind::Lan
         } else {
@@ -68,7 +70,7 @@ pub async fn race_connect<B: NetworkBackend>(
     let mut attempts = FuturesUnordered::new();
     for candidate in candidates {
         attempts.push(async move {
-            let result = backend.connect(candidate.endpoint).await;
+            let result = backend.connect(candidate.endpoint.clone()).await;
             (candidate, result)
         });
     }

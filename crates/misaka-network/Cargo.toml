@@ -12,6 +12,7 @@ tracing.workspace = true
 futures-util.workspace = true
 rustls.workspace = true
 tokio-rustls.workspace = true
+iroh.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

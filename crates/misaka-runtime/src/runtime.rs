@@ -309,15 +309,19 @@ async fn stream_accept_loop(node: SisterNode, listener: misaka_network::NetworkL
                     Ok((stream, addr)) => {
                         let session_node = node.clone();
                         sessions.spawn(async move {
-                            if let Err(error) = echo_stream(stream).await {
-                                tracing::debug!(
-                                    event = "stream_closed",
-                                    sister_id = session_node.identity.id.as_u64(),
-                                    peer_addr = %addr,
-                                    error = %error,
-                                    "network stream closed"
-                                );
-                            }
+                            let stats = stream.stats();
+                            let connected_for = stream.connected_for();
+                            let result = echo_stream(stream).await;
+                            tracing::debug!(
+                                event = "stream_closed",
+                                sister_id = session_node.identity.id.as_u64(),
+                                peer_addr = %addr,
+                                connected_for_ms = connected_for.as_millis() as u64,
+                                tx_bytes = stats.tx_bytes(),
+                                rx_bytes = stats.rx_bytes(),
+                                error = ?result.as_ref().err(),
+                                "network stream closed"
+                            );
                         });
                     }
                     Err(error) => {

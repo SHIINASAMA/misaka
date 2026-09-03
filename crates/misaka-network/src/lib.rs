@@ -5,8 +5,10 @@ use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
@@ -14,9 +16,12 @@ const HANDSHAKE_LEN: usize = MAGIC.len() + 1;
 pub const MAGIC: &[u8; 13] = b"MISAKA_STREAM";
 pub const PROTOCOL_VERSION: u8 = 1;
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+pub const IROH_ALPN: &[u8] = b"misaka/stream/iroh/0";
 
+pub mod iroh_backend;
 pub mod resolver;
 pub mod tls;
+pub use iroh_backend::IrohBackend;
 
 #[derive(Debug, Error)]
 pub enum NetworkError {
@@ -32,6 +37,10 @@ pub enum NetworkError {
     UnsupportedVersion { expected: u8, actual: u8 },
     #[error("I/O failed: {0}")]
     Io(#[source] io::Error),
+    #[error("unsupported network endpoint: {0}")]
+    UnsupportedEndpoint(String),
+    #[error("Iroh failed: {0}")]
+    Iroh(String),
     #[error("stream closed")]
     Closed,
 }
@@ -42,10 +51,11 @@ pub type Result<T> = std::result::Result<T, NetworkError>;
 ///
 /// Identity is deliberately not part of this value: a `SisterId` identifies
 /// a node, while an endpoint is only one connection candidate for it.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum NetworkEndpoint {
     Tcp(SocketAddr),
+    Iroh(iroh::EndpointAddr),
 }
 
 impl From<SocketAddr> for NetworkEndpoint {
@@ -58,6 +68,7 @@ impl std::fmt::Display for NetworkEndpoint {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Tcp(addr) => write!(formatter, "tcp://{addr}"),
+            Self::Iroh(addr) => write!(formatter, "iroh://{}", addr.id),
         }
     }
 }
@@ -66,12 +77,13 @@ impl std::str::FromStr for NetworkEndpoint {
     type Err = String;
 
     fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
-        let addr = value
-            .strip_prefix("tcp://")
-            .ok_or_else(|| format!("unsupported network endpoint: {value}"))?
-            .parse::<SocketAddr>()
-            .map_err(|error| format!("invalid TCP endpoint {value}: {error}"))?;
-        Ok(Self::Tcp(addr))
+        if let Some(value) = value.strip_prefix("tcp://") {
+            let addr = value
+                .parse::<SocketAddr>()
+                .map_err(|error| format!("invalid TCP endpoint {value}: {error}"))?;
+            return Ok(Self::Tcp(addr));
+        }
+        Err(format!("unsupported network endpoint: {value}"))
     }
 }
 
@@ -104,6 +116,35 @@ impl<T> AsyncStream for T where T: AsyncRead + AsyncWrite + Send + Unpin {}
 /// A validated, long-lived bidirectional byte stream.
 pub struct NetworkStream {
     inner: Box<dyn AsyncStream>,
+    stats: StreamStats,
+    started_at: Instant,
+}
+
+/// Counters collected at the transport-neutral stream boundary.
+#[derive(Clone, Default)]
+pub struct StreamStats {
+    tx_bytes: Arc<AtomicU64>,
+    rx_bytes: Arc<AtomicU64>,
+}
+
+impl std::fmt::Debug for StreamStats {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StreamStats")
+            .field("tx_bytes", &self.tx_bytes())
+            .field("rx_bytes", &self.rx_bytes())
+            .finish()
+    }
+}
+
+impl StreamStats {
+    pub fn tx_bytes(&self) -> u64 {
+        self.tx_bytes.load(Ordering::Relaxed)
+    }
+
+    pub fn rx_bytes(&self) -> u64 {
+        self.rx_bytes.load(Ordering::Relaxed)
+    }
 }
 
 impl NetworkStream {
@@ -111,7 +152,17 @@ impl NetworkStream {
     pub fn from_stream(stream: impl AsyncStream + 'static) -> Self {
         Self {
             inner: Box::new(stream),
+            stats: StreamStats::default(),
+            started_at: Instant::now(),
         }
+    }
+
+    pub fn stats(&self) -> StreamStats {
+        self.stats.clone()
+    }
+
+    pub fn connected_for(&self) -> Duration {
+        self.started_at.elapsed()
     }
 }
 
@@ -121,7 +172,15 @@ impl AsyncRead for NetworkStream {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        Pin::new(&mut *self.get_mut().inner).poll_read(cx, buf)
+        let this = self.get_mut();
+        let before = buf.filled().len();
+        let result = Pin::new(&mut *this.inner).poll_read(cx, buf);
+        if let Poll::Ready(Ok(())) = result {
+            this.stats
+                .rx_bytes
+                .fetch_add((buf.filled().len() - before) as u64, Ordering::Relaxed);
+        }
+        result
     }
 }
 
@@ -131,7 +190,14 @@ impl AsyncWrite for NetworkStream {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut *self.get_mut().inner).poll_write(cx, buf)
+        let this = self.get_mut();
+        let result = Pin::new(&mut *this.inner).poll_write(cx, buf);
+        if let Poll::Ready(Ok(written)) = result {
+            this.stats
+                .tx_bytes
+                .fetch_add(written as u64, Ordering::Relaxed);
+        }
+        result
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -220,7 +286,11 @@ mod direct_tcp {
     use tokio::net::{TcpListener, TcpStream};
 
     pub(super) async fn listen(endpoint: NetworkEndpoint) -> Result<NetworkListener> {
-        let NetworkEndpoint::Tcp(addr) = endpoint;
+        let NetworkEndpoint::Tcp(addr) = endpoint else {
+            return Err(NetworkError::UnsupportedEndpoint(
+                "DirectTcpBackend requires tcp:// endpoint".to_string(),
+            ));
+        };
         let listener = TcpListener::bind(addr).await.map_err(NetworkError::Bind)?;
         let bound = listener.local_addr().map_err(NetworkError::Bind)?;
         tracing::info!(event = "stream_listener_started", address = %bound, "network stream listener started");
@@ -230,7 +300,11 @@ mod direct_tcp {
     }
 
     pub(super) async fn connect(endpoint: NetworkEndpoint) -> Result<NetworkStream> {
-        let NetworkEndpoint::Tcp(addr) = endpoint;
+        let NetworkEndpoint::Tcp(addr) = endpoint else {
+            return Err(NetworkError::UnsupportedEndpoint(
+                "DirectTcpBackend requires tcp:// endpoint".to_string(),
+            ));
+        };
         let mut stream = TcpStream::connect(addr)
             .await
             .map_err(NetworkError::Connect)?;
@@ -316,10 +390,11 @@ mod direct_tcp {
 #[cfg(test)]
 mod tests {
     use super::{
-        connect, listen, ListenerFuture, NetworkEndpoint, NetworkError, NetworkListener,
-        NetworkListenerDriver, NetworkStream,
+        connect, listen, IrohBackend, ListenerFuture, NetworkBackend, NetworkEndpoint,
+        NetworkError, NetworkListener, NetworkListenerDriver, NetworkStream, IROH_ALPN,
     };
     use std::net::SocketAddr;
+    use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[tokio::test]
@@ -342,6 +417,67 @@ mod tests {
         client.read_exact(&mut output).await.unwrap();
         assert_eq!(&output, b"world");
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stream_stats_count_payload_bytes() {
+        let (left, mut right) = tokio::io::duplex(64);
+        let mut stream = NetworkStream::from_stream(left);
+        stream.write_all(b"hello").await.unwrap();
+        let mut received = [0u8; 5];
+        right.read_exact(&mut received).await.unwrap();
+        assert_eq!(stream.stats().tx_bytes(), 5);
+
+        right.write_all(b"world").await.unwrap();
+        let mut response = [0u8; 5];
+        stream.read_exact(&mut response).await.unwrap();
+        assert_eq!(stream.stats().rx_bytes(), 5);
+        assert!(stream.connected_for() < Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn iroh_backend_roundtrips_a_network_stream() {
+        let server_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .alpns(vec![IROH_ALPN.to_vec()])
+            .bind_addr("127.0.0.1:0")
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let client_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .alpns(vec![IROH_ALPN.to_vec()])
+            .bind_addr("127.0.0.1:0")
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let server = IrohBackend::new(server_endpoint, IROH_ALPN);
+        let client = IrohBackend::new(client_endpoint, IROH_ALPN);
+        let server_address = iroh::EndpointAddr::new(server.endpoint().id())
+            .with_ip_addr(server.endpoint().bound_sockets()[0]);
+        let listener = server
+            .listen(NetworkEndpoint::Iroh(server_address.clone()))
+            .await
+            .unwrap();
+        let accept_task = tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_secs(5), listener.accept())
+                .await
+                .unwrap()
+                .unwrap()
+        });
+        let mut outgoing = client
+            .connect(NetworkEndpoint::Iroh(server_address))
+            .await
+            .unwrap();
+        let (mut incoming, _) = accept_task.await.unwrap();
+
+        outgoing.write_all(b"iroh-ok").await.unwrap();
+        let mut received = [0u8; 7];
+        incoming.read_exact(&mut received).await.unwrap();
+        assert_eq!(&received, b"iroh-ok");
+
+        server.close().await;
+        client.close().await;
     }
 
     #[tokio::test]

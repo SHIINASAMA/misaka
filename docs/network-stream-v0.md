@@ -14,6 +14,7 @@ pub trait AsyncStream: AsyncRead + AsyncWrite + Send + Unpin {}
 
 pub enum NetworkEndpoint {
     Tcp(SocketAddr),
+    Iroh(iroh::EndpointAddr),
 }
 
 pub trait NetworkBackend {
@@ -31,14 +32,16 @@ pub async fn NetworkListener::accept() -> Result<(NetworkStream, SocketAddr)>;
 wrapper. `NetworkListener` delegates acceptance to a backend listener driver;
 neither abstraction stores TCP-specific types. After the fixed magic/version
 handshake, bytes are raw and are not Envelope-framed.
-The v0 implementation is `DirectTcpBackend`; the free functions remain
-compatibility wrappers for callers that do not need to select a backend yet
-and accept `SocketAddr` through `Into<NetworkEndpoint>`.
+The runtime's v0 implementation remains `DirectTcpBackend`; the free
+functions remain compatibility wrappers for callers that do not need to
+select a backend yet and accept `SocketAddr` through `Into<NetworkEndpoint>`.
+`IrohBackend` is an opt-in connectivity spike documented in
+`docs/iroh-backend-spike-v0.md` and is not selected by the runtime.
 
 `NetworkEndpoint` is deliberately separate from `SisterId`: the endpoint is a
-connection candidate, not an identity. Endpoint Model v0 contains only
-`NetworkEndpoint::Tcp`; Iroh, relay, and other endpoint variants are deferred
-until their respective backend designs exist.
+connection candidate, not an identity. It currently supports direct TCP and
+an opt-in Iroh `EndpointAddr`; relay endpoint selection and SisterId-to-Iroh
+address resolution remain future integration work.
 
 The initial addressing layer stores stream candidates separately from the
 control-plane address and exposes `SisterConnector::connect_to_sister(SisterId)`

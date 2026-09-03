@@ -534,3 +534,27 @@ metadata followed by fixed-size chunks, and verifies the receiver's result.
 - [x] Keep secure certificate-aware fallback behavior explicit.
 - [x] Add a deterministic racing test with one failing and one healthy TCP
   candidate.
+
+## Follow-up: Iroh Backend Spike v0
+
+This checkpoint intentionally adds only Iroh as a second backend. It proves
+that the transport-neutral stream contract can be backed by one authenticated
+QUIC bidirectional stream, without changing the runtime's Direct TCP default.
+
+### Task 32: Add the opt-in Iroh backend
+
+**Files:**
+- Modify: `Cargo.toml`
+- Modify: `Cargo.lock`
+- Modify: `crates/misaka-network/Cargo.toml`
+- Modify: `crates/misaka-network/src/lib.rs`
+- Create: `crates/misaka-network/src/iroh_backend.rs`
+- Create: `docs/iroh-backend-spike-v0.md`
+
+- [x] Add a real loopback test for two Iroh endpoints before implementation.
+- [x] Add `NetworkEndpoint::Iroh(EndpointAddr)` and the Iroh 1.1 backend.
+- [x] Adapt one Iroh bidirectional QUIC stream to `NetworkStream`.
+- [x] Preserve the existing Misaka stream handshake after Iroh ALPN.
+- [x] Keep runtime routing, resolver selection, relay policy, and Testament
+  scenarios unchanged.
+- [x] Run focused network tests, workspace checks, and update project memory.

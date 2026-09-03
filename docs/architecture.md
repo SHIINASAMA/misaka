@@ -133,9 +133,11 @@ mDNS alone.
 
 The optional `misaka-network` crate provides a separate Direct TCP
 `NetworkStream` with a minimal magic/version handshake and raw post-handshake
-Tokio byte IO. `NetworkBackend` is the transport boundary, with
-`DirectTcpBackend` as the only v0 implementation; the existing free functions
-remain compatibility wrappers. `SisterRuntime` binds its experimental stream
+Tokio byte IO. `NetworkBackend` is the transport boundary. `DirectTcpBackend`
+remains the runtime's default implementation and the existing free functions
+remain compatibility wrappers. An opt-in `IrohBackend` connectivity spike
+adapts one Iroh bidirectional QUIC stream to the same `NetworkStream` contract;
+it is not wired into runtime routing or resolver selection. `SisterRuntime` binds its experimental stream
 listener to loopback (`127.0.0.1`) on the independent `--stream-port`, and
 server-side handshakes time out after five seconds. It does not migrate or
 unify the control-plane `PeerTransport`, or route by SisterId. Stream
@@ -143,12 +145,14 @@ addresses and peer certificates are stored separately as connection
 candidates and trust material; secure TLS is opt-in until the operator
 provisions the trust set.
 
-Endpoint Model v0 introduces `NetworkEndpoint::Tcp(SocketAddr)` at the
-backend boundary. This endpoint is a connection candidate and is deliberately
-distinct from `SisterId`; SisterId resolution and persisted stream endpoint
+Endpoint Model v0 introduces `NetworkEndpoint::Tcp(SocketAddr)` and the
+opt-in `NetworkEndpoint::Iroh(EndpointAddr)` at the backend boundary. These
+values are connection candidates and are deliberately distinct from
+`SisterId`; SisterId resolution and persisted stream endpoint
 knowledge are separate from the legacy control endpoint. `SisterConnector`
-resolves stored stream candidates by `SisterId` and tries them in order; it
-does not retry, recover, authenticate, or own a long-lived session yet.
+resolves stored stream candidates by `SisterId` and tries TCP candidates in
+order; it does not yet resolve Iroh candidates, retry, recover, authenticate at
+the application layer, or own a long-lived session.
 
 The v0 runtime echo loop exists only to validate long-lived bidirectional
 streams and uses bounded buffers. The stream is intentionally insecure and is

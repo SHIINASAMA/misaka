@@ -805,6 +805,7 @@ async fn serve_tunnel(
         tokio::select! {
             accepted = listener.accept() => {
                 let (local, _) = accepted.map_err(|error| format!("accept tunnel client: {error}"))?;
+                let endpoint = endpoint.clone();
                 let peer_certificate = peer_certificate.clone();
                 tokio::spawn(async move {
                     if let Err(error) = proxy_tunnel(local, endpoint, sister_id, peer_certificate.as_deref(), remote).await {

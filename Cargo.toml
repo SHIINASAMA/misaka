@@ -30,4 +30,5 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 rustls = "0.23"
 tokio-rustls = "0.26"
 rcgen = "0.13"
+iroh = { version = "1.1", default-features = false, features = ["tls-aws-lc-rs"] }
 clap = { version = "4", features = ["derive"] }
