@@ -35,6 +35,7 @@ pub struct SpawnConfig<'a> {
     pub alias: &'a str,
     pub nickname: &'a str,
     pub listen_port: u16,
+    pub stream_port: u16,
     pub introspect_port: u16,
     pub binary: &'a Path,
     pub peers: &'a [SocketAddr],
@@ -134,6 +135,7 @@ pub fn build_spawn(config: SpawnConfig<'_>) -> (SisterEntry, Command, RestartSpe
         alias,
         nickname,
         listen_port,
+        stream_port,
         introspect_port,
         binary,
         peers,
@@ -152,6 +154,8 @@ pub fn build_spawn(config: SpawnConfig<'_>) -> (SisterEntry, Command, RestartSpe
         "start".into(),
         "--port".into(),
         listen_port.to_string(),
+        "--stream-port".into(),
+        stream_port.to_string(),
         "--nickname".into(),
         nickname.to_string(),
         "--log-format".into(),
@@ -180,6 +184,7 @@ pub fn build_spawn(config: SpawnConfig<'_>) -> (SisterEntry, Command, RestartSpe
         id: None,
         pid: None,
         listen_addr: format!("127.0.0.1:{}", listen_port),
+        stream_addr: format!("127.0.0.1:{}", stream_port),
         introspection_addr: Some(format!("127.0.0.1:{}", introspect_port)),
         config_dir: config_dir.to_string_lossy().to_string(),
         stdout_log: stdout_log.to_string_lossy().to_string(),
@@ -269,6 +274,9 @@ pub fn command_for_entry(entry: &SisterEntry, fallback_binary: &Path) -> std::io
         "--introspect".to_string(),
         introspect_port.to_string(),
     ];
+    if let Some(stream_port) = stream_port_from_entry(entry)? {
+        args.splice(3..3, ["--stream-port".to_string(), stream_port.to_string()]);
+    }
     for peer in &entry.peer_addrs {
         args.push("--peer".to_string());
         args.push(peer.clone());
@@ -358,11 +366,25 @@ fn command_args_for_entry(entry: &SisterEntry) -> std::io::Result<Vec<String>> {
         "--introspect".into(),
         introspect_port.to_string(),
     ];
+    if let Some(stream_port) = stream_port_from_entry(entry)? {
+        args.splice(3..3, ["--stream-port".into(), stream_port.to_string()]);
+    }
     for peer in &entry.peer_addrs {
         args.push("--peer".into());
         args.push(peer.clone());
     }
     Ok(args)
+}
+
+fn stream_port_from_entry(entry: &SisterEntry) -> std::io::Result<Option<u16>> {
+    if entry.stream_addr.is_empty() {
+        return Ok(None);
+    }
+    let addr = entry
+        .stream_addr
+        .parse::<SocketAddr>()
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    Ok(Some(addr.port()))
 }
 
 impl SisterProcess {
@@ -566,4 +588,46 @@ fn request_stop(child: &mut Child) {
 /// 读取某 Sister 的 stdout.log 尾部 (供 logs 命令)。
 pub fn read_stdout(path: &str) -> String {
     std::fs::read_to_string(path).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_spawn, command_for_entry, SpawnConfig};
+    use crate::types::RunLayout;
+    use std::path::PathBuf;
+
+    #[test]
+    fn spawn_metadata_and_restart_command_keep_stream_port() {
+        let root = PathBuf::from("target/testament-stream-metadata");
+        let layout = RunLayout {
+            root: root.clone(),
+            manifest_path: root.join("manifest.json"),
+            report_path: root.join("report.json"),
+            events_path: root.join("events.jsonl"),
+            sisters_dir: root.join("sisters"),
+        };
+        let (entry, _, _) = build_spawn(SpawnConfig {
+            layout: &layout,
+            alias: "s1",
+            nickname: "test",
+            listen_port: 31700,
+            stream_port: 31701,
+            introspect_port: 31702,
+            binary: PathBuf::from("/bin/echo").as_path(),
+            peers: &[],
+            discovery: "manual",
+            heartbeat: 2,
+            peer_timeout: 8,
+        });
+
+        assert_eq!(entry.stream_addr, "127.0.0.1:31701");
+        let command = command_for_entry(&entry, PathBuf::from("/bin/echo").as_path()).unwrap();
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--stream-port", "31701"]));
+    }
 }

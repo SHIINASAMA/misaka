@@ -104,6 +104,8 @@ pub struct SisterEntry {
     pub id: Option<u64>, // 启动后经 introspection 查询得到
     pub pid: Option<u32>,
     pub listen_addr: String,
+    #[serde(default)]
+    pub stream_addr: String,
     pub introspection_addr: Option<String>,
     pub config_dir: String,
     pub stdout_log: String,

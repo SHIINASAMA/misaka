@@ -10,6 +10,7 @@ Build the executable used by the harness, then run the deterministic scenario su
 cargo build -p misaka
 cargo run -p testament -- verify
 cargo run -p testament -- verify --json
+cargo run -p testament -- network-verify --json
 ```
 
 The suite currently contains:
@@ -130,6 +131,15 @@ The `.testament/` directory is ignored by Git. Logs are diagnostic artifacts onl
 ```
 
 `verify` writes a `SuiteReport` aggregate (with per-scenario counts) to the run's `report.json`, plus each scenario's own report under its `sisters/<scenario>/` directory.
+
+## Network Stream v0 suite
+
+`network-verify` launches isolated real Sisters with separate control,
+stream, and introspection ports. It runs N01–N06: connect, bidirectional
+exchange, sustained single-connection exchange, a 64 MiB bounded-buffer
+stream, remote disconnect, and restart followed by a new stream. Testament
+asserts command results and process behavior; it does not import or execute
+`misaka-network` in-process.
 
 ## CI gate
 

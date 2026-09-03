@@ -1,0 +1,10 @@
+[package]
+name = "misaka-network"
+version.workspace = true
+edition.workspace = true
+description = "Misaka Network stream primitives"
+
+[dependencies]
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true

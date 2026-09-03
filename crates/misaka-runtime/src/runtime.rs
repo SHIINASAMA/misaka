@@ -10,6 +10,7 @@ use crate::shutdown::Shutdown;
 use misaka_core::SisterIdentity;
 use std::collections::HashSet;
 use std::net::SocketAddr;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::task::{JoinHandle, JoinSet};
 
@@ -17,6 +18,7 @@ use tokio::task::{JoinHandle, JoinSet};
 pub struct SisterRuntime {
     node: SisterNode,
     listener: TcpListener,
+    stream_listener: Option<misaka_network::NetworkListener>,
     shutdown: Shutdown,
     configured_peers: Vec<SocketAddr>,
 }
@@ -32,6 +34,7 @@ impl SisterRuntime {
     ) -> crate::Result<Self> {
         let advertise_host = config.advertise_host;
         let introspection_addr = config.introspection_addr;
+        let stream_port = config.stream_port;
         let shutdown = Shutdown::new();
         let mut node = SisterNode::new(identity, encryption_key, config);
         node.set_shutdown_token(shutdown.token());
@@ -48,6 +51,14 @@ impl SisterRuntime {
             );
         }
         let listener = node.start_listener().await?;
+        let stream_listener = match stream_port {
+            Some(port) => Some(
+                misaka_network::listen(format!("0.0.0.0:{port}").parse()?)
+                    .await
+                    .map_err(|error| crate::Error::Network(error.to_string()))?,
+            ),
+            None => None,
+        };
 
         // Configured peers are connected after `run` starts accepting inbound
         // sockets. Connecting synchronously here can deadlock when two fresh
@@ -55,6 +66,7 @@ impl SisterRuntime {
         Ok(Self {
             node,
             listener,
+            stream_listener,
             shutdown,
             configured_peers: peers,
         })
@@ -65,16 +77,25 @@ impl SisterRuntime {
         self.shutdown.clone()
     }
 
+    /// Return the loopback address for the optional experimental stream listener.
+    pub fn stream_addr(&self) -> Option<SocketAddr> {
+        self.stream_listener.as_ref().map(|listener| {
+            let port = listener.local_addr().port();
+            format!("127.0.0.1:{port}").parse().unwrap()
+        })
+    }
+
     /// Start discovery, state exchange, execution, cleanup, and work stealing.
     /// Returns after the shared shutdown handle is cancelled.
     pub async fn run(self) -> crate::Result<()> {
         let SisterRuntime {
             node,
             listener,
+            stream_listener,
             shutdown: _shutdown,
             configured_peers,
         } = self;
-        let background = spawn_background_tasks(&node, configured_peers);
+        let background = spawn_background_tasks(&node, configured_peers, stream_listener);
         let mut inbound = JoinSet::new();
         let mut runtime_error = None;
 
@@ -193,6 +214,7 @@ async fn configured_peer_loop(node: SisterNode, peers: Vec<SocketAddr>) {
 fn spawn_background_tasks(
     node: &SisterNode,
     configured_peers: Vec<SocketAddr>,
+    stream_listener: Option<misaka_network::NetworkListener>,
 ) -> Vec<JoinHandle<()>> {
     let mut tasks = Vec::new();
     if !configured_peers.is_empty() {
@@ -235,7 +257,62 @@ fn spawn_background_tasks(
     });
 
     tasks.extend([discovery, state, cleanup, executor, stealing]);
+    if let Some(listener) = stream_listener {
+        let stream_node = node.clone();
+        tasks.push(tokio::spawn(async move {
+            stream_accept_loop(stream_node, listener).await;
+        }));
+    }
     tasks
+}
+
+async fn stream_accept_loop(node: SisterNode, listener: misaka_network::NetworkListener) {
+    let mut sessions = JoinSet::new();
+    loop {
+        tokio::select! {
+            _ = node.shutdown.cancelled() => break,
+            accepted = listener.accept() => {
+                match accepted {
+                    Ok((stream, addr)) => {
+                        let session_node = node.clone();
+                        sessions.spawn(async move {
+                            if let Err(error) = echo_stream(stream).await {
+                                tracing::debug!(
+                                    event = "stream_closed",
+                                    sister_id = session_node.identity.id.as_u64(),
+                                    peer_addr = %addr,
+                                    error = %error,
+                                    "network stream closed"
+                                );
+                            }
+                        });
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            event = "stream_handshake_failed",
+                            sister_id = node.identity.id.as_u64(),
+                            error = %error,
+                            "network stream handshake failed"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    sessions.abort_all();
+    while sessions.join_next().await.is_some() {}
+}
+
+async fn echo_stream(mut stream: misaka_network::NetworkStream) -> std::io::Result<()> {
+    stream.write_all(b"world").await?;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = stream.read(&mut buffer).await?;
+        if read == 0 {
+            return Ok(());
+        }
+        stream.write_all(&buffer[..read]).await?;
+    }
 }
 
 /// Default development encryption key shared by the current toy protocol.
@@ -247,4 +324,52 @@ pub fn default_encryption_key() -> [u8; 32] {
     let seed = b"misaka_network_default_key_";
     key[..seed.len()].copy_from_slice(seed);
     key
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SisterRuntime;
+    use crate::config::{DiscoveryMode, RuntimeConfig};
+    use crate::runtime::default_encryption_key;
+    use misaka_core::SisterIdentity;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn optional_stream_listener_accepts_and_echoes_a_valid_stream() {
+        let runtime = SisterRuntime::new(
+            SisterIdentity::new(
+                1,
+                "test".into(),
+                "host".into(),
+                "test".into(),
+                "0.1".into(),
+                0,
+            ),
+            default_encryption_key(),
+            RuntimeConfig {
+                listen_port: 0,
+                stream_port: Some(0),
+                discovery: DiscoveryMode::Off,
+                ..Default::default()
+            },
+            vec![],
+        )
+        .await
+        .unwrap();
+        let stream_addr = runtime.stream_addr().unwrap();
+        let shutdown = runtime.shutdown();
+        let task = tokio::spawn(runtime.run());
+
+        let mut stream = misaka_network::connect(stream_addr).await.unwrap();
+        let mut greeting = [0u8; 5];
+        stream.read_exact(&mut greeting).await.unwrap();
+        assert_eq!(&greeting, b"world");
+        stream.write_all(b"hello").await.unwrap();
+        let mut echo = [0u8; 5];
+        stream.read_exact(&mut echo).await.unwrap();
+        assert_eq!(&echo, b"hello");
+
+        shutdown.cancel();
+        task.await.unwrap().unwrap();
+    }
 }

@@ -6,6 +6,7 @@ description = "Misaka Network runtime - the life of one Sister"
 
 [dependencies]
 misaka-core = { path = "../misaka-core" }
+misaka-network = { path = "../misaka-network" }
 serde.workspace = true
 serde_json.workspace = true
 bincode.workspace = true

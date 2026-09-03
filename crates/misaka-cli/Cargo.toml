@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 misaka-core = { path = "../misaka-core" }
 misaka-runtime = { path = "../misaka-runtime" }
+misaka-network = { path = "../misaka-network" }
 bincode.workspace = true
 serde.workspace = true
 clap.workspace = true

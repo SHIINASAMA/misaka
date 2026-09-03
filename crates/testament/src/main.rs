@@ -4,7 +4,7 @@ use testament::run_manager::{
     clear_current_run, create_run, layout_for_run, resolve_run_id, run_root, runs_dir,
     set_current_run,
 };
-use testament::scenario::{scenarios, Context};
+use testament::scenario::{network_scenarios, scenarios, Context, ScenarioDef};
 use testament::types::{Manifest, RunLayout, SisterEntry};
 
 #[derive(Parser)]
@@ -83,6 +83,12 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Run the Network Stream v0 black-box scenarios (N01-N06).
+    #[command(name = "network-verify")]
+    NetworkVerify {
+        #[arg(long)]
+        json: bool,
+    },
     /// Run the Operator UX v1 black-box smoke suite (O01-O07).
     #[command(name = "operator-verify")]
     OperatorVerify,
@@ -95,6 +101,9 @@ fn main() {
     let cli = Cli::parse();
     let code = match cli.command {
         Command::Verify { json } => verify(json),
+        Command::NetworkVerify { json } => {
+            verify_definitions(json, network_scenarios(), "network stream scenarios")
+        }
         Command::Run { scenario, json } => run_one(&scenario, json),
         Command::Up { sisters, json } => up(sisters, json),
         Command::Status { run_id, run, json } => status(run.as_deref().or(run_id.as_deref()), json),
@@ -111,6 +120,10 @@ fn main() {
 }
 
 fn verify(json: bool) -> i32 {
+    verify_definitions(json, scenarios(), "scenarios")
+}
+
+fn verify_definitions(json: bool, definitions: Vec<ScenarioDef>, label: &str) -> i32 {
     let (run_id, layout) = match create_run() {
         Ok(x) => x,
         Err(e) => {
@@ -119,7 +132,7 @@ fn verify(json: bool) -> i32 {
         }
     };
     if !json {
-        println!("[testament] run {} — verifying scenarios", run_id);
+        println!("[testament] run {} — verifying {}", run_id, label);
     }
 
     let mut worst = 0;
@@ -132,7 +145,6 @@ fn verify(json: bool) -> i32 {
         skipped: 0,
         exit_code: 0,
     };
-    let definitions = scenarios();
     let mut manifest_sisters = Vec::new();
     for def in definitions {
         let mut scenario_layout = layout.clone();

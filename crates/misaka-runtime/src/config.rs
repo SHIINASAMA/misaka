@@ -21,6 +21,8 @@ pub enum DiscoveryMode {
 pub struct RuntimeConfig {
     /// 监听端口
     pub listen_port: u16,
+    /// 实验性 Network Stream 监听端口 (None = 禁用)
+    pub stream_port: Option<u16>,
     /// 告知 peer 的对外地址 (None = 用 listen_port 在回环/本机)
     pub advertise_host: Option<IpAddr>,
     /// 数据目录 (persistent identity/peers)
@@ -53,6 +55,7 @@ impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
             listen_port: 31700,
+            stream_port: None,
             advertise_host: None,
             // 数据目录在 CLI 层通过 MISAKA_CONFIG_DIR 决定；这里放默认值
             data_dir: PathBuf::from("."),
@@ -66,5 +69,15 @@ impl Default for RuntimeConfig {
             discovery: DiscoveryMode::Mdns,
             introspection_addr: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RuntimeConfig;
+
+    #[test]
+    fn stream_listener_is_opt_in() {
+        assert_eq!(RuntimeConfig::default().stream_port, None);
     }
 }

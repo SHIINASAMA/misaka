@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/misaka-core",
+    "crates/misaka-network",
     "crates/misaka-runtime",
     "crates/misaka-cli",
     "crates/testament",

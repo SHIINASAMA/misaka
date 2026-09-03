@@ -27,6 +27,10 @@ enum Command {
         #[arg(long, default_value_t = 31700)]
         port: u16,
 
+        /// Experimental long-lived Network Stream port (0 disables it).
+        #[arg(long, default_value_t = 0)]
+        stream_port: u16,
+
         /// Known peer address; may be repeated (manual discovery).
         #[arg(long)]
         peer: Vec<String>,
@@ -58,6 +62,17 @@ enum Command {
         /// Read-only loopback introspection port (0 disables it).
         #[arg(long, default_value_t = 0)]
         introspect: u16,
+    },
+
+    /// Experimental Network Stream v0 black-box client.
+    StreamTest {
+        /// Stream endpoint to connect to.
+        #[arg(long)]
+        addr: SocketAddr,
+
+        /// Test mode: connect | bidirectional | sustained | large | hold.
+        #[arg(long, default_value = "connect")]
+        mode: String,
     },
 
     /// Update the local Sister nickname.
@@ -96,6 +111,7 @@ async fn main() -> Result<(), MisakaError> {
     match cli.command {
         Command::Start {
             port,
+            stream_port,
             peer,
             nickname,
             discovery,
@@ -136,6 +152,7 @@ async fn main() -> Result<(), MisakaError> {
             };
             let config = misaka_runtime::config::RuntimeConfig {
                 listen_port: port,
+                stream_port: (stream_port != 0).then_some(stream_port),
                 data_dir,
                 heartbeat_interval: std::time::Duration::from_secs(heartbeat),
                 peer_timeout: std::time::Duration::from_secs(peer_timeout),
@@ -162,6 +179,12 @@ async fn main() -> Result<(), MisakaError> {
             let result = runtime.run().await;
             signal_task.abort();
             result?;
+        }
+
+        Command::StreamTest { addr, mode } => {
+            run_stream_test(addr, &mode)
+                .await
+                .map_err(MisakaError::Other)?;
         }
 
         Command::Nickname { nickname } => {
@@ -408,6 +431,167 @@ fn print_result(result: &misaka_core::protocol::JobResultData) {
     }
 }
 
+const STREAM_CHUNK_SIZE: usize = 64 * 1024;
+const LARGE_STREAM_SIZE: u64 = 64 * 1024 * 1024;
+const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+const FNV_PRIME: u64 = 0x100000001b3;
+
+async fn run_stream_test(addr: SocketAddr, mode: &str) -> Result<(), String> {
+    let mut stream = tokio::time::timeout(Duration::from_secs(5), misaka_network::connect(addr))
+        .await
+        .map_err(|_| "stream connect timed out".to_string())?
+        .map_err(|error| error.to_string())?;
+
+    let mut greeting = [0u8; 5];
+    read_exact_timeout(&mut stream, &mut greeting).await?;
+    if greeting != *b"world" {
+        return Err(format!("unexpected stream greeting: {greeting:?}"));
+    }
+
+    match mode {
+        "connect" => Ok(()),
+        "bidirectional" => exchange(&mut stream, b"hello").await,
+        "sustained" => sustained(&mut stream).await,
+        "large" => large_stream(stream).await,
+        "hold" => {
+            exchange(&mut stream, b"hold-open").await?;
+            let mut buffer = [0u8; STREAM_CHUNK_SIZE];
+            loop {
+                let read = tokio::time::timeout(
+                    Duration::from_secs(10),
+                    tokio::io::AsyncReadExt::read(&mut stream, &mut buffer),
+                )
+                .await
+                .map_err(|_| "stream hold timed out".to_string())?
+                .map_err(|error| format!("stream hold read failed: {error}"))?;
+                if read == 0 {
+                    return Err("stream closed while hold mode was active".to_string());
+                }
+            }
+        }
+        other => Err(format!("unknown stream test mode: {other}")),
+    }
+}
+
+async fn exchange(
+    stream: &mut misaka_network::NetworkStream,
+    payload: &[u8],
+) -> Result<(), String> {
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::io::AsyncWriteExt::write_all(stream, payload),
+    )
+    .await
+    .map_err(|_| "stream write timed out".to_string())?
+    .map_err(|error| format!("stream write failed: {error}"))?;
+    let mut echoed = vec![0u8; payload.len()];
+    read_exact_timeout(stream, &mut echoed).await?;
+    if echoed != payload {
+        return Err("stream echo did not match payload".to_string());
+    }
+    Ok(())
+}
+
+async fn sustained(stream: &mut misaka_network::NetworkStream) -> Result<(), String> {
+    let payload = b"sustained-stream-message";
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+    let mut exchanges = 0u64;
+    while tokio::time::Instant::now() < deadline {
+        exchange(stream, payload).await?;
+        exchanges += 1;
+    }
+    if exchanges < 2 {
+        return Err("sustained stream completed fewer than two exchanges".to_string());
+    }
+    Ok(())
+}
+
+async fn large_stream(stream: misaka_network::NetworkStream) -> Result<(), String> {
+    let (mut reader, mut writer) = tokio::io::split(stream);
+    let writer_task = tokio::spawn(async move {
+        let mut buffer = [0u8; STREAM_CHUNK_SIZE];
+        let mut offset = 0u64;
+        let mut hash = FNV_OFFSET;
+        while offset < LARGE_STREAM_SIZE {
+            let size = (LARGE_STREAM_SIZE - offset).min(buffer.len() as u64) as usize;
+            fill_deterministic(&mut buffer[..size], offset);
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                tokio::io::AsyncWriteExt::write_all(&mut writer, &buffer[..size]),
+            )
+            .await
+            .map_err(|_| "large stream write timed out")?
+            .map_err(|error| format!("large stream write failed: {error}"))?;
+            hash = hash_update(hash, &buffer[..size]);
+            offset += size as u64;
+        }
+        tokio::io::AsyncWriteExt::shutdown(&mut writer)
+            .await
+            .map_err(|error| format!("large stream shutdown failed: {error}"))?;
+        Ok::<u64, String>(hash)
+    });
+
+    let mut buffer = [0u8; STREAM_CHUNK_SIZE];
+    let mut received = 0u64;
+    let mut hash = FNV_OFFSET;
+    while received < LARGE_STREAM_SIZE {
+        let read = tokio::time::timeout(
+            Duration::from_secs(10),
+            tokio::io::AsyncReadExt::read(&mut reader, &mut buffer),
+        )
+        .await
+        .map_err(|_| "large stream read timed out".to_string())?
+        .map_err(|error| format!("large stream read failed: {error}"))?;
+        if read == 0 {
+            return Err(format!("large stream ended after {received} bytes"));
+        }
+        hash = hash_update(hash, &buffer[..read]);
+        received += read as u64;
+    }
+    let sent_hash = writer_task
+        .await
+        .map_err(|error| format!("large stream writer task failed: {error}"))??;
+    if received != LARGE_STREAM_SIZE || hash != sent_hash {
+        return Err(format!(
+            "large stream verification failed: sent={LARGE_STREAM_SIZE}, received={received}, sent_hash={sent_hash}, received_hash={hash}"
+        ));
+    }
+    Ok(())
+}
+
+async fn read_exact_timeout(
+    stream: &mut (impl tokio::io::AsyncRead + Unpin),
+    buffer: &mut [u8],
+) -> Result<(), String> {
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::io::AsyncReadExt::read_exact(stream, buffer),
+    )
+    .await
+    .map_err(|_| "stream read timed out".to_string())?
+    .map(|_| ())
+    .map_err(|error| format!("stream read failed: {error}"))
+}
+
+fn fill_deterministic(buffer: &mut [u8], offset: u64) {
+    for (index, byte) in buffer.iter_mut().enumerate() {
+        *byte = ((offset + index as u64) % 251) as u8;
+    }
+}
+
+#[cfg(test)]
+fn deterministic_hash(bytes: &[u8]) -> u64 {
+    hash_update(FNV_OFFSET, bytes)
+}
+
+fn hash_update(mut hash: u64, bytes: &[u8]) -> u64 {
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
+
 /// Probe a peer address with a lightweight Misaka Hello handshake.
 fn check_online(addr: Option<SocketAddr>) -> bool {
     let Some(addr) = addr else { return false };
@@ -415,4 +599,44 @@ fn check_online(addr: Option<SocketAddr>) -> bool {
     use std::net::TcpStream;
     use std::time::Duration;
     TcpStream::connect_timeout(&addr, Duration::from_millis(800)).is_ok()
+}
+
+#[cfg(test)]
+mod stream_tests {
+    use super::{deterministic_hash, fill_deterministic, Cli, Command};
+    use clap::Parser;
+    use std::net::SocketAddr;
+
+    #[test]
+    fn stream_test_accepts_mode_and_address() {
+        let cli = Cli::try_parse_from([
+            "misaka",
+            "stream-test",
+            "--addr",
+            "127.0.0.1:31701",
+            "--mode",
+            "large",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::StreamTest {
+                addr,
+                mode
+            } if addr == "127.0.0.1:31701".parse::<SocketAddr>().unwrap() && mode == "large"
+        ));
+    }
+
+    #[test]
+    fn deterministic_payload_hash_is_chunk_boundary_independent() {
+        let mut first = vec![0u8; 8192];
+        let mut second = vec![0u8; 8192];
+        fill_deterministic(&mut first, 0);
+        fill_deterministic(&mut second, 0);
+        assert_eq!(deterministic_hash(&first), deterministic_hash(&second));
+        assert_ne!(
+            deterministic_hash(&first[..4096]),
+            deterministic_hash(&first[4096..])
+        );
+    }
 }

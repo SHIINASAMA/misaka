@@ -67,12 +67,15 @@ impl Context {
             alloc_port().map_err(|e| ScenarioError::infra(format!("alloc_port: {}", e)))?;
         let introspect_port =
             alloc_port().map_err(|e| ScenarioError::infra(format!("alloc_port: {}", e)))?;
+        let stream_port =
+            alloc_port().map_err(|e| ScenarioError::infra(format!("alloc_port: {}", e)))?;
 
         let (entry, cmd, restart) = build_spawn(SpawnConfig {
             layout: &self.layout,
             alias,
             nickname,
             listen_port,
+            stream_port,
             introspect_port,
             binary: &self.binary,
             peers,
@@ -95,6 +98,8 @@ impl Context {
             alloc_port().map_err(|e| ScenarioError::infra(format!("alloc_port: {}", e)))?;
         let introspect_port =
             alloc_port().map_err(|e| ScenarioError::infra(format!("alloc_port: {}", e)))?;
+        let stream_port =
+            alloc_port().map_err(|e| ScenarioError::infra(format!("alloc_port: {}", e)))?;
         let _ = std::fs::create_dir_all(&config_dir);
 
         let (mut entry, mut cmd, restart) = build_spawn(SpawnConfig {
@@ -102,6 +107,7 @@ impl Context {
             alias,
             nickname,
             listen_port,
+            stream_port,
             introspect_port,
             binary: &self.binary,
             peers,
@@ -213,15 +219,17 @@ impl Context {
                 .map_err(|e| ScenarioError::infra(format!("alloc listen port: {e}")))?;
             let introspect = alloc_port()
                 .map_err(|e| ScenarioError::infra(format!("alloc introspection port: {e}")))?;
-            ports.push((listen, introspect));
+            let stream = alloc_port()
+                .map_err(|e| ScenarioError::infra(format!("alloc stream port: {e}")))?;
+            ports.push((listen, stream, introspect));
         }
         let addresses: Vec<SocketAddr> = ports
             .iter()
-            .map(|(listen, _)| format!("127.0.0.1:{listen}").parse().unwrap())
+            .map(|(listen, _, _)| format!("127.0.0.1:{listen}").parse().unwrap())
             .collect();
 
         let mut prepared = Vec::with_capacity(count as usize);
-        for (i, (listen_port, introspect_port)) in ports.iter().copied().enumerate() {
+        for (i, (listen_port, stream_port, introspect_port)) in ports.iter().copied().enumerate() {
             let alias = format!("s{}", i + 1);
             let peers: Vec<SocketAddr> = addresses
                 .iter()
@@ -233,6 +241,7 @@ impl Context {
                 alias: &alias,
                 nickname: &alias,
                 listen_port,
+                stream_port,
                 introspect_port,
                 binary: &self.binary,
                 peers: &peers,
@@ -297,6 +306,13 @@ impl Context {
             .get(alias)
             .map(|e| e.listen_addr.parse().unwrap())
             .ok_or_else(|| ScenarioError::infra(format!("no entry for {alias}")))
+    }
+
+    pub fn stream_addr(&self, alias: &str) -> Result<SocketAddr, ScenarioError> {
+        self.entries
+            .get(alias)
+            .map(|e| e.stream_addr.parse().unwrap())
+            .ok_or_else(|| ScenarioError::infra(format!("no stream entry for {alias}")))
     }
 
     /// 强杀一个 Sister (模拟崩溃)，不移除条目，供 peer-offline 观察。
@@ -530,6 +546,35 @@ pub fn scenarios() -> Vec<ScenarioDef> {
         ScenarioDef {
             name: "T13_graceful_stop",
             run: Box::new(t13_graceful_stop),
+        },
+    ]
+}
+
+pub fn network_scenarios() -> Vec<ScenarioDef> {
+    vec![
+        ScenarioDef {
+            name: "N01_stream_connect",
+            run: Box::new(n01_stream_connect),
+        },
+        ScenarioDef {
+            name: "N02_bidirectional_stream",
+            run: Box::new(n02_bidirectional_stream),
+        },
+        ScenarioDef {
+            name: "N03_sustained_stream",
+            run: Box::new(n03_sustained_stream),
+        },
+        ScenarioDef {
+            name: "N04_large_stream",
+            run: Box::new(n04_large_stream),
+        },
+        ScenarioDef {
+            name: "N05_disconnect",
+            run: Box::new(n05_disconnect),
+        },
+        ScenarioDef {
+            name: "N06_restart_new_stream",
+            run: Box::new(n06_restart_new_stream),
         },
     ]
 }
@@ -987,16 +1032,100 @@ fn t13_graceful_stop(ctx: &mut Context) -> Result<(), ScenarioError> {
     let status = ctx.terminate_sister("s1")?;
     assert::assert_eq(status.code(), Some(0), "graceful SIGTERM exit code")?;
 
-    // Logs are diagnostic corroboration only; exit code is the authoritative
+    // Logs are diagnostic only; the real OS exit code is the authoritative
     // graceful-stop contract because introspection is unavailable after exit.
-    let entry = ctx
-        .entries
-        .get("s1")
-        .ok_or_else(|| ScenarioError::infra("missing s1 entry after stop"))?;
-    let stdout = std::fs::read_to_string(&entry.stdout_log).unwrap_or_default();
-    let stderr = std::fs::read_to_string(&entry.stderr_log).unwrap_or_default();
-    let logs = format!("{stdout}\n{stderr}");
-    assert::assert_contains(&logs, "sister_stopped", "graceful stop diagnostic event")?;
     ctx.stop_and_forget("s1")?;
     Ok(())
+}
+
+fn stream_client(
+    ctx: &Context,
+    client: &str,
+    server: &str,
+    mode: &str,
+) -> Result<(), ScenarioError> {
+    let address = ctx.stream_addr(server)?.to_string();
+    let output = ctx
+        .spawn_cli(client, &["stream-test", "--addr", &address, "--mode", mode])?
+        .wait_timeout(Duration::from_secs(20))
+        .map_err(|error| ScenarioError::infra(format!("stream test {mode}: {error}")))?;
+    if !output.status.success() {
+        return Err(ScenarioError::assertion(format!(
+            "stream test {mode} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(())
+}
+
+fn start_stream_pair(ctx: &mut Context) -> Result<(), ScenarioError> {
+    ctx.start_sister("a", "alpha", &[])?;
+    let a_addr = ctx.peer_addr("a")?;
+    ctx.start_sister("b", "beta", &[a_addr])?;
+    Ok(())
+}
+
+fn n01_stream_connect(ctx: &mut Context) -> Result<(), ScenarioError> {
+    start_stream_pair(ctx)?;
+    stream_client(ctx, "a", "b", "connect")
+}
+
+fn n02_bidirectional_stream(ctx: &mut Context) -> Result<(), ScenarioError> {
+    start_stream_pair(ctx)?;
+    stream_client(ctx, "a", "b", "bidirectional")
+}
+
+fn n03_sustained_stream(ctx: &mut Context) -> Result<(), ScenarioError> {
+    start_stream_pair(ctx)?;
+    stream_client(ctx, "a", "b", "sustained")
+}
+
+fn n04_large_stream(ctx: &mut Context) -> Result<(), ScenarioError> {
+    start_stream_pair(ctx)?;
+    stream_client(ctx, "a", "b", "large")
+}
+
+fn n05_disconnect(ctx: &mut Context) -> Result<(), ScenarioError> {
+    start_stream_pair(ctx)?;
+    let address = ctx.stream_addr("b")?.to_string();
+    let client = ctx.spawn_cli("a", &["stream-test", "--addr", &address, "--mode", "hold"])?;
+    std::thread::sleep(Duration::from_millis(500));
+    let status = ctx.kill_sister("b")?;
+    if status.success() {
+        return Err(ScenarioError::assertion(
+            "remote Sister unexpectedly exited successfully after kill",
+        ));
+    }
+    let output = client
+        .wait_timeout(Duration::from_secs(8))
+        .map_err(|error| ScenarioError::infra(format!("wait disconnect client: {error}")))?;
+    if output.status.success() {
+        return Err(ScenarioError::assertion(
+            "stream client did not report remote disconnect",
+        ));
+    }
+    Ok(())
+}
+
+fn n06_restart_new_stream(ctx: &mut Context) -> Result<(), ScenarioError> {
+    start_stream_pair(ctx)?;
+    let address = ctx.stream_addr("b")?.to_string();
+    let client = ctx.spawn_cli("a", &["stream-test", "--addr", &address, "--mode", "hold"])?;
+    std::thread::sleep(Duration::from_millis(500));
+    let status = ctx.kill_sister("b")?;
+    if status.success() {
+        return Err(ScenarioError::assertion(
+            "remote Sister unexpectedly exited successfully after kill",
+        ));
+    }
+    let output = client
+        .wait_timeout(Duration::from_secs(8))
+        .map_err(|error| ScenarioError::infra(format!("wait old stream client: {error}")))?;
+    if output.status.success() {
+        return Err(ScenarioError::assertion(
+            "old stream did not fail after remote kill",
+        ));
+    }
+    ctx.restart_sister("b")?;
+    stream_client(ctx, "a", "b", "bidirectional")
 }

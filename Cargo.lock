@@ -443,6 +443,7 @@ dependencies = [
  "bincode",
  "clap",
  "misaka-core",
+ "misaka-network",
  "misaka-runtime",
  "serde",
  "serde_json",
@@ -464,6 +465,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "misaka-network"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "misaka-runtime"
 version = "0.1.0"
 dependencies = [
@@ -471,6 +481,7 @@ dependencies = [
  "bincode",
  "futures-util",
  "misaka-core",
+ "misaka-network",
  "rand",
  "serde",
  "serde_json",
