@@ -965,3 +965,15 @@ QUIC bidirectional stream, without changing the runtime's Direct TCP default.
   reuse, bounded materialization, and focused unit coverage.
 - [x] Keep the store filesystem-only and independent of peer discovery or the
   NetworkStream protocol.
+
+### Task 60: Use the content store for Transfer v2 finalization
+
+**Files:**
+- Modify: `crates/misaka-runtime/src/runtime.rs`
+
+- [x] Pass each Sister's local `data_dir/objects` root to Transfer v2,
+  retaining a destination-local fallback for direct unit callers.
+- [x] Commit verified v2 partial content before materializing the requested
+  destination and remove bitmap state only after successful materialization.
+- [x] Verify the same digest can finalize to two destinations while reusing one
+  canonical object.

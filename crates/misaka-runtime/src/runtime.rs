@@ -5,6 +5,7 @@
 //! cancellable background loops, and accepts inbound connections.
 
 use crate::config::{RuntimeConfig, StreamBackend};
+use crate::content_store::ContentStore;
 use crate::node::SisterNode;
 use crate::shutdown::Shutdown;
 use misaka_core::protocol::{
@@ -439,7 +440,8 @@ async fn log_and_echo_stream(
     let stats = stream.stats();
     let connected_for = stream.connected_for();
     let path = stream.path_info();
-    let result = echo_stream(stream).await;
+    let object_store_root = session_node.peers.data_dir().join("objects");
+    let result = echo_stream(stream, &object_store_root).await;
     tracing::debug!(
         event = "stream_closed",
         sister_id = session_node.identity.id.as_u64(),
@@ -457,7 +459,10 @@ async fn log_and_echo_stream(
     drop(registration);
 }
 
-async fn echo_stream(mut stream: misaka_network::NetworkStream) -> std::io::Result<()> {
+async fn echo_stream(
+    mut stream: misaka_network::NetworkStream,
+    object_store_root: &Path,
+) -> std::io::Result<()> {
     stream.write_all(b"world").await?;
     let mut preamble = [0u8; TRANSFER_MAGIC.len()];
     if stream.read_exact(&mut preamble).await.is_err() {
@@ -470,7 +475,7 @@ async fn echo_stream(mut stream: misaka_network::NetworkStream) -> std::io::Resu
         return receive_transfer_v1(stream).await;
     }
     if preamble == *TRANSFER_V2_MAGIC {
-        return receive_transfer_v2(stream).await;
+        return receive_transfer_v2_with_store(stream, Some(object_store_root.to_owned())).await;
     }
     if preamble == *TUNNEL_MAGIC {
         return receive_tunnel(stream).await;
@@ -712,7 +717,14 @@ struct TransferV2State {
 static TRANSFER_V2_LOCKS: OnceLock<std::sync::Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> =
     OnceLock::new();
 
-async fn receive_transfer_v2(mut stream: misaka_network::NetworkStream) -> std::io::Result<()> {
+async fn receive_transfer_v2(stream: misaka_network::NetworkStream) -> std::io::Result<()> {
+    receive_transfer_v2_with_store(stream, None).await
+}
+
+async fn receive_transfer_v2_with_store(
+    mut stream: misaka_network::NetworkStream,
+    store_root: Option<PathBuf>,
+) -> std::io::Result<()> {
     let request: TransferV2Request = read_bincode_frame(&mut stream, 1024 * 1024).await?;
     validate_transfer_v2_request(&request)?;
     let (part_path, state_path) = transfer_v2_paths(&request.destination);
@@ -808,7 +820,16 @@ async fn receive_transfer_v2(mut stream: misaka_network::NetworkStream) -> std::
                 )
                 .await;
             }
-            finalize_transfer_part(&part_path, &PathBuf::from(&request.destination)).await?;
+            let destination = PathBuf::from(&request.destination);
+            let fallback_store_root = part_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(".misaka-objects");
+            let store = ContentStore::new(store_root.unwrap_or(fallback_store_root));
+            store
+                .commit_verified_file(&part_path, request.digest)
+                .await?;
+            store.materialize(request.digest, &destination).await?;
             let _ = tokio::fs::remove_file(&state_path).await;
             write_bincode_frame(
                 &mut stream,
@@ -1103,6 +1124,7 @@ pub fn default_encryption_key() -> [u8; 32] {
 mod tests {
     use super::SisterRuntime;
     use crate::config::{DiscoveryMode, RuntimeConfig, StreamBackend, StreamSecurity};
+    use crate::content_store::ContentStore;
     use crate::runtime::default_encryption_key;
     use misaka_core::protocol::{
         transfer_content_digest, transfer_digest, TransferResult, TransferV1Ack, TransferV1Chunk,
@@ -1516,6 +1538,96 @@ mod tests {
             !std::path::PathBuf::from(format!("{}.misaka-part-v2", destination.display())).exists()
         );
         let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    async fn transfer_v2_finalization_reuses_one_content_object_for_two_destinations() {
+        let directory =
+            std::env::temp_dir().join(format!("misaka-transfer-store-{}", uuid::Uuid::new_v4()));
+        let store_root = directory.join("objects");
+        let payload = b"shared content object".repeat(1024);
+        let digest = transfer_content_digest(&payload);
+        let chunk_count = (payload.len() as u64).div_ceil(u64::from(TRANSFER_V1_CHUNK_SIZE));
+
+        for name in ["first.bin", "second.bin"] {
+            let destination = directory.join(name);
+            let base = TransferV2Request {
+                operation: TransferV2Operation::Prepare,
+                destination: destination.display().to_string(),
+                size: payload.len() as u64,
+                digest,
+                chunk_size: TRANSFER_V1_CHUNK_SIZE,
+                chunk_count,
+                index: 0,
+                offset: 0,
+                len: 0,
+                chunk_digest: [0; 32],
+            };
+
+            let (server_io, mut client_io) = tokio::io::duplex(1024 * 1024);
+            let server_task = tokio::spawn(super::receive_transfer_v2_with_store(
+                misaka_network::NetworkStream::from_stream(server_io),
+                Some(store_root.clone()),
+            ));
+            write_test_frame(&mut client_io, &base).await;
+            let resume: TransferV2Resume = read_test_frame(&mut client_io).await;
+            assert!(resume.completed_indices.is_empty());
+            drop(client_io);
+            server_task.await.unwrap().unwrap();
+
+            let (server_io, mut client_io) = tokio::io::duplex(1024 * 1024);
+            let server_task = tokio::spawn(super::receive_transfer_v2_with_store(
+                misaka_network::NetworkStream::from_stream(server_io),
+                Some(store_root.clone()),
+            ));
+            write_test_frame(
+                &mut client_io,
+                &TransferV2Request {
+                    operation: TransferV2Operation::Chunk,
+                    index: 0,
+                    offset: 0,
+                    len: payload.len() as u32,
+                    chunk_digest: transfer_digest(&payload),
+                    ..base.clone()
+                },
+            )
+            .await;
+            client_io.write_all(&payload).await.unwrap();
+            let ack: TransferV2Ack = read_test_frame(&mut client_io).await;
+            assert!(ack.accepted);
+            drop(client_io);
+            server_task.await.unwrap().unwrap();
+
+            let (server_io, mut client_io) = tokio::io::duplex(1024 * 1024);
+            let server_task = tokio::spawn(super::receive_transfer_v2_with_store(
+                misaka_network::NetworkStream::from_stream(server_io),
+                Some(store_root.clone()),
+            ));
+            write_test_frame(
+                &mut client_io,
+                &TransferV2Request {
+                    operation: TransferV2Operation::Finalize,
+                    ..base
+                },
+            )
+            .await;
+            let ack: TransferV2Ack = read_test_frame(&mut client_io).await;
+            assert!(ack.accepted);
+            assert!(ack.complete);
+            drop(client_io);
+            server_task.await.unwrap().unwrap();
+        }
+
+        assert!(ContentStore::new(&store_root).object_path(digest).exists());
+        assert_eq!(
+            tokio::fs::read(directory.join("first.bin")).await.unwrap(),
+            payload
+        );
+        assert_eq!(
+            tokio::fs::read(directory.join("second.bin")).await.unwrap(),
+            payload
+        );
+        let _ = tokio::fs::remove_dir_all(directory).await;
     }
 
     async fn write_test_frame<T: serde::Serialize>(

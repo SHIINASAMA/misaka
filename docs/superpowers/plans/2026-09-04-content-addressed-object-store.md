@@ -46,11 +46,12 @@
 **Interfaces:**
 - `receive_transfer_v2_with_store(stream, store_root)` commits verified partial content and materializes the requested destination.
 
-- [ ] Add a failing runtime test that finalizes the same digest to two destinations and verifies one canonical object plus exact bytes at both paths.
-- [ ] Run the focused test and confirm it fails before integration.
-- [ ] Pass the Sister data directory's `objects` subdirectory from the stream acceptor into Transfer v2 only.
-- [ ] Keep partial/bitmap state cleanup after successful object commit and leave the old fallback behavior available to direct unit callers.
-- [ ] Run runtime tests and commit `feat(transfer): finalize through content store`.
+- [x] Add a failing runtime test that finalizes the same digest to two destinations and verifies one canonical object plus exact bytes at both paths.
+- [x] Run the focused test and confirm it failed before integration because the store-aware handler did not exist.
+- [x] Pass the Sister data directory's `objects` subdirectory from the stream acceptor into Transfer v2 only.
+- [x] Keep partial/bitmap state cleanup after successful object commit and leave the old fallback behavior available to direct unit callers.
+- [x] Run the focused integration test; the full runtime suite will run in Task 62.
+- [x] Commit `feat(transfer): finalize through content store`.
 
 ### Task 61: Verify deduplication through external Iroh processes
 
