@@ -11,7 +11,7 @@ use crate::peer::PeerState;
 use crate::SisterIdentity;
 
 /// 资源快照 (来自本地 sysinfo 观测)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ResourceSnapshot {
     pub cpu_usage: f32,
     pub memory_total: u64,

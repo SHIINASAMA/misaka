@@ -68,11 +68,19 @@ fn verify(json: bool) -> i32 {
         }
     };
     if !json {
-        println!("[testament] run {} — verifying T01..T05", run_id);
+        println!("[testament] run {} — verifying scenarios", run_id);
     }
 
     let mut worst = 0;
-    let mut reports = Vec::new();
+    let mut suite = testament::types::SuiteReport {
+        run_id: run_id.clone(),
+        scenarios: Vec::new(),
+        passed: 0,
+        failed: 0,
+        infra_failed: 0,
+        skipped: 0,
+        exit_code: 0,
+    };
     let definitions = scenarios();
     let mut manifest_sisters = Vec::new();
     for def in definitions {
@@ -86,27 +94,42 @@ fn verify(json: bool) -> i32 {
         let mut ctx = Context::new(run_id.clone(), scenario_layout);
         let result = (def.run)(&mut ctx);
         let report = ctx.report(def.name, result);
-        if let Err(e) = testament::reporter::write_report(&layout.report_path, &report) {
-            eprintln!("testament: write report: {}", e);
-            worst = worst.max(2);
-        }
+
+        // 每个场景单独写到自己的 report 文件里
+        let scenario_report_path = layout.sisters_dir.join(def.name).join("report.json");
+        let _ = testament::reporter::write_report(&scenario_report_path, &report);
+
         let code = testament::reporter::exit_code_for(&report);
+        suite.count(&report);
         if !json {
             println!(
                 "[testament]   {} -> {}",
                 def.name,
-                if code == 0 { "passed" } else { "FAILED" }
+                match report.result.as_str() {
+                    "passed" => "passed",
+                    "skipped" => "skipped",
+                    "failed" => "FAILED",
+                    "infra_failed" => "INFRA-FAILED",
+                    other => other,
+                }
             );
         }
-        if code != 0 {
-            worst = worst.max(code);
-            if !json {
-                eprintln!("  {}", report.assertion.clone().unwrap_or_default());
-            }
+        if code > worst {
+            worst = code;
         }
-        reports.push(report);
+        if code != 0 && !json {
+            eprintln!("  {}", report.assertion.clone().unwrap_or_default());
+        }
+        suite.scenarios.push(report);
         ctx.teardown();
         manifest_sisters.extend(ctx.manifest.sisters.clone());
+    }
+    suite.exit_code = worst;
+
+    // 写聚合 suite report 到 run 根目录的 report.json (保留向后兼容的 §21 路径)
+    if let Err(e) = testament::reporter::write_suite_report(&layout.report_path, &suite) {
+        eprintln!("testament: write suite report: {}", e);
+        worst = worst.max(2);
     }
     let manifest = Manifest {
         run_id: run_id.clone(),
@@ -119,7 +142,7 @@ fn verify(json: bool) -> i32 {
     if json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&reports).unwrap_or_else(|e| {
+            serde_json::to_string_pretty(&suite).unwrap_or_else(|e| {
                 format!("{{\"error\":\"failed to encode reports: {}\"}}", e)
             })
         );

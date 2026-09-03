@@ -5,7 +5,7 @@
 //! 2 = Testament/configuration error
 //! 3 = Sister startup/runtime infrastructure failure
 
-use crate::types::{Artifacts, Report};
+use crate::types::{Artifacts, Report, ScenarioError, SuiteReport};
 
 pub fn write_report(path: &std::path::Path, report: &Report) -> std::io::Result<()> {
     let json =
@@ -13,10 +13,17 @@ pub fn write_report(path: &std::path::Path, report: &Report) -> std::io::Result<
     std::fs::write(path, json)
 }
 
+pub fn write_suite_report(path: &std::path::Path, suite: &SuiteReport) -> std::io::Result<()> {
+    let json =
+        serde_json::to_string_pretty(suite).map_err(|e| std::io::Error::other(e.to_string()))?;
+    std::fs::write(path, json)
+}
+
 pub fn exit_code_for(report: &Report) -> i32 {
     match report.result.as_str() {
-        "passed" => 0,
+        "passed" | "skipped" => 0,
         "failed" => 1,
+        "infra_failed" => 3,
         _ => 2,
     }
 }
@@ -49,6 +56,25 @@ pub fn passed_report(scenario: &str, run_id: &str, artifacts: Artifacts) -> Repo
         result: "passed".to_string(),
         failed_step: None,
         assertion: None,
+        expected: None,
+        actual: None,
+        run_id: run_id.to_string(),
+        artifacts,
+    }
+}
+
+/// 从失败的场景错误构造 report，保留其类型 (assertion vs infra)。
+pub fn report_from_error(
+    scenario: &str,
+    run_id: &str,
+    artifacts: Artifacts,
+    error: &ScenarioError,
+) -> Report {
+    Report {
+        scenario: scenario.to_string(),
+        result: error.result_label().to_string(),
+        failed_step: None,
+        assertion: Some(error.message().to_string()),
         expected: None,
         actual: None,
         run_id: run_id.to_string(),

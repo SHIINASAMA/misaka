@@ -1,11 +1,35 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// Testament 场景运行结果契约 (§21)
+/// 完整 verify 运行的结果 (所有场景聚合)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SuiteReport {
+    pub run_id: String,
+    pub scenarios: Vec<Report>,
+    pub passed: usize,
+    pub failed: usize,
+    pub infra_failed: usize,
+    pub skipped: usize,
+    pub exit_code: i32,
+}
+
+impl SuiteReport {
+    pub fn count(&mut self, report: &Report) {
+        match report.result.as_str() {
+            "passed" => self.passed += 1,
+            "failed" => self.failed += 1,
+            "infra_failed" => self.infra_failed += 1,
+            "skipped" => self.skipped += 1,
+            _ => {}
+        }
+    }
+}
+
+/// 场景运行结果契约 (§21)。`result` 用 "passed" | "failed" | "infra_failed" | "skipped"。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Report {
     pub scenario: String,
-    pub result: String, // "passed" | "failed"
+    pub result: String,
     pub failed_step: Option<usize>,
     pub assertion: Option<String>,
     pub expected: Option<String>,
@@ -13,6 +37,52 @@ pub struct Report {
     pub run_id: String,
     pub artifacts: Artifacts,
 }
+
+/// 场景失败的分类，决定最终 exit code。
+#[derive(Debug, Clone)]
+pub enum ScenarioError {
+    /// 断言不满足：被测行为与预期不符 (exit 1)
+    Assertion(String),
+    /// 基础设施/启动失败：进程无法启动或未就绪，无法判定行为 (exit 3)
+    Infra(String),
+    /// 环境不可用，跳过 (exit 0) —— 例如 CI 上无多播 mDNS
+    Skipped(String),
+}
+
+impl ScenarioError {
+    pub fn assertion(msg: impl Into<String>) -> Self {
+        Self::Assertion(msg.into())
+    }
+    pub fn infra(msg: impl Into<String>) -> Self {
+        Self::Infra(msg.into())
+    }
+    pub fn skipped(msg: impl Into<String>) -> Self {
+        Self::Skipped(msg.into())
+    }
+
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Assertion(m) | Self::Infra(m) | Self::Skipped(m) => m,
+        }
+    }
+
+    /// 对应的报告 result 字符串。
+    pub fn result_label(&self) -> &'static str {
+        match self {
+            Self::Assertion(_) => "failed",
+            Self::Infra(_) => "infra_failed",
+            Self::Skipped(_) => "skipped",
+        }
+    }
+}
+
+impl std::fmt::Display for ScenarioError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message())
+    }
+}
+
+impl std::error::Error for ScenarioError {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Artifacts {

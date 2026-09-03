@@ -1239,7 +1239,7 @@ remaining two continue communicating
 remaining node can still execute jobs
 ```
 
-### T11 — Testament Independence
+### T11 — Testament Independence (dedicated integration test)
 
 ```text
 testament up 3
@@ -1247,11 +1247,7 @@ terminate Testament controller
 verify Sisters remain alive
 ```
 
-This may initially be a dedicated integration test rather than a normal scenario.
-
-### T12 — mDNS Discovery
-
-Separate, environment-sensitive test:
+### T12 — mDNS Discovery (environment-sensitive)
 
 ```text
 start two Sisters with mdns
@@ -1259,7 +1255,9 @@ no explicit peer addresses
 eventually discover each other
 ```
 
-Mark this test separately from deterministic core E2E tests.
+This scenario is skipped when mDNS/multicast is unavailable (e.g. CI
+sandbox without multicast), reported as `skipped` rather than failing the
+deterministic suite.
 
 ---
 
