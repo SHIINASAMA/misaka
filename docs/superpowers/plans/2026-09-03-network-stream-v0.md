@@ -903,3 +903,14 @@ QUIC bidirectional stream, without changing the runtime's Direct TCP default.
   contracts for prepare, chunk, and finalize streams.
 - [x] Keep Transfer v1 wire behavior unchanged and cover the new contract with
   a bincode round-trip test.
+
+### Task 55: Implement durable out-of-order Transfer v2 chunks
+
+**Files:**
+- Modify: `crates/misaka-runtime/src/runtime.rs`
+
+- [x] Add `MTR2` dispatch with bounded chunk validation, a pre-sized partial
+  file, offset writes, and compact durable completion bitmap state.
+- [x] Make duplicate chunks idempotent, reject bad per-chunk digests, and
+  serialize final SHA-256 verification plus destination finalization.
+- [x] Verify the behavior with runtime unit coverage; 44 runtime tests pass.

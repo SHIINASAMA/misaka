@@ -45,12 +45,12 @@
 - Consumes the v2 core contract.
 - Produces `receive_transfer_v2` and a process-local coordinator keyed by destination plus content digest.
 
-- [ ] Add failing runtime tests for out-of-order chunks, duplicate chunks, invalid chunk digests, and a restart-compatible completed bitmap.
-- [ ] Run the focused runtime tests and confirm they fail before implementation.
-- [ ] Implement bounded validation, a pre-sized `.misaka-part-v2`, offset writes through independent file handles, a compact bitmap state file, and a serialized finalize step that hashes the completed part before rename.
-- [ ] Route `TRANSFER_V2_MAGIC` from `echo_stream` to the new handler without changing MTR0/MTR1/Tunnel dispatch.
-- [ ] Run the focused runtime tests and `cargo test -p misaka-runtime`.
-- [ ] Commit `feat(transfer): coordinate parallel chunks`.
+- [x] Add failing runtime tests for out-of-order chunks, duplicate chunks, invalid chunk digests, and a restart-compatible completed bitmap.
+- [x] Run the focused runtime tests and confirm they failed before implementation.
+- [x] Implement bounded validation, a pre-sized `.misaka-part-v2`, offset writes through independent file handles, a compact bitmap state file, and a serialized finalize step that hashes the completed part before rename.
+- [x] Route `TRANSFER_V2_MAGIC` from `echo_stream` to the new handler without changing MTR0/MTR1/Tunnel dispatch.
+- [x] Run the focused runtime tests and `cargo test -p misaka-runtime` (44 passed).
+- [x] Commit `feat(transfer): coordinate parallel chunks`.
 
 ### Task 56: Add the opt-in parallel CLI sender
 

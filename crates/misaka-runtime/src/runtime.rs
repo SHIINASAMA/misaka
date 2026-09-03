@@ -10,16 +10,20 @@ use crate::shutdown::Shutdown;
 use misaka_core::protocol::{
     finalize_transfer_digest, transfer_digest, update_transfer_digest, TransferRequest,
     TransferResult, TransferV1Ack, TransferV1Chunk, TransferV1Request, TransferV1Resume,
-    TunnelRequest, TRANSFER_MAGIC, TRANSFER_V1_CHUNK_SIZE, TRANSFER_V1_MAGIC, TUNNEL_MAGIC,
+    TransferV2Ack, TransferV2Operation, TransferV2Request, TransferV2Resume, TunnelRequest,
+    TRANSFER_MAGIC, TRANSFER_V1_CHUNK_SIZE, TRANSFER_V1_MAGIC, TRANSFER_V2_MAGIC, TUNNEL_MAGIC,
 };
 use misaka_core::SisterIdentity;
 use misaka_network::{NetworkBackend, NetworkEndpoint};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Mutex;
 use tokio::task::{JoinHandle, JoinSet};
 
 /// Orchestrates one complete Sister runtime.
@@ -465,6 +469,9 @@ async fn echo_stream(mut stream: misaka_network::NetworkStream) -> std::io::Resu
     if preamble == *TRANSFER_V1_MAGIC {
         return receive_transfer_v1(stream).await;
     }
+    if preamble == *TRANSFER_V2_MAGIC {
+        return receive_transfer_v2(stream).await;
+    }
     if preamble == *TUNNEL_MAGIC {
         return receive_tunnel(stream).await;
     }
@@ -691,6 +698,276 @@ async fn receive_transfer_v1(mut stream: misaka_network::NetworkStream) -> std::
     }
 }
 
+const TRANSFER_V2_MAX_CHUNKS: u64 = 1_048_576;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TransferV2State {
+    size: u64,
+    digest: [u8; 32],
+    chunk_size: u32,
+    chunk_count: u64,
+    completed: Vec<u8>,
+}
+
+static TRANSFER_V2_LOCKS: OnceLock<std::sync::Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> =
+    OnceLock::new();
+
+async fn receive_transfer_v2(mut stream: misaka_network::NetworkStream) -> std::io::Result<()> {
+    let request: TransferV2Request = read_bincode_frame(&mut stream, 1024 * 1024).await?;
+    validate_transfer_v2_request(&request)?;
+    let (part_path, state_path) = transfer_v2_paths(&request.destination);
+    let lock = transfer_v2_lock(&state_path);
+
+    match request.operation {
+        TransferV2Operation::Prepare => {
+            let _guard = lock.lock().await;
+            let state = ensure_transfer_v2_state(&request, &part_path, &state_path).await?;
+            write_bincode_frame(
+                &mut stream,
+                &TransferV2Resume {
+                    completed_indices: completed_transfer_v2_indices(&state),
+                    complete: transfer_v2_complete(&state),
+                    error: None,
+                },
+            )
+            .await
+        }
+        TransferV2Operation::Chunk => {
+            let mut payload = vec![0u8; request.len as usize];
+            stream.read_exact(&mut payload).await?;
+            if transfer_digest(&payload) != request.chunk_digest {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "transfer v2 chunk digest mismatch",
+                ));
+            }
+
+            let already_completed = {
+                let _guard = lock.lock().await;
+                let state = ensure_transfer_v2_state(&request, &part_path, &state_path).await?;
+                transfer_v2_is_completed(&state, request.index)
+            };
+            if !already_completed {
+                let mut part = tokio::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&part_path)
+                    .await?;
+                tokio::io::AsyncSeekExt::seek(&mut part, std::io::SeekFrom::Start(request.offset))
+                    .await?;
+                part.write_all(&payload).await?;
+                part.flush().await?;
+
+                let _guard = lock.lock().await;
+                let mut state = ensure_transfer_v2_state(&request, &part_path, &state_path).await?;
+                if !transfer_v2_is_completed(&state, request.index) {
+                    transfer_v2_mark_completed(&mut state, request.index);
+                    save_transfer_v2_state(&state_path, &state).await?;
+                }
+            }
+
+            let _guard = lock.lock().await;
+            let state = ensure_transfer_v2_state(&request, &part_path, &state_path).await?;
+            write_bincode_frame(
+                &mut stream,
+                &TransferV2Ack {
+                    index: request.index,
+                    accepted: true,
+                    complete: transfer_v2_complete(&state),
+                    error: None,
+                },
+            )
+            .await
+        }
+        TransferV2Operation::Finalize => {
+            let _guard = lock.lock().await;
+            let state = ensure_transfer_v2_state(&request, &part_path, &state_path).await?;
+            if !transfer_v2_complete(&state) {
+                return write_bincode_frame(
+                    &mut stream,
+                    &TransferV2Ack {
+                        index: 0,
+                        accepted: false,
+                        complete: false,
+                        error: Some("transfer has incomplete chunks".to_string()),
+                    },
+                )
+                .await;
+            }
+            let digest = hash_file_path(&part_path).await?;
+            if digest != request.digest {
+                let _ = tokio::fs::remove_file(&part_path).await;
+                let _ = tokio::fs::remove_file(&state_path).await;
+                return write_bincode_frame(
+                    &mut stream,
+                    &TransferV2Ack {
+                        index: 0,
+                        accepted: false,
+                        complete: false,
+                        error: Some("SHA-256 digest mismatch".to_string()),
+                    },
+                )
+                .await;
+            }
+            finalize_transfer_part(&part_path, &PathBuf::from(&request.destination)).await?;
+            let _ = tokio::fs::remove_file(&state_path).await;
+            write_bincode_frame(
+                &mut stream,
+                &TransferV2Ack {
+                    index: 0,
+                    accepted: true,
+                    complete: true,
+                    error: None,
+                },
+            )
+            .await
+        }
+    }
+}
+
+fn validate_transfer_v2_request(request: &TransferV2Request) -> std::io::Result<()> {
+    if request.chunk_size != TRANSFER_V1_CHUNK_SIZE {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "unsupported transfer v2 chunk size",
+        ));
+    }
+    let expected_count = request.size.div_ceil(u64::from(request.chunk_size));
+    if request.chunk_count != expected_count || request.chunk_count > TRANSFER_V2_MAX_CHUNKS {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid transfer v2 chunk count",
+        ));
+    }
+    match request.operation {
+        TransferV2Operation::Prepare | TransferV2Operation::Finalize => {
+            if request.index != 0 || request.offset != 0 || request.len != 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "control transfer v2 request carries chunk metadata",
+                ));
+            }
+        }
+        TransferV2Operation::Chunk => {
+            if request.index >= request.chunk_count {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "transfer v2 chunk index is out of range",
+                ));
+            }
+            let expected_offset = request.index * u64::from(request.chunk_size);
+            let expected_len = request
+                .size
+                .saturating_sub(expected_offset)
+                .min(u64::from(request.chunk_size));
+            if request.offset != expected_offset || u64::from(request.len) != expected_len {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "invalid transfer v2 chunk boundary",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn transfer_v2_paths(destination: &str) -> (PathBuf, PathBuf) {
+    let part_path = PathBuf::from(format!("{destination}.misaka-part-v2"));
+    let state_path = PathBuf::from(format!("{destination}.misaka-part-v2.json"));
+    (part_path, state_path)
+}
+
+fn transfer_v2_lock(path: &Path) -> Arc<Mutex<()>> {
+    let locks = TRANSFER_V2_LOCKS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut locks = locks.lock().expect("transfer v2 lock map poisoned");
+    locks
+        .entry(path.to_path_buf())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
+
+async fn ensure_transfer_v2_state(
+    request: &TransferV2Request,
+    part_path: &Path,
+    state_path: &Path,
+) -> std::io::Result<TransferV2State> {
+    let valid = load_transfer_v2_state(state_path).await?.filter(|state| {
+        state.size == request.size
+            && state.digest == request.digest
+            && state.chunk_size == request.chunk_size
+            && state.chunk_count == request.chunk_count
+            && state.completed.len() == transfer_v2_bitmap_len(state.chunk_count)
+    });
+    if let Some(state) = valid {
+        if tokio::fs::try_exists(part_path).await? {
+            return Ok(state);
+        }
+    }
+
+    let _ = tokio::fs::remove_file(part_path).await;
+    let _ = tokio::fs::remove_file(state_path).await;
+    if let Some(parent) = part_path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let part = tokio::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(part_path)
+        .await?;
+    part.set_len(request.size).await?;
+    drop(part);
+    let state = TransferV2State {
+        size: request.size,
+        digest: request.digest,
+        chunk_size: request.chunk_size,
+        chunk_count: request.chunk_count,
+        completed: vec![0; transfer_v2_bitmap_len(request.chunk_count)],
+    };
+    save_transfer_v2_state(state_path, &state).await?;
+    Ok(state)
+}
+
+async fn load_transfer_v2_state(path: &Path) -> std::io::Result<Option<TransferV2State>> {
+    if !tokio::fs::try_exists(path).await? {
+        return Ok(None);
+    }
+    let bytes = tokio::fs::read(path).await?;
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
+async fn save_transfer_v2_state(path: &Path, state: &TransferV2State) -> std::io::Result<()> {
+    let bytes = serde_json::to_vec(state)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let temp_path = PathBuf::from(format!("{}.tmp", path.display()));
+    tokio::fs::write(&temp_path, bytes).await?;
+    tokio::fs::rename(temp_path, path).await
+}
+
+fn transfer_v2_bitmap_len(chunk_count: u64) -> usize {
+    chunk_count.div_ceil(8) as usize
+}
+
+fn transfer_v2_is_completed(state: &TransferV2State, index: u64) -> bool {
+    let byte = state.completed[(index / 8) as usize];
+    byte & (1 << (index % 8)) != 0
+}
+
+fn transfer_v2_mark_completed(state: &mut TransferV2State, index: u64) {
+    state.completed[(index / 8) as usize] |= 1 << (index % 8);
+}
+
+fn transfer_v2_complete(state: &TransferV2State) -> bool {
+    (0..state.chunk_count).all(|index| transfer_v2_is_completed(state, index))
+}
+
+fn completed_transfer_v2_indices(state: &TransferV2State) -> Vec<u64> {
+    (0..state.chunk_count)
+        .filter(|index| transfer_v2_is_completed(state, *index))
+        .collect()
+}
+
 async fn load_transfer_v1_state(
     path: &std::path::Path,
 ) -> std::io::Result<Option<TransferV1State>> {
@@ -829,7 +1106,8 @@ mod tests {
     use crate::runtime::default_encryption_key;
     use misaka_core::protocol::{
         transfer_content_digest, transfer_digest, TransferResult, TransferV1Ack, TransferV1Chunk,
-        TransferV1Request, TransferV1Resume, TRANSFER_V1_CHUNK_SIZE,
+        TransferV1Request, TransferV1Resume, TransferV2Ack, TransferV2Operation, TransferV2Request,
+        TransferV2Resume, TRANSFER_V1_CHUNK_SIZE,
     };
     use misaka_core::SisterIdentity;
     use misaka_network::NetworkBackend;
@@ -1088,6 +1366,154 @@ mod tests {
         assert_eq!(tokio::fs::read(&destination).await.unwrap(), payload);
         assert!(
             !std::path::PathBuf::from(format!("{}.misaka-part", destination.display())).exists()
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    async fn transfer_v2_accepts_out_of_order_chunks_and_persists_bitmap() {
+        let directory =
+            std::env::temp_dir().join(format!("misaka-transfer-v2-{}", uuid::Uuid::new_v4()));
+        let destination = directory.join("nested/result.bin");
+        let mut payload = vec![0u8; TRANSFER_V1_CHUNK_SIZE as usize + 1234];
+        for (index, byte) in payload.iter_mut().enumerate() {
+            *byte = (index % 251) as u8;
+        }
+        let request = TransferV2Request {
+            operation: TransferV2Operation::Prepare,
+            destination: destination.display().to_string(),
+            size: payload.len() as u64,
+            digest: transfer_content_digest(&payload),
+            chunk_size: TRANSFER_V1_CHUNK_SIZE,
+            chunk_count: 2,
+            index: 0,
+            offset: 0,
+            len: 0,
+            chunk_digest: [0; 32],
+        };
+
+        let (server_io, mut client_io) = tokio::io::duplex(1024 * 1024);
+        let server_task = tokio::spawn(super::receive_transfer_v2(
+            misaka_network::NetworkStream::from_stream(server_io),
+        ));
+        write_test_frame(&mut client_io, &request).await;
+        let resume: TransferV2Resume = read_test_frame(&mut client_io).await;
+        assert!(resume.completed_indices.is_empty());
+        assert!(!resume.complete);
+        drop(client_io);
+        server_task.await.unwrap().unwrap();
+
+        let first_len = TRANSFER_V1_CHUNK_SIZE as usize;
+        for (index, offset, bytes) in [
+            (1, first_len as u64, &payload[first_len..]),
+            (0, 0, &payload[..first_len]),
+        ] {
+            let (server_io, mut client_io) = tokio::io::duplex(1024 * 1024);
+            let server_task = tokio::spawn(super::receive_transfer_v2(
+                misaka_network::NetworkStream::from_stream(server_io),
+            ));
+            write_test_frame(
+                &mut client_io,
+                &TransferV2Request {
+                    operation: TransferV2Operation::Chunk,
+                    index,
+                    offset,
+                    len: bytes.len() as u32,
+                    chunk_digest: transfer_digest(bytes),
+                    ..request.clone()
+                },
+            )
+            .await;
+            client_io.write_all(bytes).await.unwrap();
+            let ack: TransferV2Ack = read_test_frame(&mut client_io).await;
+            assert!(ack.accepted);
+            drop(client_io);
+            server_task.await.unwrap().unwrap();
+        }
+
+        let (server_io, mut client_io) = tokio::io::duplex(1024 * 1024);
+        let server_task = tokio::spawn(super::receive_transfer_v2(
+            misaka_network::NetworkStream::from_stream(server_io),
+        ));
+        write_test_frame(
+            &mut client_io,
+            &TransferV2Request {
+                operation: TransferV2Operation::Chunk,
+                index: 0,
+                offset: 0,
+                len: first_len as u32,
+                chunk_digest: transfer_digest(&payload[..first_len]),
+                ..request.clone()
+            },
+        )
+        .await;
+        client_io.write_all(&payload[..first_len]).await.unwrap();
+        let ack: TransferV2Ack = read_test_frame(&mut client_io).await;
+        assert!(ack.accepted);
+        drop(client_io);
+        server_task.await.unwrap().unwrap();
+
+        let bad_destination = directory.join("nested/bad.bin");
+        let (server_io, mut client_io) = tokio::io::duplex(1024 * 1024);
+        let server_task = tokio::spawn(super::receive_transfer_v2(
+            misaka_network::NetworkStream::from_stream(server_io),
+        ));
+        write_test_frame(
+            &mut client_io,
+            &TransferV2Request {
+                operation: TransferV2Operation::Chunk,
+                destination: bad_destination.display().to_string(),
+                digest: [9; 32],
+                index: 0,
+                offset: 0,
+                len: first_len as u32,
+                chunk_digest: [0; 32],
+                ..request.clone()
+            },
+        )
+        .await;
+        client_io.write_all(&payload[..first_len]).await.unwrap();
+        drop(client_io);
+        assert!(server_task.await.unwrap().is_err());
+
+        let (server_io, mut client_io) = tokio::io::duplex(1024 * 1024);
+        let server_task = tokio::spawn(super::receive_transfer_v2(
+            misaka_network::NetworkStream::from_stream(server_io),
+        ));
+        write_test_frame(
+            &mut client_io,
+            &TransferV2Request {
+                operation: TransferV2Operation::Prepare,
+                ..request.clone()
+            },
+        )
+        .await;
+        let resume: TransferV2Resume = read_test_frame(&mut client_io).await;
+        assert_eq!(resume.completed_indices, vec![0, 1]);
+        assert!(resume.complete);
+        drop(client_io);
+        server_task.await.unwrap().unwrap();
+
+        let (server_io, mut client_io) = tokio::io::duplex(1024 * 1024);
+        let server_task = tokio::spawn(super::receive_transfer_v2(
+            misaka_network::NetworkStream::from_stream(server_io),
+        ));
+        write_test_frame(
+            &mut client_io,
+            &TransferV2Request {
+                operation: TransferV2Operation::Finalize,
+                ..request
+            },
+        )
+        .await;
+        let ack: TransferV2Ack = read_test_frame(&mut client_io).await;
+        assert!(ack.accepted);
+        assert!(ack.complete);
+        drop(client_io);
+        server_task.await.unwrap().unwrap();
+        assert_eq!(tokio::fs::read(&destination).await.unwrap(), payload);
+        assert!(
+            !std::path::PathBuf::from(format!("{}.misaka-part-v2", destination.display())).exists()
         );
         let _ = std::fs::remove_dir_all(directory);
     }
