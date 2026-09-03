@@ -1,5 +1,6 @@
 //! Transport-neutral Network Stream v0 primitives with a Direct TCP backend.
 
+use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
@@ -32,11 +33,35 @@ pub enum NetworkError {
 
 pub type Result<T> = std::result::Result<T, NetworkError>;
 
+/// A backend-specific way to reach a Sister.
+///
+/// Identity is deliberately not part of this value: a `SisterId` identifies
+/// a node, while an endpoint is only one connection candidate for it.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkEndpoint {
+    Tcp(SocketAddr),
+}
+
+impl From<SocketAddr> for NetworkEndpoint {
+    fn from(addr: SocketAddr) -> Self {
+        Self::Tcp(addr)
+    }
+}
+
+impl std::fmt::Display for NetworkEndpoint {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Tcp(addr) => write!(formatter, "tcp://{addr}"),
+        }
+    }
+}
+
 /// The transport boundary for stream establishment.
 #[allow(async_fn_in_trait)]
 pub trait NetworkBackend: Send + Sync {
-    async fn listen(&self, addr: SocketAddr) -> Result<NetworkListener>;
-    async fn connect(&self, addr: SocketAddr) -> Result<NetworkStream>;
+    async fn listen(&self, endpoint: NetworkEndpoint) -> Result<NetworkListener>;
+    async fn connect(&self, endpoint: NetworkEndpoint) -> Result<NetworkStream>;
 }
 
 /// The v0 backend: direct TCP with the Network Stream handshake.
@@ -44,12 +69,12 @@ pub trait NetworkBackend: Send + Sync {
 pub struct DirectTcpBackend;
 
 impl NetworkBackend for DirectTcpBackend {
-    async fn listen(&self, addr: SocketAddr) -> Result<NetworkListener> {
-        direct_tcp::listen(addr).await
+    async fn listen(&self, endpoint: NetworkEndpoint) -> Result<NetworkListener> {
+        direct_tcp::listen(endpoint).await
     }
 
-    async fn connect(&self, addr: SocketAddr) -> Result<NetworkStream> {
-        direct_tcp::connect(addr).await
+    async fn connect(&self, endpoint: NetworkEndpoint) -> Result<NetworkStream> {
+        direct_tcp::connect(endpoint).await
     }
 }
 
@@ -131,12 +156,12 @@ impl NetworkListener {
     }
 }
 
-pub async fn listen(addr: SocketAddr) -> Result<NetworkListener> {
-    DirectTcpBackend.listen(addr).await
+pub async fn listen(endpoint: impl Into<NetworkEndpoint>) -> Result<NetworkListener> {
+    DirectTcpBackend.listen(endpoint.into()).await
 }
 
-pub async fn connect(addr: SocketAddr) -> Result<NetworkStream> {
-    DirectTcpBackend.connect(addr).await
+pub async fn connect(endpoint: impl Into<NetworkEndpoint>) -> Result<NetworkStream> {
+    DirectTcpBackend.connect(endpoint.into()).await
 }
 
 fn validate_handshake(handshake: &[u8; HANDSHAKE_LEN]) -> Result<()> {
@@ -168,15 +193,16 @@ fn validate_handshake(handshake: &[u8; HANDSHAKE_LEN]) -> Result<()> {
 
 mod direct_tcp {
     use super::{
-        validate_handshake, AsyncStream, ListenerFuture, NetworkError, NetworkListener,
-        NetworkListenerDriver, NetworkStream, Result, HANDSHAKE_LEN, HANDSHAKE_TIMEOUT, MAGIC,
-        PROTOCOL_VERSION,
+        validate_handshake, AsyncStream, ListenerFuture, NetworkEndpoint, NetworkError,
+        NetworkListener, NetworkListenerDriver, NetworkStream, Result, HANDSHAKE_LEN,
+        HANDSHAKE_TIMEOUT, MAGIC, PROTOCOL_VERSION,
     };
     use std::net::SocketAddr;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
 
-    pub(super) async fn listen(addr: SocketAddr) -> Result<NetworkListener> {
+    pub(super) async fn listen(endpoint: NetworkEndpoint) -> Result<NetworkListener> {
+        let NetworkEndpoint::Tcp(addr) = endpoint;
         let listener = TcpListener::bind(addr).await.map_err(NetworkError::Bind)?;
         let bound = listener.local_addr().map_err(NetworkError::Bind)?;
         tracing::info!(event = "stream_listener_started", address = %bound, "network stream listener started");
@@ -185,7 +211,8 @@ mod direct_tcp {
         }))
     }
 
-    pub(super) async fn connect(addr: SocketAddr) -> Result<NetworkStream> {
+    pub(super) async fn connect(endpoint: NetworkEndpoint) -> Result<NetworkStream> {
+        let NetworkEndpoint::Tcp(addr) = endpoint;
         let mut stream = TcpStream::connect(addr)
             .await
             .map_err(NetworkError::Connect)?;
@@ -271,15 +298,17 @@ mod direct_tcp {
 #[cfg(test)]
 mod tests {
     use super::{
-        connect, listen, ListenerFuture, NetworkError, NetworkListener, NetworkListenerDriver,
-        NetworkStream,
+        connect, listen, ListenerFuture, NetworkEndpoint, NetworkError, NetworkListener,
+        NetworkListenerDriver, NetworkStream,
     };
     use std::net::SocketAddr;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[tokio::test]
     async fn localhost_stream_connects_and_exchanges_bytes() {
-        let listener = listen("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let listener = listen("127.0.0.1:0".parse::<SocketAddr>().unwrap())
+            .await
+            .unwrap();
         let address = listener.local_addr();
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
@@ -334,7 +363,11 @@ mod tests {
         use tokio::net::TcpStream;
         use tokio::time::{timeout, Duration};
 
-        let listener = Arc::new(listen("127.0.0.1:0".parse().unwrap()).await.unwrap());
+        let listener = Arc::new(
+            listen("127.0.0.1:0".parse::<SocketAddr>().unwrap())
+                .await
+                .unwrap(),
+        );
         let address = listener.local_addr();
         let _stalled = TcpStream::connect(address).await.unwrap();
         let first_listener = Arc::clone(&listener);
@@ -365,7 +398,7 @@ mod tests {
 
         let backend = DirectTcpBackend;
         let listener = backend
-            .listen("127.0.0.1:0".parse().unwrap())
+            .listen(NetworkEndpoint::Tcp("127.0.0.1:0".parse().unwrap()))
             .await
             .unwrap();
         let address = listener.local_addr();
@@ -373,7 +406,10 @@ mod tests {
             let (mut stream, _) = listener.accept().await.unwrap();
             stream.write_all(b"backend-ok").await.unwrap();
         });
-        let mut stream = backend.connect(address).await.unwrap();
+        let mut stream = backend
+            .connect(NetworkEndpoint::Tcp(address))
+            .await
+            .unwrap();
         let mut response = [0u8; 10];
         stream.read_exact(&mut response).await.unwrap();
         assert_eq!(&response, b"backend-ok");
@@ -428,5 +464,19 @@ mod tests {
         });
         peer.write_all(b"generic").await.unwrap();
         server.await.unwrap();
+    }
+
+    #[test]
+    fn tcp_endpoint_roundtrips_and_formats_as_a_tcp_uri() {
+        let endpoint = NetworkEndpoint::Tcp("127.0.0.1:31701".parse().unwrap());
+        let encoded = serde_json::to_string(&endpoint).unwrap();
+        let decoded: NetworkEndpoint = serde_json::from_str(&encoded).unwrap();
+
+        assert_eq!(decoded, endpoint);
+        assert_eq!(endpoint.to_string(), "tcp://127.0.0.1:31701");
+        assert_eq!(
+            NetworkEndpoint::from(SocketAddr::from(([127, 0, 0, 1], 31701))),
+            endpoint
+        );
     }
 }

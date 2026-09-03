@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use misaka_core::protocol::{Envelope, MessageType};
-use misaka_network::NetworkBackend;
+use misaka_network::{NetworkBackend, NetworkEndpoint};
 use serde::Serialize;
 
 use misaka_runtime::error::MisakaError;
@@ -452,10 +452,13 @@ async fn run_stream_test(
     ready_file: Option<&Path>,
 ) -> Result<(), String> {
     let backend = misaka_network::DirectTcpBackend;
-    let mut stream = tokio::time::timeout(Duration::from_secs(5), backend.connect(addr))
-        .await
-        .map_err(|_| "stream connect timed out".to_string())?
-        .map_err(|error| error.to_string())?;
+    let mut stream = tokio::time::timeout(
+        Duration::from_secs(5),
+        backend.connect(NetworkEndpoint::Tcp(addr)),
+    )
+    .await
+    .map_err(|_| "stream connect timed out".to_string())?
+    .map_err(|error| error.to_string())?;
 
     let mut greeting = [0u8; 5];
     read_exact_timeout(&mut stream, &mut greeting).await?;

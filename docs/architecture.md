@@ -131,6 +131,11 @@ server-side handshakes time out after five seconds. It does not migrate or
 unify the control-plane `PeerTransport`, add stream addresses to peer
 knowledge, or route by SisterId.
 
+Endpoint Model v0 introduces `NetworkEndpoint::Tcp(SocketAddr)` at the
+backend boundary. This endpoint is a connection candidate and is deliberately
+distinct from `SisterId`; SisterId resolution and persisted stream endpoint
+knowledge belong to a later phase.
+
 The v0 runtime echo loop exists only to validate long-lived bidirectional
 streams and uses bounded buffers. The stream is intentionally insecure and is
 restricted to loopback/deterministic test use. Security, transfer, tunnel,

@@ -221,3 +221,45 @@ model.
 - [x] Run formatting, Clippy, workspace tests, and the `misaka` build.
 - [x] Run Network Stream N01–N06, full Testament, and Operator UX verification.
 - [x] Reconcile the roadmap Definition of Done and record the completed normalization in Obsidian.
+
+---
+
+## Endpoint Model v0
+
+This phase introduces only the endpoint value object required by the roadmap.
+It keeps identity and connectivity separate and supports TCP only.
+
+### Task 13: Add the TCP endpoint model
+
+**Files:**
+- Modify: `crates/misaka-network/src/lib.rs`
+- Modify: `crates/misaka-network/Cargo.toml`
+
+- [x] Add a failing serialization/equality test for `NetworkEndpoint::Tcp(SocketAddr)`.
+- [x] Define `NetworkEndpoint` with only the `Tcp` variant and stable serde traits.
+- [x] Add a display/conversion helper without introducing Sister identity or resolver behavior.
+
+### Task 14: Route backend APIs through endpoints
+
+**Files:**
+- Modify: `crates/misaka-network/src/lib.rs`
+- Modify: `crates/misaka-runtime/src/runtime.rs`
+- Modify: `crates/misaka-cli/src/main.rs`
+- Modify: `crates/misaka-network/src/lib.rs` tests
+
+- [x] Change `NetworkBackend::listen` and `NetworkBackend::connect` to accept `NetworkEndpoint`.
+- [x] Make `DirectTcpBackend` unwrap only `NetworkEndpoint::Tcp` and retain all TCP details internally.
+- [x] Keep free `connect`/`listen` wrappers source-compatible for `SocketAddr` callers through `Into<NetworkEndpoint>`.
+- [x] Update runtime, CLI, and backend tests to use the endpoint model.
+
+### Task 15: Verify and record Endpoint Model v0
+
+**Files:**
+- Modify: `docs/network-stream-v0.md`
+- Modify: `docs/architecture.md`
+- Modify: `docs/superpowers/plans/2026-09-03-network-stream-v0.md`
+- Modify: `'/Users/kaoru/Documents/Obsidian Vault/Misaka Network — Network Stream v0.md'`
+
+- [x] Document `SisterId != NetworkEndpoint` and the TCP-only scope.
+- [x] Run the complete Rust and Testament verification gates.
+- [x] Record Endpoint Model v0 completion and the next SisterId-to-endpoint resolution phase.

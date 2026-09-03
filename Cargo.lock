@@ -468,6 +468,8 @@ dependencies = [
 name = "misaka-network"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
  "thiserror",
  "tokio",
  "tracing",

@@ -12,9 +12,13 @@ control plane.
 ```rust
 pub trait AsyncStream: AsyncRead + AsyncWrite + Send + Unpin {}
 
+pub enum NetworkEndpoint {
+    Tcp(SocketAddr),
+}
+
 pub trait NetworkBackend {
-    async fn connect(&self, addr: SocketAddr) -> Result<NetworkStream>;
-    async fn listen(&self, addr: SocketAddr) -> Result<NetworkListener>;
+    async fn connect(&self, endpoint: NetworkEndpoint) -> Result<NetworkStream>;
+    async fn listen(&self, endpoint: NetworkEndpoint) -> Result<NetworkListener>;
 }
 
 pub struct DirectTcpBackend;
@@ -28,7 +32,13 @@ wrapper. `NetworkListener` delegates acceptance to a backend listener driver;
 neither abstraction stores TCP-specific types. After the fixed magic/version
 handshake, bytes are raw and are not Envelope-framed.
 The v0 implementation is `DirectTcpBackend`; the free functions remain
-compatibility wrappers for callers that do not need to select a backend yet.
+compatibility wrappers for callers that do not need to select a backend yet
+and accept `SocketAddr` through `Into<NetworkEndpoint>`.
+
+`NetworkEndpoint` is deliberately separate from `SisterId`: the endpoint is a
+connection candidate, not an identity. Endpoint Model v0 contains only
+`NetworkEndpoint::Tcp`; Iroh, relay, and other endpoint variants are deferred
+until their respective backend designs exist.
 
 The handshake contains only the `MISAKA_STREAM` magic and protocol version 1.
 It carries no Sister identity, credentials, permissions, service metadata, or
