@@ -117,7 +117,11 @@ impl crate::NetworkBackend for IrohBackend {
             peer_id = %connection.remote_id(),
             "Iroh network stream connected"
         );
-        Ok(NetworkStream::from_stream(IrohStream { send, recv }))
+        Ok(NetworkStream::from_stream(IrohStream {
+            send,
+            recv,
+            _endpoint: self.endpoint.clone(),
+        }))
     }
 }
 
@@ -173,7 +177,11 @@ impl NetworkListenerDriver for IrohListener {
                 "Iroh network stream accepted"
             );
             Ok((
-                NetworkStream::from_stream(IrohStream { send, recv }),
+                NetworkStream::from_stream(IrohStream {
+                    send,
+                    recv,
+                    _endpoint: self.endpoint.clone(),
+                }),
                 peer_addr,
             ))
         })
@@ -183,6 +191,9 @@ impl NetworkListenerDriver for IrohListener {
 struct IrohStream {
     send: SendStream,
     recv: RecvStream,
+    // Keep the endpoint alive for callers that outlive the listener/backend
+    // value which accepted this stream (notably short-lived CLI commands).
+    _endpoint: Endpoint,
 }
 
 impl AsyncRead for IrohStream {

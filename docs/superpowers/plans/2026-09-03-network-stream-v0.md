@@ -577,3 +577,16 @@ QUIC bidirectional stream, without changing the runtime's Direct TCP default.
   general resolver supports mixed backends.
 - [x] Reject malformed persisted keys without replacing them.
 - [x] Keep the key out of peer state and diagnostics.
+
+### Task 34: Route CLI stream operations through the Iroh backend
+
+**Files:**
+- Modify: `crates/misaka-network/src/iroh_backend.rs`
+- Modify: `crates/misaka-cli/src/main.rs`
+- Modify: `docs/iroh-backend-spike-v0.md`
+
+- [x] Keep an accepted Iroh stream's endpoint alive for short-lived callers.
+- [x] Select Iroh for `cp`, `tunnel`, and the SSH wrapper from the endpoint
+  variant instead of hard-coding Direct TCP.
+- [x] Keep TLS certificate handling explicit and reject incompatible mixed
+  security configuration.

@@ -954,7 +954,22 @@ async fn connect_peer_stream(
     peer_id: u64,
     peer_certificate: Option<&[u8]>,
 ) -> Result<misaka_network::NetworkStream, String> {
-    let stream = if let Some(peer_certificate) = peer_certificate {
+    let stream = if matches!(&endpoint, NetworkEndpoint::Iroh(_)) {
+        if peer_certificate.is_some() {
+            return Err("Iroh streams use endpoint-authenticated encryption; do not provide a TLS certificate".to_string());
+        }
+        let data_dir = IdentityStore::config_dir().map_err(|error| error.to_string())?;
+        let backend = misaka_network::IrohBackend::bind_with_secret_key(
+            misaka_runtime::iroh_identity_store::IrohIdentityStore::load_or_init(&data_dir)
+                .map_err(|error| error.to_string())?,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        tokio::time::timeout(Duration::from_secs(10), backend.connect(endpoint))
+            .await
+            .map_err(|_| "Iroh stream connect timed out".to_string())?
+            .map_err(|error| error.to_string())?
+    } else if let Some(peer_certificate) = peer_certificate {
         let data_dir = IdentityStore::config_dir().map_err(|error| error.to_string())?;
         let identity = misaka_runtime::tls_identity_store::TlsIdentityStore::load(&data_dir)
             .map_err(|error| error.to_string())?
