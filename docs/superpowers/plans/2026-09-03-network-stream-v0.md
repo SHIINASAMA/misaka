@@ -137,3 +137,55 @@
 - [ ] **Step 4: Build `misaka` and run the full Testament deterministic suite.**
 - [ ] **Step 5: Run the focused network verification and operator verification.**
 - [ ] **Step 6: Re-read the user plan and compare every Definition of Done item against fresh command output before claiming completion.**
+
+---
+
+## Follow-up: Network Stream hardening and Direct TCP backend extraction
+
+This follow-up is intentionally limited to the three reviewed hardening items
+and extraction of the already-proven Direct TCP implementation:
+
+### Task 7: Harden the stream endpoint
+
+**Files:**
+- Modify: `crates/misaka-network/src/lib.rs`
+- Modify: `crates/misaka-runtime/src/runtime.rs`
+
+- [x] Add a regression test proving an incomplete handshake returns within five seconds and a second valid connection can still be accepted.
+- [x] Add a five-second timeout around server-side handshake validation.
+- [x] Bind the runtime's experimental stream listener to `127.0.0.1:<port>`.
+- [x] Run focused network/runtime tests.
+
+### Task 8: Extract `DirectTcpBackend`
+
+**Files:**
+- Modify: `crates/misaka-network/src/lib.rs`
+- Modify: `crates/misaka-runtime/src/runtime.rs`
+- Modify: `crates/misaka-cli/src/main.rs`
+
+- [x] Add a failing backend roundtrip test using `NetworkBackend` and `DirectTcpBackend`.
+- [x] Implement the thin backend trait and the single Direct TCP implementation.
+- [x] Route runtime and CLI construction through `DirectTcpBackend`; keep free functions as compatibility wrappers.
+- [x] Run backend and existing stream tests.
+
+### Task 9: Make N05/N06 readiness deterministic
+
+**Files:**
+- Modify: `crates/misaka-cli/src/main.rs`
+- Modify: `crates/testament/src/scenario.rs`
+
+- [x] Add a ready-file option to the stream test client and a condition-based Testament poll helper.
+- [x] Signal readiness only after handshake, greeting, and initial echo complete.
+- [x] Replace fixed sleeps in N05/N06 with bounded ready-file polling.
+- [x] Run N05/N06 and the full Network Stream suite.
+
+### Task 10: Verify and document the follow-up
+
+**Files:**
+- Modify: `docs/network-stream-v0.md`
+- Modify: `docs/architecture.md`
+- Modify: `docs/testing.md`
+
+- [x] Document loopback-only binding, handshake timeout, backend boundary, and deterministic readiness.
+- [x] Run fmt, clippy, workspace tests, build, Network Stream, full Testament, and Operator UX verification.
+- [x] Update the Obsidian Misaka project note with the hardening/backend result.

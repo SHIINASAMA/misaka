@@ -123,9 +123,13 @@ a protocol version.
 
 The optional `misaka-network` crate provides a separate Direct TCP
 `NetworkStream` with a minimal magic/version handshake and raw post-handshake
-Tokio byte IO. `SisterRuntime` binds its experimental stream listener on the
-independent `--stream-port`; it does not migrate or unify the control-plane
-`PeerTransport`, add stream addresses to peer knowledge, or route by SisterId.
+Tokio byte IO. `NetworkBackend` is the transport boundary, with
+`DirectTcpBackend` as the only v0 implementation; the existing free functions
+remain compatibility wrappers. `SisterRuntime` binds its experimental stream
+listener to loopback (`127.0.0.1`) on the independent `--stream-port`, and
+server-side handshakes time out after five seconds. It does not migrate or
+unify the control-plane `PeerTransport`, add stream addresses to peer
+knowledge, or route by SisterId.
 
 The v0 runtime echo loop exists only to validate long-lived bidirectional
 streams and uses bounded buffers. The stream is intentionally insecure and is

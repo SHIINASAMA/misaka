@@ -4,6 +4,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::time::Duration;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
@@ -11,6 +12,7 @@ use tokio::net::{TcpListener, TcpStream};
 const HANDSHAKE_LEN: usize = MAGIC.len() + 1;
 pub const MAGIC: &[u8; 13] = b"MISAKA_STREAM";
 pub const PROTOCOL_VERSION: u8 = 1;
+pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Error)]
 pub enum NetworkError {
@@ -29,6 +31,27 @@ pub enum NetworkError {
 }
 
 pub type Result<T> = std::result::Result<T, NetworkError>;
+
+/// The transport boundary for stream establishment.
+#[allow(async_fn_in_trait)]
+pub trait NetworkBackend: Send + Sync {
+    async fn listen(&self, addr: SocketAddr) -> Result<NetworkListener>;
+    async fn connect(&self, addr: SocketAddr) -> Result<NetworkStream>;
+}
+
+/// The v0 backend: direct TCP with the Network Stream handshake.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DirectTcpBackend;
+
+impl NetworkBackend for DirectTcpBackend {
+    async fn listen(&self, addr: SocketAddr) -> Result<NetworkListener> {
+        direct_listen(addr).await
+    }
+
+    async fn connect(&self, addr: SocketAddr) -> Result<NetworkStream> {
+        direct_connect(addr).await
+    }
+}
 
 /// A validated, long-lived bidirectional byte stream.
 pub struct NetworkStream {
@@ -87,13 +110,24 @@ impl NetworkListener {
 
     pub async fn accept(&self) -> Result<(NetworkStream, SocketAddr)> {
         let (mut stream, addr) = self.inner.accept().await.map_err(NetworkError::Io)?;
-        server_handshake(&mut stream).await?;
+        tokio::time::timeout(HANDSHAKE_TIMEOUT, server_handshake(&mut stream))
+            .await
+            .map_err(|_| NetworkError::Handshake {
+                reason: format!(
+                    "handshake timed out after {} seconds",
+                    HANDSHAKE_TIMEOUT.as_secs()
+                ),
+            })??;
         tracing::info!(event = "stream_accepted", peer_addr = %addr, "network stream accepted");
         Ok((NetworkStream::new(stream), addr))
     }
 }
 
 pub async fn listen(addr: SocketAddr) -> Result<NetworkListener> {
+    DirectTcpBackend.listen(addr).await
+}
+
+async fn direct_listen(addr: SocketAddr) -> Result<NetworkListener> {
     let listener = TcpListener::bind(addr).await.map_err(NetworkError::Bind)?;
     let bound = listener.local_addr().map_err(NetworkError::Bind)?;
     tracing::info!(event = "stream_listener_started", address = %bound, "network stream listener started");
@@ -101,6 +135,10 @@ pub async fn listen(addr: SocketAddr) -> Result<NetworkListener> {
 }
 
 pub async fn connect(addr: SocketAddr) -> Result<NetworkStream> {
+    DirectTcpBackend.connect(addr).await
+}
+
+async fn direct_connect(addr: SocketAddr) -> Result<NetworkStream> {
     let mut stream = TcpStream::connect(addr)
         .await
         .map_err(NetworkError::Connect)?;
@@ -179,7 +217,7 @@ fn validate_handshake(handshake: &[u8; HANDSHAKE_LEN]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{connect, listen};
+    use super::{connect, listen, NetworkError};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[tokio::test]
@@ -230,6 +268,58 @@ mod tests {
             result,
             Err(super::NetworkError::UnsupportedVersion { .. })
         ));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn incomplete_handshake_does_not_block_the_next_connection() {
+        use std::sync::Arc;
+        use tokio::net::TcpStream;
+        use tokio::time::{timeout, Duration};
+
+        let listener = Arc::new(listen("127.0.0.1:0".parse().unwrap()).await.unwrap());
+        let address = listener.local_addr();
+        let _stalled = TcpStream::connect(address).await.unwrap();
+        let first_listener = Arc::clone(&listener);
+        let first = tokio::spawn(async move { first_listener.accept().await });
+        let second_listener = Arc::clone(&listener);
+        let second = tokio::spawn(async move { connect(second_listener.local_addr()).await });
+
+        let first_result = timeout(Duration::from_secs(6), first)
+            .await
+            .expect("incomplete handshake should be bounded")
+            .unwrap();
+        assert!(matches!(first_result, Err(NetworkError::Handshake { .. })));
+        timeout(Duration::from_secs(2), listener.accept())
+            .await
+            .expect("next connection should be accepted after timeout")
+            .unwrap();
+        timeout(Duration::from_secs(2), second)
+            .await
+            .expect("next connection handshake should complete")
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn direct_tcp_backend_implements_network_backend_contract() {
+        use super::{DirectTcpBackend, NetworkBackend};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let backend = DirectTcpBackend;
+        let listener = backend
+            .listen("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let address = listener.local_addr();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            stream.write_all(b"backend-ok").await.unwrap();
+        });
+        let mut stream = backend.connect(address).await.unwrap();
+        let mut response = [0u8; 10];
+        stream.read_exact(&mut response).await.unwrap();
+        assert_eq!(&response, b"backend-ok");
         server.await.unwrap();
     }
 }

@@ -8,6 +8,7 @@ use crate::config::RuntimeConfig;
 use crate::node::SisterNode;
 use crate::shutdown::Shutdown;
 use misaka_core::SisterIdentity;
+use misaka_network::NetworkBackend;
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -51,9 +52,11 @@ impl SisterRuntime {
             );
         }
         let listener = node.start_listener().await?;
+        let backend = misaka_network::DirectTcpBackend;
         let stream_listener = match stream_port {
             Some(port) => Some(
-                misaka_network::listen(format!("0.0.0.0:{port}").parse()?)
+                backend
+                    .listen(format!("127.0.0.1:{port}").parse()?)
                     .await
                     .map_err(|error| crate::Error::Network(error.to_string()))?,
             ),
@@ -357,6 +360,13 @@ mod tests {
         .await
         .unwrap();
         let stream_addr = runtime.stream_addr().unwrap();
+        assert!(runtime
+            .stream_listener
+            .as_ref()
+            .unwrap()
+            .local_addr()
+            .ip()
+            .is_loopback());
         let shutdown = runtime.shutdown();
         let task = tokio::spawn(runtime.run());
 

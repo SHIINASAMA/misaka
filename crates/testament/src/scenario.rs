@@ -1058,6 +1058,38 @@ fn stream_client(
     Ok(())
 }
 
+fn wait_for_stream_ready(
+    client: &mut CliProcess,
+    ready_file: &Path,
+    timeout: Duration,
+) -> Result<(), ScenarioError> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if ready_file.exists() {
+            return Ok(());
+        }
+        if !client
+            .is_running()
+            .map_err(|error| ScenarioError::infra(format!("check stream client: {error}")))?
+        {
+            let output = client
+                .wait_timeout_mut(Duration::from_secs(1))
+                .map_err(|error| ScenarioError::infra(format!("collect stream client: {error}")))?;
+            return Err(ScenarioError::assertion(format!(
+                "stream client exited before reporting readiness: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(ScenarioError::infra(format!(
+                "stream client did not become ready: {}",
+                ready_file.display()
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
 fn start_stream_pair(ctx: &mut Context) -> Result<(), ScenarioError> {
     ctx.start_sister("a", "alpha", &[])?;
     let a_addr = ctx.peer_addr("a")?;
@@ -1088,8 +1120,21 @@ fn n04_large_stream(ctx: &mut Context) -> Result<(), ScenarioError> {
 fn n05_disconnect(ctx: &mut Context) -> Result<(), ScenarioError> {
     start_stream_pair(ctx)?;
     let address = ctx.stream_addr("b")?.to_string();
-    let client = ctx.spawn_cli("a", &["stream-test", "--addr", &address, "--mode", "hold"])?;
-    std::thread::sleep(Duration::from_millis(500));
+    let ready_file = ctx.layout.root.join("n05-stream-ready");
+    let ready_file_arg = ready_file.to_string_lossy().to_string();
+    let mut client = ctx.spawn_cli(
+        "a",
+        &[
+            "stream-test",
+            "--addr",
+            &address,
+            "--mode",
+            "hold",
+            "--ready-file",
+            &ready_file_arg,
+        ],
+    )?;
+    wait_for_stream_ready(&mut client, &ready_file, Duration::from_secs(8))?;
     let status = ctx.kill_sister("b")?;
     if status.success() {
         return Err(ScenarioError::assertion(
@@ -1110,8 +1155,21 @@ fn n05_disconnect(ctx: &mut Context) -> Result<(), ScenarioError> {
 fn n06_restart_new_stream(ctx: &mut Context) -> Result<(), ScenarioError> {
     start_stream_pair(ctx)?;
     let address = ctx.stream_addr("b")?.to_string();
-    let client = ctx.spawn_cli("a", &["stream-test", "--addr", &address, "--mode", "hold"])?;
-    std::thread::sleep(Duration::from_millis(500));
+    let ready_file = ctx.layout.root.join("n06-stream-ready");
+    let ready_file_arg = ready_file.to_string_lossy().to_string();
+    let mut client = ctx.spawn_cli(
+        "a",
+        &[
+            "stream-test",
+            "--addr",
+            &address,
+            "--mode",
+            "hold",
+            "--ready-file",
+            &ready_file_arg,
+        ],
+    )?;
+    wait_for_stream_ready(&mut client, &ready_file, Duration::from_secs(8))?;
     let status = ctx.kill_sister("b")?;
     if status.success() {
         return Err(ScenarioError::assertion(

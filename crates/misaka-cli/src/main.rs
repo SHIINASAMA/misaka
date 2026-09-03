@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 use misaka_core::protocol::{Envelope, MessageType};
+use misaka_network::NetworkBackend;
 use serde::Serialize;
 
 use misaka_runtime::error::MisakaError;
@@ -9,6 +10,7 @@ use misaka_runtime::peer_store::PeerStore;
 use misaka_runtime::resources::{ResourceProvider, SysinfoResourceProvider};
 use misaka_runtime::runtime::{default_encryption_key, SisterRuntime};
 use std::net::{IpAddr, SocketAddr};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[derive(Parser)]
@@ -73,6 +75,10 @@ enum Command {
         /// Test mode: connect | bidirectional | sustained | large | hold.
         #[arg(long, default_value = "connect")]
         mode: String,
+
+        /// Write this marker after the stream handshake and mode setup succeed.
+        #[arg(long)]
+        ready_file: Option<PathBuf>,
     },
 
     /// Update the local Sister nickname.
@@ -181,8 +187,12 @@ async fn main() -> Result<(), MisakaError> {
             result?;
         }
 
-        Command::StreamTest { addr, mode } => {
-            run_stream_test(addr, &mode)
+        Command::StreamTest {
+            addr,
+            mode,
+            ready_file,
+        } => {
+            run_stream_test(addr, &mode, ready_file.as_deref())
                 .await
                 .map_err(MisakaError::Other)?;
         }
@@ -436,8 +446,13 @@ const LARGE_STREAM_SIZE: u64 = 64 * 1024 * 1024;
 const FNV_OFFSET: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;
 
-async fn run_stream_test(addr: SocketAddr, mode: &str) -> Result<(), String> {
-    let mut stream = tokio::time::timeout(Duration::from_secs(5), misaka_network::connect(addr))
+async fn run_stream_test(
+    addr: SocketAddr,
+    mode: &str,
+    ready_file: Option<&Path>,
+) -> Result<(), String> {
+    let backend = misaka_network::DirectTcpBackend;
+    let mut stream = tokio::time::timeout(Duration::from_secs(5), backend.connect(addr))
         .await
         .map_err(|_| "stream connect timed out".to_string())?
         .map_err(|error| error.to_string())?;
@@ -449,12 +464,22 @@ async fn run_stream_test(addr: SocketAddr, mode: &str) -> Result<(), String> {
     }
 
     match mode {
-        "connect" => Ok(()),
-        "bidirectional" => exchange(&mut stream, b"hello").await,
-        "sustained" => sustained(&mut stream).await,
-        "large" => large_stream(stream).await,
+        "connect" => mark_ready(ready_file),
+        "bidirectional" => {
+            exchange(&mut stream, b"hello").await?;
+            mark_ready(ready_file)
+        }
+        "sustained" => {
+            sustained(&mut stream).await?;
+            mark_ready(ready_file)
+        }
+        "large" => {
+            large_stream(stream).await?;
+            mark_ready(ready_file)
+        }
         "hold" => {
             exchange(&mut stream, b"hold-open").await?;
+            mark_ready(ready_file)?;
             let mut buffer = [0u8; STREAM_CHUNK_SIZE];
             loop {
                 let read = tokio::time::timeout(
@@ -471,6 +496,14 @@ async fn run_stream_test(addr: SocketAddr, mode: &str) -> Result<(), String> {
         }
         other => Err(format!("unknown stream test mode: {other}")),
     }
+}
+
+fn mark_ready(path: Option<&Path>) -> Result<(), String> {
+    if let Some(path) = path {
+        std::fs::write(path, b"ready")
+            .map_err(|error| format!("write stream ready marker {}: {error}", path.display()))?;
+    }
+    Ok(())
 }
 
 async fn exchange(
@@ -616,14 +649,19 @@ mod stream_tests {
             "127.0.0.1:31701",
             "--mode",
             "large",
+            "--ready-file",
+            "/tmp/misaka-stream-ready",
         ])
         .unwrap();
         assert!(matches!(
             cli.command,
             Command::StreamTest {
                 addr,
-                mode
-            } if addr == "127.0.0.1:31701".parse::<SocketAddr>().unwrap() && mode == "large"
+                mode,
+                ready_file
+            } if addr == "127.0.0.1:31701".parse::<SocketAddr>().unwrap()
+                && mode == "large"
+                && ready_file.as_deref().is_some_and(|path| path == std::path::Path::new("/tmp/misaka-stream-ready"))
         ));
     }
 

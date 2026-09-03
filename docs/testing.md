@@ -139,7 +139,10 @@ stream, and introspection ports. It runs N01–N06: connect, bidirectional
 exchange, sustained single-connection exchange, a 64 MiB bounded-buffer
 stream, remote disconnect, and restart followed by a new stream. Testament
 asserts command results and process behavior; it does not import or execute
-`misaka-network` in-process.
+`misaka-network` in-process. The disconnect scenarios pass a ready-file to
+the external stream client and poll for it with a deadline before killing the
+remote Sister; they do not use a fixed sleep to guess when the stream is
+established.
 
 ## CI gate
 

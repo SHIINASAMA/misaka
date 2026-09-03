@@ -62,13 +62,17 @@ impl CliProcess {
     /// 等待外部 CLI 在限定时间内结束，并收集 stdout/stderr。
     /// 输出管道由后台线程持续 drain，避免大量输出阻塞子进程。
     pub fn wait_timeout(mut self, timeout: Duration) -> std::io::Result<Output> {
+        self.wait_timeout_mut(timeout)
+    }
+
+    /// Wait for a CLI while retaining mutable ownership for readiness polling.
+    pub fn wait_timeout_mut(&mut self, timeout: Duration) -> std::io::Result<Output> {
         let Some(mut child) = self.child.take() else {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 "CLI process already consumed",
             ));
         };
-        self.child = None;
 
         let stdout_handle = child.stdout.take().map(spawn_pump);
         let stderr_handle = child.stderr.take().map(spawn_pump);
@@ -100,6 +104,14 @@ impl CliProcess {
             stdout,
             stderr,
         })
+    }
+
+    /// Check whether the CLI is still running without consuming its output.
+    pub fn is_running(&mut self) -> std::io::Result<bool> {
+        let Some(child) = &mut self.child else {
+            return Ok(false);
+        };
+        Ok(child.try_wait()?.is_none())
     }
 
     pub fn terminate(&mut self) {
