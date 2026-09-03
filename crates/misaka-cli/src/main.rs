@@ -128,6 +128,20 @@ enum Command {
         remote: SocketAddr,
     },
 
+    /// Open an OpenSSH client through a temporary Sister tunnel.
+    Ssh {
+        /// Target Sister ID, with or without a leading #.
+        sister: String,
+
+        /// SSH username at the remote host, if different from the local user.
+        #[arg(long)]
+        user: Option<String>,
+
+        /// Remote SSH port as seen by the target Sister.
+        #[arg(long, default_value_t = 22)]
+        remote_port: u16,
+    },
+
     /// Update the local Sister nickname.
     Nickname {
         /// New nickname.
@@ -297,6 +311,16 @@ async fn main() -> Result<(), MisakaError> {
             remote,
         } => {
             run_tunnel(sister, local, remote)
+                .await
+                .map_err(MisakaError::Other)?;
+        }
+
+        Command::Ssh {
+            sister,
+            user,
+            remote_port,
+        } => {
+            run_ssh(&sister, user.as_deref(), remote_port)
                 .await
                 .map_err(MisakaError::Other)?;
         }
@@ -740,6 +764,20 @@ async fn run_tunnel(sister_id: u64, local_port: u16, remote: SocketAddr) -> Resu
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", local_port))
         .await
         .map_err(|error| format!("bind local tunnel port {local_port}: {error}"))?;
+    serve_tunnel(sister_id, endpoint, peer_certificate, remote, listener).await
+}
+
+async fn serve_tunnel(
+    sister_id: u64,
+    endpoint: NetworkEndpoint,
+    peer_certificate: Option<Vec<u8>>,
+    remote: SocketAddr,
+    listener: tokio::net::TcpListener,
+) -> Result<(), String> {
+    let local_port = listener
+        .local_addr()
+        .map_err(|error| format!("read local tunnel address: {error}"))?
+        .port();
     println!("Tunnel listening on 127.0.0.1:{local_port} -> {remote} via Sister #{sister_id}");
 
     loop {
@@ -757,6 +795,60 @@ async fn run_tunnel(sister_id: u64, local_port: u16, remote: SocketAddr) -> Resu
         }
     }
     Ok(())
+}
+
+async fn run_ssh(sister: &str, user: Option<&str>, remote_port: u16) -> Result<(), String> {
+    let sister_id = parse_sister_id(sister)?;
+    let peer = PeerStore::load_from_file()
+        .into_iter()
+        .find(|peer| peer.id == sister_id)
+        .ok_or_else(|| format!("Sister #{sister_id} is not in the local peer store"))?;
+    let endpoint = peer
+        .stream_endpoints
+        .first()
+        .ok_or_else(|| format!("Sister #{sister_id} has no stream endpoint"))?
+        .parse::<NetworkEndpoint>()
+        .map_err(|error| error.to_string())?;
+    let remote = SocketAddr::from(([127, 0, 0, 1], remote_port));
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .map_err(|error| format!("bind temporary SSH tunnel: {error}"))?;
+    let local_port = listener
+        .local_addr()
+        .map_err(|error| format!("read temporary SSH tunnel: {error}"))?
+        .port();
+    let tunnel = tokio::spawn(serve_tunnel(
+        sister_id,
+        endpoint,
+        peer.stream_certificate,
+        remote,
+        listener,
+    ));
+    let destination = user
+        .map(|user| format!("{user}@127.0.0.1"))
+        .unwrap_or_else(|| "127.0.0.1".to_string());
+    let status = tokio::process::Command::new("ssh")
+        .arg("-p")
+        .arg(local_port.to_string())
+        .arg(destination)
+        .status()
+        .await
+        .map_err(|error| format!("start ssh: {error}"))?;
+    tunnel.abort();
+    let _ = tunnel.await;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("ssh exited with {status}"))
+    }
+}
+
+fn parse_sister_id(value: &str) -> Result<u64, String> {
+    value
+        .strip_prefix('#')
+        .unwrap_or(value)
+        .parse::<u64>()
+        .map_err(|error| format!("invalid Sister ID {value}: {error}"))
 }
 
 async fn proxy_tunnel(
@@ -1039,5 +1131,11 @@ mod stream_tests {
             deterministic_hash(&first[..4096]),
             deterministic_hash(&first[4096..])
         );
+    }
+
+    #[test]
+    fn sister_id_accepts_display_prefix() {
+        assert_eq!(super::parse_sister_id("#10032").unwrap(), 10032);
+        assert_eq!(super::parse_sister_id("10032").unwrap(), 10032);
     }
 }

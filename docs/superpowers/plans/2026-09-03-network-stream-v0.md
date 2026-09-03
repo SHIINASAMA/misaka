@@ -459,3 +459,15 @@ metadata followed by fixed-size chunks, and verifies the receiver's result.
 - [x] Forward both directions with bounded Tokio I/O.
 - [x] Add `misaka tunnel <sister-id> --local <port> --remote <addr>`.
 - [x] Add black-box coverage through a plain TCP fixture.
+
+## Phase 9: Remote Login v0
+
+### Task 27: Delegate SSH through a temporary tunnel
+
+**Files:**
+- Modify: `crates/misaka-cli/src/main.rs`
+- Create: `docs/remote-login-v0.md`
+
+- [x] Add `misaka ssh <sister-id>` with optional user and remote port.
+- [x] Reuse the loopback-only Tunnel v0 listener and peer certificate policy.
+- [x] Delegate the actual SSH protocol to the system OpenSSH client.
