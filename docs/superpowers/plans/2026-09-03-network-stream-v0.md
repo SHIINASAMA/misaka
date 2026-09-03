@@ -953,3 +953,15 @@ QUIC bidirectional stream, without changing the runtime's Direct TCP default.
   and operator O01–O07 gates successfully.
 - [x] Synchronize the durable Transfer v2 progress and remaining gaps to the
   Obsidian project notes.
+
+### Task 59: Add the filesystem content store
+
+**Files:**
+- Create: `crates/misaka-runtime/src/content_store.rs`
+- Modify: `crates/misaka-runtime/src/lib.rs`
+- Create: `docs/superpowers/plans/2026-09-04-content-addressed-object-store.md`
+
+- [x] Add digest-derived object paths, verified atomic commit, duplicate-object
+  reuse, bounded materialization, and focused unit coverage.
+- [x] Keep the store filesystem-only and independent of peer discovery or the
+  NetworkStream protocol.
