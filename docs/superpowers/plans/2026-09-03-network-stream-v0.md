@@ -871,3 +871,24 @@ QUIC bidirectional stream, without changing the runtime's Direct TCP default.
   fallback.
 - [x] Verify that existing logical streams are allowed to fail while a later
   `ConnectionManager::open_stream` establishes a new Iroh session.
+
+### Task 53: Add aggregate NetworkStream observability
+
+**Files:**
+- Modify: `crates/misaka-core/src/introspection.rs`
+- Modify: `crates/misaka-runtime/src/stream_registry.rs`
+- Modify: `crates/misaka-runtime/src/node.rs`
+- Modify: `crates/misaka-cli/src/main.rs`
+- Modify: `crates/testament/src/scenario.rs`
+- Modify: `crates/testament/src/main.rs`
+- Modify: `docs/testing.md`
+- Modify: `docs/network-stream-v0.md`
+
+- [x] Add a backward-compatible read-only `stream_summary` contract with
+  active stream count and live aggregate tx/rx counters.
+- [x] Produce the summary from the in-memory runtime registry without adding
+  persistence or peer-protocol state.
+- [x] Expose the summary through `misaka ps --json --introspect` while keeping
+  the default candidate view unchanged.
+- [x] Verify active values and cleanup through the external N18 Testament
+  scenario.

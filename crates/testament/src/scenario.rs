@@ -727,6 +727,10 @@ pub fn network_scenarios() -> Vec<ScenarioDef> {
             name: "N16_connect_by_sister_id",
             run: Box::new(n16_connect_by_sister_id),
         },
+        ScenarioDef {
+            name: "N18_stream_summary_observability",
+            run: Box::new(n18_stream_summary_observability),
+        },
     ]
 }
 
@@ -1648,6 +1652,82 @@ fn n11_active_stream_observability(ctx: &mut Context) -> Result<(), ScenarioErro
         "b removes the closed active stream",
         Duration::from_secs(8),
         |snapshot| snapshot.active_streams.is_empty(),
+    )?;
+    Ok(())
+}
+
+/// N18: expose aggregate live stream count and byte counters through the
+/// public introspection and `misaka ps` JSON surfaces.
+fn n18_stream_summary_observability(ctx: &mut Context) -> Result<(), ScenarioError> {
+    start_stream_pair(ctx)?;
+    let address = ctx.stream_addr("b")?.to_string();
+    let b_introspect = introspect_addr_of(ctx, "b")?;
+    let ready_file = ctx.layout.root.join("n18-stream-ready");
+    let ready_file_arg = ready_file.to_string_lossy().to_string();
+    let mut client = ctx.spawn_cli(
+        "a",
+        &[
+            "stream-test",
+            "--addr",
+            &address,
+            "--mode",
+            "hold",
+            "--ready-file",
+            &ready_file_arg,
+        ],
+    )?;
+    wait_for_stream_ready(&mut client, &ready_file, Duration::from_secs(8))?;
+    assert::eventually(
+        b_introspect,
+        "b reports an active stream summary",
+        Duration::from_secs(8),
+        |snapshot| {
+            snapshot.stream_summary.streams == snapshot.active_streams.len()
+                && snapshot.stream_summary.streams > 0
+                && snapshot.stream_summary.tx_bytes > 0
+                && snapshot.stream_summary.rx_bytes > 0
+        },
+    )?;
+    let snapshot = observer::fetch(b_introspect, Duration::from_millis(500))
+        .map_err(|error| ScenarioError::infra(format!("fetch stream summary: {error}")))?;
+    assert::assert_eq(
+        snapshot.stream_summary.streams,
+        snapshot.active_streams.len(),
+        "summary active stream count",
+    )?;
+    if snapshot.stream_summary.tx_bytes == 0 || snapshot.stream_summary.rx_bytes == 0 {
+        return Err(ScenarioError::assertion(format!(
+            "stream summary counters incomplete: {:?}",
+            snapshot.stream_summary
+        )));
+    }
+
+    let introspect_arg = b_introspect.to_string();
+    let ps_output = ctx.run_cli("b", &["ps", "--json", "--introspect", &introspect_arg])?;
+    let ps: serde_json::Value = serde_json::from_str(&ps_output)
+        .map_err(|error| ScenarioError::assertion(format!("decode summary ps JSON: {error}")))?;
+    let summary = ps
+        .get("stream_summary")
+        .ok_or_else(|| ScenarioError::assertion("misaka ps did not report stream summary"))?;
+    assert::assert_eq(
+        summary.get("streams").and_then(serde_json::Value::as_u64),
+        Some(snapshot.stream_summary.streams as u64),
+        "misaka ps summary stream count",
+    )?;
+
+    client.terminate();
+    let _ = client
+        .wait_timeout(Duration::from_secs(8))
+        .map_err(|error| ScenarioError::infra(format!("wait summary client: {error}")))?;
+    assert::eventually(
+        b_introspect,
+        "b clears the closed stream summary",
+        Duration::from_secs(8),
+        |snapshot| {
+            snapshot.stream_summary.streams == 0
+                && snapshot.stream_summary.tx_bytes == 0
+                && snapshot.stream_summary.rx_bytes == 0
+        },
     )?;
     Ok(())
 }

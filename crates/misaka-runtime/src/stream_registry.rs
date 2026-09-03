@@ -1,6 +1,6 @@
 //! In-memory registry for active NetworkStream telemetry.
 
-use misaka_core::introspection::ActiveStreamSnapshot;
+use misaka_core::introspection::{ActiveStreamSnapshot, NetworkStreamSummary};
 use misaka_network::NetworkStream;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -76,6 +76,15 @@ impl StreamRegistry {
         streams
     }
 
+    pub(crate) fn summary(&self) -> NetworkStreamSummary {
+        let entries = self.entries.lock().expect("stream registry lock poisoned");
+        NetworkStreamSummary {
+            streams: entries.len(),
+            tx_bytes: entries.values().map(|stream| stream.stats.tx_bytes()).sum(),
+            rx_bytes: entries.values().map(|stream| stream.stats.rx_bytes()).sum(),
+        }
+    }
+
     #[cfg(test)]
     fn len(&self) -> usize {
         self.entries
@@ -121,6 +130,11 @@ mod tests {
         assert_eq!(snapshot[0].tx_bytes, 5);
         assert_eq!(snapshot[0].rx_bytes, 5);
         assert!(snapshot[0].connected_for_ms < 1_000);
+
+        let summary = registry.summary();
+        assert_eq!(summary.streams, 1);
+        assert_eq!(summary.tx_bytes, 5);
+        assert_eq!(summary.rx_bytes, 5);
 
         drop(registration);
         assert_eq!(registry.len(), 0);

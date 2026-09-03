@@ -1,5 +1,7 @@
 use clap::{Parser, Subcommand};
-use misaka_core::introspection::{ActiveStreamSnapshot, IntrospectionSnapshot};
+use misaka_core::introspection::{
+    ActiveStreamSnapshot, IntrospectionSnapshot, NetworkStreamSummary,
+};
 use misaka_core::protocol::{
     finalize_transfer_digest, transfer_digest, update_transfer_digest, Envelope, MessageType,
     TransferRequest, TransferResult, TransferV1Ack, TransferV1Chunk, TransferV1Request,
@@ -482,11 +484,14 @@ async fn main() -> Result<(), MisakaError> {
                     MisakaError::Other("Not initialized. Run 'misaka start' first.".into())
                 })?;
             let known = PeerStore::load_from_file();
-            let active_streams = match introspect {
-                Some(addr) => fetch_introspection(addr).await?.active_streams,
-                None => Vec::new(),
+            let (active_streams, stream_summary) = match introspect {
+                Some(addr) => {
+                    let snapshot = fetch_introspection(addr).await?;
+                    (snapshot.active_streams, snapshot.stream_summary)
+                }
+                None => (Vec::new(), NetworkStreamSummary::default()),
             };
-            let report = network_ps(identity, known, active_streams).await;
+            let report = network_ps(identity, known, active_streams, stream_summary).await;
             if json {
                 println!(
                     "{}",
@@ -555,12 +560,14 @@ struct NetworkPsReport {
     self_id: u64,
     sisters: Vec<NetworkPsEntry>,
     active_streams: Vec<ActiveStreamSnapshot>,
+    stream_summary: NetworkStreamSummary,
 }
 
 async fn network_ps(
     identity: misaka_core::SisterIdentity,
     known: Vec<misaka_core::PeerBlueprint>,
     active_streams: Vec<ActiveStreamSnapshot>,
+    stream_summary: NetworkStreamSummary,
 ) -> NetworkPsReport {
     let self_id = identity.id.as_u64();
     let mut sisters = vec![NetworkPsEntry {
@@ -623,6 +630,7 @@ async fn network_ps(
         self_id,
         sisters,
         active_streams,
+        stream_summary,
     }
 }
 
@@ -696,6 +704,17 @@ fn print_network_ps(report: &NetworkPsReport) {
                 stream.connected_for_ms,
             );
         }
+    }
+    if report.stream_summary.streams > 0
+        || report.stream_summary.tx_bytes > 0
+        || report.stream_summary.rx_bytes > 0
+    {
+        println!(
+            "\nSTREAM SUMMARY\n  streams={}  tx={}  rx={}",
+            report.stream_summary.streams,
+            report.stream_summary.tx_bytes,
+            report.stream_summary.rx_bytes,
+        );
     }
 }
 

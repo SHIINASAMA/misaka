@@ -175,6 +175,7 @@ impl SisterNode {
         let jobs = self.jobs.job_snapshots().await;
         let queue_depth = self.jobs.queue_len();
         let active_streams = self.stream_registry.snapshot();
+        let stream_summary = self.stream_registry.summary();
         IntrospectionSnapshot {
             identity: self.identity.as_ref().clone(),
             resources,
@@ -182,6 +183,7 @@ impl SisterNode {
             jobs,
             queue_depth,
             active_streams,
+            stream_summary,
         }
     }
 

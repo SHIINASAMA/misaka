@@ -95,7 +95,7 @@ cargo run -p testament -- network-verify
 cargo run -p testament -- network-verify --json
 ```
 
-N01–N16 cover connection, bidirectional exchange, sustained reuse of one
+N01–N18 cover connection, bidirectional exchange, sustained reuse of one
 connection, a 64 MiB bounded-buffer stream, remote disconnect, restart followed
 by a new stream, an opt-in TLS 1.3/mTLS LAN-style connection, Transfer v0,
 Tunnel v0, public-CLI Transfer v1 resume, active-stream introspection, and
@@ -108,6 +108,9 @@ condition polling, so process teardown begins only after the handshake and
 initial echo have completed. N13 keeps an Iroh stream open and verifies the
 selected route and cleanup through loopback introspection and the public
 `misaka ps --json --introspect` command.
+N18 additionally verifies the aggregate `stream_summary` count and live tx/rx
+bytes through both raw introspection JSON and the public `misaka ps --json`
+surface, including reset to zero after the stream closes.
 N14 verifies that an Iroh Sister restart preserves the Sister and transport
 identities and allows a fresh stream to be established.
 N15 verifies that the public Iroh `stream-test --json` command emits one

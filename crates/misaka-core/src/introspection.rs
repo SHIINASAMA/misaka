@@ -10,6 +10,23 @@ use serde::{Deserialize, Serialize};
 use crate::peer::PeerState;
 use crate::SisterIdentity;
 
+#[cfg(test)]
+mod tests {
+    use super::NetworkStreamSummary;
+
+    #[test]
+    fn network_stream_summary_roundtrips_json() {
+        let summary = NetworkStreamSummary {
+            streams: 3,
+            tx_bytes: 1024,
+            rx_bytes: 2048,
+        };
+        let encoded = serde_json::to_string(&summary).unwrap();
+        let decoded: NetworkStreamSummary = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, summary);
+    }
+}
+
 /// 资源快照 (来自本地 sysinfo 观测)
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ResourceSnapshot {
@@ -86,6 +103,14 @@ pub struct ActiveStreamSnapshot {
     pub rx_bytes: u64,
 }
 
+/// Aggregate telemetry for the currently active logical NetworkStreams.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct NetworkStreamSummary {
+    pub streams: usize,
+    pub tx_bytes: u64,
+    pub rx_bytes: u64,
+}
+
 /// 完整 introspection snapshot —— Testament 的稳定观测面
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IntrospectionSnapshot {
@@ -96,4 +121,6 @@ pub struct IntrospectionSnapshot {
     pub queue_depth: usize,
     #[serde(default)]
     pub active_streams: Vec<ActiveStreamSnapshot>,
+    #[serde(default)]
+    pub stream_summary: NetworkStreamSummary,
 }
