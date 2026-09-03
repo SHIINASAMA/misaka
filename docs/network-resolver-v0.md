@@ -24,7 +24,7 @@ diagnostics and sequential fallback.
 
 `SisterConnector` races TCP and explicitly injected Iroh candidates while
 preserving Direct TCP-only behavior when no Iroh backend is configured. The
-stream boundary captures `PathInfo` for the selected backend, and the runtime
-keeps a separate in-memory active-stream registry exposed only through
-loopback introspection; a candidate is never treated as evidence that a stream
-is connected.
+stream boundary captures `PathInfo` for the selected backend, including
+optional selected-path RTT, and the runtime keeps a separate in-memory
+active-stream registry exposed only through loopback introspection; a candidate
+is never treated as evidence that a stream is connected.

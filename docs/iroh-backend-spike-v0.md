@@ -45,7 +45,8 @@ lifecycle and rotation requirements.
   same backend and persisted local transport key; TLS certificate pinning is
   rejected for Iroh endpoints because Iroh already authenticates the endpoint.
 - Each returned stream exposes `PathInfo` with `backend = iroh`, the selected
-  route when known, and endpoint metadata suitable for diagnostics.
+  route when known, optional selected-path RTT in milliseconds, and endpoint
+  metadata suitable for diagnostics.
 - Transfer v1 runs above the same selected stream with no Iroh-specific
   protocol: `misaka cp --resume` can use Iroh, while parallel chunks,
   content addressing, and cross-domain transfer measurements remain future
@@ -73,3 +74,6 @@ lifecycle and rotation requirements.
 The unit test `iroh_backend_roundtrips_a_network_stream` runs two real Iroh
 endpoints, establishes the authenticated QUIC connection, validates the
 Misaka stream handshake, and exchanges bytes through `NetworkStream`.
+Testament N12 verifies Transfer v1 over Iroh in external Sister processes;
+N13 verifies active path, RTT, and cleanup telemetry; N14 verifies restart and
+fresh-stream behavior with the persisted Iroh transport identity.

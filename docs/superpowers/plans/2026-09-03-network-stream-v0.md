@@ -730,3 +730,20 @@ QUIC bidirectional stream, without changing the runtime's Direct TCP default.
   large-stream throughput.
 - [x] Document the real-host measurement matrix and distinguish local evidence
   from cross-domain/relay results.
+
+### Task 44: Expose selected-path RTT in observability
+
+**Files:**
+- Modify: `crates/misaka-core/src/introspection.rs`
+- Modify: `crates/misaka-network/src/lib.rs`
+- Modify: `crates/misaka-network/src/iroh_backend.rs`
+- Modify: `crates/misaka-runtime/src/stream_registry.rs`
+- Modify: `crates/misaka-cli/src/main.rs`
+- Modify: `crates/testament/src/scenario.rs`
+- Modify: `docs/network-stream-v0.md`
+- Modify: `docs/architecture.md`
+
+- [x] Add optional `rtt_ms` to `PathInfo` and active stream introspection.
+- [x] Read RTT from the selected Iroh QUIC path; keep direct TCP RTT as null.
+- [x] Display RTT in `misaka stream-test` and active `misaka ps` output.
+- [x] Verify selected Iroh RTT through the N13 external-process scenario.
