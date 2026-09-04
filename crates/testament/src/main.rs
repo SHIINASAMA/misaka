@@ -4,7 +4,7 @@ use testament::run_manager::{
     clear_current_run, create_run, layout_for_run, resolve_run_id, run_root, runs_dir,
     set_current_run,
 };
-use testament::scenario::{network_scenarios, scenarios, Context, ScenarioDef};
+use testament::scenario::{network_scenarios, relay_scenarios, scenarios, Context, ScenarioDef};
 use testament::types::{Manifest, RunLayout, SisterEntry};
 
 #[derive(Parser)]
@@ -89,6 +89,12 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Run relay-only and Sister+Relay black-box scenarios (R01-R07).
+    #[command(name = "relay-verify")]
+    RelayVerify {
+        #[arg(long)]
+        json: bool,
+    },
     /// Run the Operator UX v1 black-box smoke suite (O01-O07).
     #[command(name = "operator-verify")]
     OperatorVerify,
@@ -103,6 +109,9 @@ fn main() {
         Command::Verify { json } => verify(json),
         Command::NetworkVerify { json } => {
             verify_definitions(json, network_scenarios(), "network stream scenarios")
+        }
+        Command::RelayVerify { json } => {
+            verify_definitions(json, relay_scenarios(), "relay scenarios")
         }
         Command::Run { scenario, json } => run_one(&scenario, json),
         Command::Up { sisters, json } => up(sisters, json),
@@ -223,6 +232,7 @@ fn run_one(scenario: &str, json: bool) -> i32 {
     let Some(def) = scenarios()
         .into_iter()
         .chain(network_scenarios())
+        .chain(relay_scenarios())
         .find(|d| d.name == scenario)
     else {
         eprintln!("testament: unknown scenario {:?}", scenario);

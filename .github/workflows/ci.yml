@@ -34,3 +34,5 @@ jobs:
         run: cargo run -p testament -- operator-verify
       - name: Run full Network Stream verification
         run: cargo run -p testament -- network-verify --json
+      - name: Run relay verification
+        run: cargo run -p testament -- relay-verify --json

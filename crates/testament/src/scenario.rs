@@ -11,7 +11,7 @@ use misaka_core::identity::SisterIdentity;
 use misaka_core::introspection::IntrospectionSnapshot;
 use std::collections::HashMap;
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -84,6 +84,41 @@ impl Context {
             heartbeat: self.heartbeat,
             peer_timeout: self.peer_timeout,
         });
+        self.do_spawn(alias, entry, cmd, restart)
+    }
+
+    /// Start a Sister and an independent opaque relay in the same process.
+    pub fn start_sister_with_relay(
+        &mut self,
+        alias: &str,
+        nickname: &str,
+        peers: &[SocketAddr],
+        relay_bind: SocketAddr,
+    ) -> Result<(), ScenarioError> {
+        let listen_port =
+            alloc_port().map_err(|e| ScenarioError::infra(format!("alloc_port: {}", e)))?;
+        let introspect_port =
+            alloc_port().map_err(|e| ScenarioError::infra(format!("alloc_port: {}", e)))?;
+        let stream_port =
+            alloc_port().map_err(|e| ScenarioError::infra(format!("alloc_port: {}", e)))?;
+
+        let (entry, mut cmd, mut restart) = build_spawn(SpawnConfig {
+            layout: &self.layout,
+            alias,
+            nickname,
+            listen_port,
+            stream_port,
+            introspect_port,
+            binary: &self.binary,
+            peers,
+            discovery: &self.discovery,
+            heartbeat: self.heartbeat,
+            peer_timeout: self.peer_timeout,
+        });
+        cmd.arg("--relay")
+            .arg("--relay-bind")
+            .arg(relay_bind.to_string());
+        restart.append_args(["--relay", "--relay-bind", &relay_bind.to_string()]);
         self.do_spawn(alias, entry, cmd, restart)
     }
 
@@ -744,6 +779,252 @@ pub fn network_scenarios() -> Vec<ScenarioDef> {
             run: Box::new(n21_iroh_stability_probe),
         },
     ]
+}
+
+/// Black-box relay checks. These deliberately exercise the public `misaka`
+/// binary so Testament remains an external harness rather than a relay peer.
+pub fn relay_scenarios() -> Vec<ScenarioDef> {
+    vec![
+        ScenarioDef {
+            name: "R01_relay_only_starts_without_sister",
+            run: Box::new(r01_relay_only_starts_without_sister),
+        },
+        ScenarioDef {
+            name: "R02_relay_same_network_register_dial",
+            run: Box::new(r02_relay_same_network_register_dial),
+        },
+        ScenarioDef {
+            name: "R03_relay_networks_do_not_collide",
+            run: Box::new(r03_relay_networks_do_not_collide),
+        },
+        ScenarioDef {
+            name: "R04_relay_foreign_network_isolated",
+            run: Box::new(r04_relay_foreign_network_isolated),
+        },
+        ScenarioDef {
+            name: "R05_sister_relay_keeps_sister_functional",
+            run: Box::new(r05_sister_relay_keeps_sister_functional),
+        },
+        ScenarioDef {
+            name: "R06_stopping_relay_preserves_sister",
+            run: Box::new(r06_stopping_relay_preserves_sister),
+        },
+        ScenarioDef {
+            name: "R07_stopping_sister_relay_process_is_clean",
+            run: Box::new(r07_stopping_sister_relay_process_is_clean),
+        },
+    ]
+}
+
+const RELAY_MAGIC: &[u8; 8] = b"MSKRELAY";
+const RELAY_REGISTER: u8 = 1;
+const RELAY_DIAL: u8 = 2;
+
+fn start_relay(ctx: &Context, bind: SocketAddr) -> Result<CliProcess, ScenarioError> {
+    let config_dir = ctx.layout.root.join("relay-only-config");
+    std::fs::create_dir_all(&config_dir)
+        .map_err(|error| ScenarioError::infra(format!("create relay config: {error}")))?;
+    let bind_arg = bind.to_string();
+    let process = ctx.spawn_cli_with_config(&config_dir, &["relay", "--bind", &bind_arg])?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        if std::net::TcpStream::connect_timeout(&bind, Duration::from_millis(100)).is_ok() {
+            return Ok(process);
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    Err(ScenarioError::infra(format!(
+        "relay did not listen on {bind}"
+    )))
+}
+
+fn stop_relay(mut process: CliProcess) -> Result<(), ScenarioError> {
+    process.terminate();
+    let output = process
+        .wait_timeout(Duration::from_secs(5))
+        .map_err(|error| ScenarioError::infra(format!("stop relay: {error}")))?;
+    if output.status.success() || output.status.code().is_none() {
+        return Ok(());
+    }
+    Ok(())
+}
+
+fn relay_hello(
+    stream: &mut std::net::TcpStream,
+    role: u8,
+    network_id: misaka_core::NetworkId,
+    sister_id: u64,
+) -> Result<(), ScenarioError> {
+    stream
+        .write_all(RELAY_MAGIC)
+        .and_then(|_| stream.write_all(&[role]))
+        .and_then(|_| stream.write_all(network_id.as_bytes()))
+        .and_then(|_| stream.write_all(&sister_id.to_be_bytes()))
+        .map_err(|error| ScenarioError::assertion(format!("write relay handshake: {error}")))
+}
+
+fn relay_pair(
+    bind: SocketAddr,
+    first_network: misaka_core::NetworkId,
+    second_network: Option<misaka_core::NetworkId>,
+) -> Result<(), ScenarioError> {
+    let mut first = std::net::TcpStream::connect_timeout(&bind, Duration::from_secs(2))
+        .map_err(|error| ScenarioError::assertion(format!("connect relay register: {error}")))?;
+    relay_hello(&mut first, RELAY_REGISTER, first_network, 42)?;
+    let second_network = second_network.unwrap_or(first_network);
+    let mut dial = std::net::TcpStream::connect_timeout(&bind, Duration::from_secs(2))
+        .map_err(|error| ScenarioError::assertion(format!("connect relay dial: {error}")))?;
+    relay_hello(&mut dial, RELAY_DIAL, second_network, 42)?;
+    dial.write_all(b"relay-payload")
+        .map_err(|error| ScenarioError::assertion(format!("write relay payload: {error}")))?;
+    let mut received = [0u8; 13];
+    first
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .map_err(|error| ScenarioError::assertion(format!("set relay read timeout: {error}")))?;
+    first
+        .read_exact(&mut received)
+        .map_err(|error| ScenarioError::assertion(format!("read relay payload: {error}")))?;
+    if received != *b"relay-payload" {
+        return Err(ScenarioError::assertion("relay payload changed"));
+    }
+    Ok(())
+}
+
+fn r01_relay_only_starts_without_sister(ctx: &mut Context) -> Result<(), ScenarioError> {
+    let bind = format!(
+        "127.0.0.1:{}",
+        alloc_port().map_err(|error| ScenarioError::infra(error.to_string()))?
+    )
+    .parse()
+    .unwrap();
+    let relay = start_relay(ctx, bind)?;
+    if !ctx.sisters.is_empty() {
+        return Err(ScenarioError::assertion("relay-only created a Sister"));
+    }
+    stop_relay(relay)
+}
+
+fn r02_relay_same_network_register_dial(ctx: &mut Context) -> Result<(), ScenarioError> {
+    let bind = format!(
+        "127.0.0.1:{}",
+        alloc_port().map_err(|error| ScenarioError::infra(error.to_string()))?
+    )
+    .parse()
+    .unwrap();
+    let relay = start_relay(ctx, bind)?;
+    let result = relay_pair(bind, misaka_core::NetworkId::generate(), None);
+    stop_relay(relay)?;
+    result
+}
+
+fn r03_relay_networks_do_not_collide(ctx: &mut Context) -> Result<(), ScenarioError> {
+    let bind = format!(
+        "127.0.0.1:{}",
+        alloc_port().map_err(|error| ScenarioError::infra(error.to_string()))?
+    )
+    .parse()
+    .unwrap();
+    let relay = start_relay(ctx, bind)?;
+    let first_network = misaka_core::NetworkId::generate();
+    let second_network = misaka_core::NetworkId::generate();
+    let mut first = std::net::TcpStream::connect(bind).unwrap();
+    relay_hello(&mut first, RELAY_REGISTER, first_network, 7)?;
+    let mut second = std::net::TcpStream::connect(bind).unwrap();
+    relay_hello(&mut second, RELAY_REGISTER, second_network, 7)?;
+    let mut second_dial = std::net::TcpStream::connect(bind).unwrap();
+    relay_hello(&mut second_dial, RELAY_DIAL, second_network, 7)?;
+    second_dial.write_all(b"network-b").unwrap();
+    let mut received = [0u8; 9];
+    second.read_exact(&mut received).unwrap();
+    if received != *b"network-b" {
+        return Err(ScenarioError::assertion("relay crossed network targets"));
+    }
+    first
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+    let mut unexpected = [0u8; 1];
+    if first.read(&mut unexpected).is_ok() {
+        return Err(ScenarioError::assertion(
+            "foreign relay payload reached target",
+        ));
+    }
+    stop_relay(relay)
+}
+
+fn r04_relay_foreign_network_isolated(ctx: &mut Context) -> Result<(), ScenarioError> {
+    let bind = format!(
+        "127.0.0.1:{}",
+        alloc_port().map_err(|error| ScenarioError::infra(error.to_string()))?
+    )
+    .parse()
+    .unwrap();
+    let relay = start_relay(ctx, bind)?;
+    let network = misaka_core::NetworkId::generate();
+    let foreign = misaka_core::NetworkId::generate();
+    let mut registered = std::net::TcpStream::connect(bind).unwrap();
+    relay_hello(&mut registered, RELAY_REGISTER, network, 42)?;
+    let mut dial = std::net::TcpStream::connect(bind).unwrap();
+    relay_hello(&mut dial, RELAY_DIAL, foreign, 42)?;
+    dial.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+    let mut response = [0u8; 1];
+    if dial.read(&mut response).is_ok_and(|read| read > 0) {
+        return Err(ScenarioError::assertion(
+            "foreign network dial reached target",
+        ));
+    }
+    stop_relay(relay)
+}
+
+fn r05_sister_relay_keeps_sister_functional(ctx: &mut Context) -> Result<(), ScenarioError> {
+    let bind = format!(
+        "127.0.0.1:{}",
+        alloc_port().map_err(|error| ScenarioError::infra(error.to_string()))?
+    )
+    .parse()
+    .unwrap();
+    ctx.start_sister_with_relay("s1", "alpha", &[], bind)?;
+    if ctx.introspect("s1")?.identity.id.as_u64() == 0 {
+        return Err(ScenarioError::assertion(
+            "integrated Sister is not functional",
+        ));
+    }
+    if std::net::TcpStream::connect(bind).is_err() {
+        return Err(ScenarioError::assertion(
+            "integrated relay is not listening",
+        ));
+    }
+    Ok(())
+}
+
+fn r06_stopping_relay_preserves_sister(ctx: &mut Context) -> Result<(), ScenarioError> {
+    let relay_bind = format!(
+        "127.0.0.1:{}",
+        alloc_port().map_err(|error| ScenarioError::infra(error.to_string()))?
+    )
+    .parse()
+    .unwrap();
+    let relay = start_relay(ctx, relay_bind)?;
+    ctx.start_sister("s1", "alpha", &[])?;
+    stop_relay(relay)?;
+    let _ = ctx.introspect("s1")?;
+    Ok(())
+}
+
+fn r07_stopping_sister_relay_process_is_clean(ctx: &mut Context) -> Result<(), ScenarioError> {
+    let bind = format!(
+        "127.0.0.1:{}",
+        alloc_port().map_err(|error| ScenarioError::infra(error.to_string()))?
+    )
+    .parse()
+    .unwrap();
+    ctx.start_sister_with_relay("s1", "alpha", &[], bind)?;
+    ctx.stop_sister("s1")?;
+    if std::net::TcpStream::connect_timeout(&bind, Duration::from_millis(100)).is_ok() {
+        return Err(ScenarioError::assertion(
+            "relay remained listening after Sister+Relay shutdown",
+        ));
+    }
+    Ok(())
 }
 
 fn allocate_ports() -> Result<(u16, u16, u16), ScenarioError> {

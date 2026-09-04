@@ -14,6 +14,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
+/// All Sisters in one Testament run share this deterministic namespace.
+/// Each run still uses isolated config directories, so this is test topology,
+/// not a developer's production NetworkId.
+const TEST_NETWORK_ID: &str = "00000000-0000-0000-0000-000000000001";
+
 /// 一个被监督的 Sister OS 进程。
 pub struct SisterProcess {
     pub entry: SisterEntry,
@@ -171,6 +176,8 @@ pub fn build_spawn(config: SpawnConfig<'_>) -> (SisterEntry, Command, RestartSpe
 
     let mut args: Vec<String> = vec![
         "start".into(),
+        "--network-id".into(),
+        TEST_NETWORK_ID.into(),
         "--port".into(),
         listen_port.to_string(),
         "--stream-port".into(),
