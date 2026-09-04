@@ -3,6 +3,8 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::authenticated_session::AuthenticatedSessionConfig;
+
 #[derive(Debug, Clone)]
 pub enum StreamSecurity {
     /// The development-only raw stream, restricted to loopback.
@@ -60,6 +62,9 @@ pub struct RuntimeConfig {
     pub stream_security: StreamSecurity,
     /// Keep the stream listener limited to raw probes; reject transfer/tunnel preambles.
     pub probe_only: bool,
+    /// Optional authenticated Iroh session material. When present, Iroh
+    /// streams must complete ClientHello/ServerHello before services run.
+    pub authenticated_session: Option<AuthenticatedSessionConfig>,
     /// 告知 peer 的对外地址 (None = 用 listen_port 在回环/本机)
     pub advertise_host: Option<IpAddr>,
     /// 数据目录 (persistent identity/peers)
@@ -97,6 +102,7 @@ impl Default for RuntimeConfig {
             stream_backend: StreamBackend::DirectTcp,
             stream_security: StreamSecurity::InsecureLoopback,
             probe_only: false,
+            authenticated_session: None,
             advertise_host: None,
             // 数据目录在 CLI 层通过 MISAKA_CONFIG_DIR 决定；这里放默认值
             data_dir: PathBuf::from("."),

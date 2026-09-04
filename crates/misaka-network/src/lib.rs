@@ -47,6 +47,8 @@ pub enum NetworkError {
     UnsupportedEndpoint(String),
     #[error("Iroh failed: {0}")]
     Iroh(String),
+    #[error("authentication failed: {0}")]
+    Authentication(String),
     #[error("stream closed")]
     Closed,
 }

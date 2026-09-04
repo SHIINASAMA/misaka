@@ -4,6 +4,7 @@
 //! state sharing, job orchestration, work stealing. Everything here is one
 //! Sister's behavior; no master/slave roles exist.
 
+pub mod authenticated_session;
 pub mod commands;
 pub mod config;
 pub mod connection;

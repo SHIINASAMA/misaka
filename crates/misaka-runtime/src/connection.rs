@@ -12,6 +12,9 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 
 use crate::peer_service::PeerService;
+use crate::{
+    authenticated_session::authenticate_client, authenticated_session::AuthenticatedSessionConfig,
+};
 
 #[derive(Debug, Error)]
 pub enum ConnectionError {
@@ -42,6 +45,7 @@ pub struct SisterConnector {
     peers: PeerService,
     backend: DirectTcpBackend,
     iroh_backend: Option<IrohBackend>,
+    authenticated_session: Option<AuthenticatedSessionConfig>,
 }
 
 impl SisterConnector {
@@ -50,11 +54,17 @@ impl SisterConnector {
             peers,
             backend: DirectTcpBackend,
             iroh_backend: None,
+            authenticated_session: None,
         }
     }
 
     pub fn with_iroh_backend(mut self, backend: IrohBackend) -> Self {
         self.iroh_backend = Some(backend);
+        self
+    }
+
+    pub fn with_authenticated_session(mut self, auth: AuthenticatedSessionConfig) -> Self {
+        self.authenticated_session = Some(auth);
         self
     }
 
@@ -100,10 +110,12 @@ impl SisterConnector {
             return Err(invalid_error.unwrap_or(ConnectionError::NoStreamEndpoint(sister)));
         }
         let network_id = self.peers.network_id();
+        let expected_sister_id = sister.as_u64();
         let mut attempts = FuturesUnordered::new();
         for candidate in rank_candidates(candidates) {
             let direct = self.backend;
             let iroh = self.iroh_backend.clone();
+            let auth = self.authenticated_session.clone();
             attempts.push(async move {
                 let result = match candidate.endpoint.clone() {
                     NetworkEndpoint::Tcp(_) => direct
@@ -121,12 +133,23 @@ impl SisterConnector {
                             )
                             .await
                         {
-                            Ok(session) => {
-                                session.open_stream().await.map(|stream| ConnectedStream {
-                                    stream,
-                                    iroh_session: Some(session),
-                                })
-                            }
+                            Ok(session) => match session.open_stream().await {
+                                Ok(stream) => match auth.as_ref() {
+                                    Some(auth) => {
+                                        authenticate_client(stream, auth, Some(expected_sister_id))
+                                            .await
+                                            .map(|stream| ConnectedStream {
+                                                stream,
+                                                iroh_session: Some(session),
+                                            })
+                                    }
+                                    None => Ok(ConnectedStream {
+                                        stream,
+                                        iroh_session: Some(session),
+                                    }),
+                                },
+                                Err(error) => Err(error),
+                            },
                             Err(error) => Err(error),
                         },
                         None => Err(NetworkError::UnsupportedEndpoint(
@@ -320,6 +343,18 @@ impl ConnectionManager {
 
     pub fn new_with_iroh_backend(peers: PeerService, backend: IrohBackend) -> Self {
         Self::new(SisterConnector::new(peers).with_iroh_backend(backend))
+    }
+
+    pub fn new_with_iroh_backend_and_auth(
+        peers: PeerService,
+        backend: IrohBackend,
+        auth: AuthenticatedSessionConfig,
+    ) -> Self {
+        Self::new(
+            SisterConnector::new(peers)
+                .with_iroh_backend(backend)
+                .with_authenticated_session(auth),
+        )
     }
 
     pub async fn state(&self, sister: &SisterId) -> ConnectionState {

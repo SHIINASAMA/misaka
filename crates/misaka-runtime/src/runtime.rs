@@ -419,7 +419,29 @@ async fn iroh_session_loop(node: SisterNode, session: misaka_network::IrohSessio
                 match accepted {
                     Ok(stream) => {
                         let stream_node = node.clone();
+                        let auth = node.config.authenticated_session.clone();
                         streams.spawn(async move {
+                            let stream = match auth.as_ref() {
+                                Some(auth) => {
+                                    match crate::authenticated_session::authenticate_server(
+                                        stream, auth,
+                                    )
+                                    .await
+                                    {
+                                        Ok(stream) => stream,
+                                        Err(error) => {
+                                            tracing::warn!(
+                                                event = "iroh_authenticated_session_rejected",
+                                                sister_id = stream_node.identity.id.as_u64(),
+                                                error = %error,
+                                                "Iroh stream rejected before service dispatch"
+                                            );
+                                            return;
+                                        }
+                                    }
+                                }
+                                None => stream,
+                            };
                             log_and_echo_stream(
                                 stream_node,
                                 stream,

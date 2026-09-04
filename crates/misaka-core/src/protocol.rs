@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+/// Version of the authenticated Iroh session handshake.
+pub const AUTH_SESSION_PROTOCOL_VERSION: u16 = 1;
+
 /// Current version of the encrypted wire envelope.
 pub const PROTOCOL_VERSION: u16 = 3;
 /// Service preamble for the v0 file-transfer stream.
@@ -132,6 +135,147 @@ pub struct StateData {
     pub capabilities: Vec<String>,
 }
 
+/// First message in an authenticated Iroh logical stream.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuthenticatedClientHello {
+    pub protocol_version: u16,
+    pub network_id: super::identity::NetworkId,
+    pub sister_id: super::identity::SisterId,
+    pub sister_public_key: super::identity::SisterPublicKey,
+    pub membership_certificate: super::identity::MembershipCertificate,
+    pub transport_binding: super::identity::TransportBinding,
+    pub nonce: [u8; 32],
+    pub signature: super::identity::SisterSignature,
+}
+
+#[derive(Serialize)]
+struct AuthenticatedClientHelloUnsigned<'a> {
+    protocol_version: u16,
+    network_id: super::identity::NetworkId,
+    sister_id: &'a super::identity::SisterId,
+    sister_public_key: super::identity::SisterPublicKey,
+    membership_certificate: &'a super::identity::MembershipCertificate,
+    transport_binding: &'a super::identity::TransportBinding,
+    nonce: [u8; 32],
+}
+
+impl AuthenticatedClientHello {
+    #[allow(clippy::too_many_arguments)]
+    pub fn sign(
+        network_id: super::identity::NetworkId,
+        sister_id: u64,
+        sister_public_key: super::identity::SisterPublicKey,
+        membership_certificate: super::identity::MembershipCertificate,
+        transport_binding: super::identity::TransportBinding,
+        nonce: [u8; 32],
+        key: &super::identity::SisterKeyPair,
+    ) -> Self {
+        let mut hello = Self {
+            protocol_version: AUTH_SESSION_PROTOCOL_VERSION,
+            network_id,
+            sister_id: super::identity::SisterId(sister_id),
+            sister_public_key,
+            membership_certificate,
+            transport_binding,
+            nonce,
+            signature: super::identity::SisterSignature::from_bytes([0; 64]),
+        };
+        hello.signature = key.sign(&hello.signing_bytes());
+        hello
+    }
+
+    pub fn verify_signature(&self) -> bool {
+        self.sister_public_key
+            .verify(&self.signing_bytes(), &self.signature)
+    }
+
+    fn signing_bytes(&self) -> Vec<u8> {
+        bincode::serialize(&AuthenticatedClientHelloUnsigned {
+            protocol_version: self.protocol_version,
+            network_id: self.network_id,
+            sister_id: &self.sister_id,
+            sister_public_key: self.sister_public_key,
+            membership_certificate: &self.membership_certificate,
+            transport_binding: &self.transport_binding,
+            nonce: self.nonce,
+        })
+        .expect("authenticated client hello fields are serializable")
+    }
+}
+
+/// Server response in an authenticated Iroh logical stream.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuthenticatedServerHello {
+    pub protocol_version: u16,
+    pub network_id: super::identity::NetworkId,
+    pub sister_id: super::identity::SisterId,
+    pub sister_public_key: super::identity::SisterPublicKey,
+    pub membership_certificate: super::identity::MembershipCertificate,
+    pub transport_binding: super::identity::TransportBinding,
+    pub client_nonce: [u8; 32],
+    pub nonce: [u8; 32],
+    pub signature: super::identity::SisterSignature,
+}
+
+#[derive(Serialize)]
+struct AuthenticatedServerHelloUnsigned<'a> {
+    protocol_version: u16,
+    network_id: super::identity::NetworkId,
+    sister_id: &'a super::identity::SisterId,
+    sister_public_key: super::identity::SisterPublicKey,
+    membership_certificate: &'a super::identity::MembershipCertificate,
+    transport_binding: &'a super::identity::TransportBinding,
+    client_nonce: [u8; 32],
+    nonce: [u8; 32],
+}
+
+impl AuthenticatedServerHello {
+    #[allow(clippy::too_many_arguments)]
+    pub fn sign(
+        network_id: super::identity::NetworkId,
+        sister_id: u64,
+        sister_public_key: super::identity::SisterPublicKey,
+        membership_certificate: super::identity::MembershipCertificate,
+        transport_binding: super::identity::TransportBinding,
+        client_nonce: [u8; 32],
+        nonce: [u8; 32],
+        key: &super::identity::SisterKeyPair,
+    ) -> Self {
+        let mut hello = Self {
+            protocol_version: AUTH_SESSION_PROTOCOL_VERSION,
+            network_id,
+            sister_id: super::identity::SisterId(sister_id),
+            sister_public_key,
+            membership_certificate,
+            transport_binding,
+            client_nonce,
+            nonce,
+            signature: super::identity::SisterSignature::from_bytes([0; 64]),
+        };
+        hello.signature = key.sign(&hello.signing_bytes());
+        hello
+    }
+
+    pub fn verify_signature(&self) -> bool {
+        self.sister_public_key
+            .verify(&self.signing_bytes(), &self.signature)
+    }
+
+    fn signing_bytes(&self) -> Vec<u8> {
+        bincode::serialize(&AuthenticatedServerHelloUnsigned {
+            protocol_version: self.protocol_version,
+            network_id: self.network_id,
+            sister_id: &self.sister_id,
+            sister_public_key: self.sister_public_key,
+            membership_certificate: &self.membership_certificate,
+            transport_binding: &self.transport_binding,
+            client_nonce: self.client_nonce,
+            nonce: self.nonce,
+        })
+        .expect("authenticated server hello fields are serializable")
+    }
+}
+
 #[cfg(test)]
 mod network_id_tests {
     use super::{HelloData, StateData};
@@ -216,6 +360,77 @@ mod network_id_tests {
         let mut json = serde_json::to_value(value).unwrap();
         json.as_object_mut().unwrap().remove("network_id");
         assert!(serde_json::from_value::<StateData>(json).is_err());
+    }
+}
+
+#[cfg(test)]
+mod authenticated_session_tests {
+    use super::{AuthenticatedClientHello, AuthenticatedServerHello};
+    use crate::{
+        IrohEndpointId, MembershipCertificate, NetworkAuthority, NetworkId, SisterKeyPair,
+        TransportBinding,
+    };
+
+    fn fixture() -> (
+        NetworkId,
+        SisterKeyPair,
+        MembershipCertificate,
+        TransportBinding,
+        NetworkAuthority,
+    ) {
+        let network_id = NetworkId::generate();
+        let (authority, authority_key) = NetworkAuthority::generate(network_id);
+        let sister_key = SisterKeyPair::generate();
+        let certificate = MembershipCertificate::issue(
+            &authority,
+            &authority_key,
+            sister_key.public_key(),
+            7,
+            1,
+            None,
+            1,
+        );
+        let binding = TransportBinding::sign(
+            network_id,
+            7,
+            IrohEndpointId::from_bytes([8u8; 32]),
+            0,
+            &sister_key,
+        );
+        (network_id, sister_key, certificate, binding, authority)
+    }
+
+    #[test]
+    fn authenticated_hello_signatures_cover_nonce_and_contracts() {
+        let (network_id, key, certificate, binding, authority) = fixture();
+        let client = AuthenticatedClientHello::sign(
+            network_id,
+            7,
+            key.public_key(),
+            certificate.clone(),
+            binding.clone(),
+            [1u8; 32],
+            &key,
+        );
+        assert!(client.verify_signature());
+        assert!(client.membership_certificate.verify(&authority));
+        assert!(client.transport_binding.verify());
+
+        let server = AuthenticatedServerHello::sign(
+            network_id,
+            7,
+            key.public_key(),
+            certificate,
+            binding,
+            client.nonce,
+            [2u8; 32],
+            &key,
+        );
+        assert!(server.verify_signature());
+
+        let mut tampered = server;
+        tampered.client_nonce = [9u8; 32];
+        assert!(!tampered.verify_signature());
     }
 }
 

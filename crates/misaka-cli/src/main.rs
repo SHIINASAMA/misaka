@@ -428,6 +428,13 @@ async fn async_main() -> Result<(), MisakaError> {
                     )))
                 }
             };
+            let authenticated_session = match &stream_backend {
+                misaka_runtime::config::StreamBackend::Iroh(_) => {
+                    load_authenticated_session(&data_dir, network_id, &identity, &sister_key)
+                        .map_err(MisakaError::Other)?
+                }
+                misaka_runtime::config::StreamBackend::DirectTcp => None,
+            };
             if nickname.clone().is_some() {
                 tracing::info!(
                     event = "nickname_updated",
@@ -459,6 +466,7 @@ async fn async_main() -> Result<(), MisakaError> {
                 stream_backend,
                 stream_security,
                 probe_only,
+                authenticated_session,
                 data_dir,
                 heartbeat_interval: std::time::Duration::from_secs(heartbeat),
                 peer_timeout: std::time::Duration::from_secs(peer_timeout),
@@ -2153,6 +2161,78 @@ async fn bind_iroh_backend(
         (None, true) => unreachable!("CLI requires --iroh-relay with --iroh-relay-only"),
     }
     .map_err(|error| error.to_string())
+}
+
+fn load_authenticated_session(
+    data_dir: &Path,
+    network_id: misaka_core::NetworkId,
+    identity: &misaka_core::SisterIdentity,
+    sister_key: &misaka_core::SisterKeyPair,
+) -> Result<Option<misaka_runtime::authenticated_session::AuthenticatedSessionConfig>, String> {
+    let authority = misaka_runtime::network_authority_store::NetworkAuthorityStore::load(data_dir)
+        .map_err(|error| error.to_string())?;
+    let membership = misaka_runtime::membership_store::MembershipStore::load(data_dir)
+        .map_err(|error| error.to_string())?;
+    let binding = TransportBindingStore::load(data_dir).map_err(|error| error.to_string())?;
+
+    match (authority, membership, binding) {
+        (None, None, None) => Ok(None),
+        (Some(authority), Some(membership), Some(binding)) => {
+            if authority.network_id != network_id
+                || membership.sister_id != identity.id
+                || membership.sister_public_key != sister_key.public_key()
+                || !membership.verify(&authority)
+                || !membership.is_valid_at(unix_now())
+                || binding.network_id != network_id
+                || binding.sister_id != identity.id
+                || binding.sister_public_key != sister_key.public_key()
+                || !binding.verify()
+            {
+                return Err(
+                    "local Network authority, membership, or transport binding is invalid"
+                        .to_string(),
+                );
+            }
+            let mut auth =
+                misaka_runtime::authenticated_session::AuthenticatedSessionConfig::new(
+                    network_id,
+                    identity.id.as_u64(),
+                    sister_key.clone(),
+                    authority,
+                    membership,
+                    binding,
+                );
+            let revocations =
+                misaka_runtime::revocation_store::RevocationStore::load(data_dir)
+                    .map_err(|error| error.to_string())?;
+            for record in revocations {
+                if record.network_id == network_id {
+                    if !record.verify(&auth.authority) {
+                        return Err("local revocation record has an invalid signature".to_string());
+                    }
+                    auth.revoked_membership_serials.push(record.membership_serial);
+                }
+            }
+            if auth
+                .revoked_membership_serials
+                .contains(&auth.membership_certificate.serial)
+            {
+                return Err("local Sister membership has been revoked".to_string());
+            }
+            Ok(Some(auth))
+        }
+        _ => Err(
+            "authenticated Iroh mode requires network.json, membership.bin, and transport-binding.json"
+                .to_string(),
+        ),
+    }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 async fn bind_iroh_client_backend(
