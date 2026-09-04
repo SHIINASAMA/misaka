@@ -4,7 +4,9 @@ use testament::run_manager::{
     clear_current_run, create_run, layout_for_run, resolve_run_id, run_root, runs_dir,
     set_current_run,
 };
-use testament::scenario::{network_scenarios, relay_scenarios, scenarios, Context, ScenarioDef};
+use testament::scenario::{
+    network_scenarios, relay_scenarios, scenarios, security_scenarios, Context, ScenarioDef,
+};
 use testament::types::{Manifest, RunLayout, SisterEntry};
 
 #[derive(Parser)]
@@ -95,6 +97,12 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Run adversarial authorization and revocation scenarios (S01-S03).
+    #[command(name = "security-verify")]
+    SecurityVerify {
+        #[arg(long)]
+        json: bool,
+    },
     /// Run the Operator UX v1 black-box smoke suite (O01-O07).
     #[command(name = "operator-verify")]
     OperatorVerify,
@@ -112,6 +120,9 @@ fn main() {
         }
         Command::RelayVerify { json } => {
             verify_definitions(json, relay_scenarios(), "relay scenarios")
+        }
+        Command::SecurityVerify { json } => {
+            verify_definitions(json, security_scenarios(), "security scenarios")
         }
         Command::Run { scenario, json } => run_one(&scenario, json),
         Command::Up { sisters, json } => up(sisters, json),

@@ -159,6 +159,19 @@ fn spawn_pump(mut stream: impl std::io::Read + Send + 'static) -> std::thread::J
 /// 分配端口 + 组装启动参数，但**不**实际 spawn (便于测试启动命令)。
 /// 一并返回重建 command 所需的 RestartSpec。
 pub fn build_spawn(config: SpawnConfig<'_>) -> (SisterEntry, Command, RestartSpec) {
+    build_spawn_with_mode(config, true)
+}
+
+/// Construct a production-mode Sister process without the compatibility
+/// authorization bypass. Security scenarios use this to exercise defaults.
+pub fn build_spawn_secure(config: SpawnConfig<'_>) -> (SisterEntry, Command, RestartSpec) {
+    build_spawn_with_mode(config, false)
+}
+
+fn build_spawn_with_mode(
+    config: SpawnConfig<'_>,
+    insecure_development: bool,
+) -> (SisterEntry, Command, RestartSpec) {
     let SpawnConfig {
         layout,
         alias,
@@ -199,8 +212,10 @@ pub fn build_spawn(config: SpawnConfig<'_>) -> (SisterEntry, Command, RestartSpe
         peer_timeout.to_string(),
         "--introspect".into(),
         introspect_port.to_string(),
-        "--insecure-development".into(),
     ];
+    if insecure_development {
+        args.push("--insecure-development".into());
+    }
     if !peers.is_empty() {
         for p in peers {
             args.push("--peer".into());
@@ -306,8 +321,10 @@ pub fn command_for_entry(entry: &SisterEntry, fallback_binary: &Path) -> std::io
         peer_timeout.to_string(),
         "--introspect".to_string(),
         introspect_port.to_string(),
-        "--insecure-development".to_string(),
     ];
+    // Persisted manifests predate a mode field and represent the existing
+    // compatibility suite, whose restart contract keeps this explicit flag.
+    args.push("--insecure-development".to_string());
     if let Some(stream_port) = stream_port_from_entry(entry)? {
         args.splice(3..3, ["--stream-port".to_string(), stream_port.to_string()]);
     }

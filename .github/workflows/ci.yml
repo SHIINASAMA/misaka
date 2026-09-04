@@ -36,3 +36,5 @@ jobs:
         run: cargo run -p testament -- network-verify --json
       - name: Run relay verification
         run: cargo run -p testament -- relay-verify --json
+      - name: Run security verification
+        run: cargo run -p testament -- security-verify --json

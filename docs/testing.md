@@ -11,6 +11,7 @@ cargo build -p misaka
 cargo run -p testament -- verify
 cargo run -p testament -- verify --json
 cargo run -p testament -- network-verify --json
+cargo run -p testament -- security-verify --json
 ```
 
 The suite currently contains:
@@ -131,6 +132,13 @@ The `.testament/` directory is ignored by Git. Logs are diagnostic artifacts onl
 ```
 
 `verify` writes a `SuiteReport` aggregate (with per-scenario counts) to the run's `report.json`, plus each scenario's own report under its `sisters/<scenario>/` directory.
+
+`security-verify` starts production-mode Sisters without the compatibility
+bypass and checks that missing Human authorization is rejected, Sister and
+Human revocation serials remain isolated, live Sister revocation takes effect
+after startup, and a revoked Human membership cannot authorize a transfer.
+Existing compatibility scenarios pass `--insecure-development` explicitly;
+production deployments must not use that flag.
 
 ## Network Stream v0 suite
 

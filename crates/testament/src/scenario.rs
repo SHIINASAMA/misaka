@@ -5,10 +5,11 @@
 use crate::assertion as assert;
 use crate::observer;
 use crate::run_manager::{alloc_port, misaka_binary};
-use crate::supervisor::{build_spawn, CliProcess, SisterProcess, SpawnConfig};
+use crate::supervisor::{build_spawn, build_spawn_secure, CliProcess, SisterProcess, SpawnConfig};
 use crate::types::{Artifacts, Manifest, Report, RunLayout, ScenarioError, SisterEntry};
 use misaka_core::identity::{
-    MembershipCertificate, NetworkAuthority, NetworkId, SisterIdentity, SisterKeyPair,
+    MembershipCertificate, MembershipKind, NetworkAuthority, NetworkId, RevocationRecord,
+    SisterIdentity, SisterKeyPair,
 };
 use misaka_core::introspection::IntrospectionSnapshot;
 use std::collections::HashMap;
@@ -91,6 +92,36 @@ impl Context {
             peer_timeout: self.peer_timeout,
         });
         self.do_spawn(alias, entry, cmd, restart)
+    }
+
+    /// Start a production-mode Sister without the explicit local compatibility
+    /// authorization bypass. Used only by adversarial security scenarios.
+    pub fn start_sister_secure(
+        &mut self,
+        alias: &str,
+        nickname: &str,
+        peers: &[SocketAddr],
+    ) -> Result<(), ScenarioError> {
+        let listen_port =
+            alloc_port().map_err(|e| ScenarioError::infra(format!("alloc listen port: {e}")))?;
+        let introspect_port = alloc_port()
+            .map_err(|e| ScenarioError::infra(format!("alloc introspection port: {e}")))?;
+        let stream_port =
+            alloc_port().map_err(|e| ScenarioError::infra(format!("alloc stream port: {e}")))?;
+        let (entry, command, restart) = build_spawn_secure(SpawnConfig {
+            layout: &self.layout,
+            alias,
+            nickname,
+            listen_port,
+            stream_port,
+            introspect_port,
+            binary: &self.binary,
+            peers,
+            discovery: &self.discovery,
+            heartbeat: self.heartbeat,
+            peer_timeout: self.peer_timeout,
+        });
+        self.do_spawn(alias, entry, command, restart)
     }
 
     /// Start a Sister and an independent native Iroh relay in the same process.
@@ -395,10 +426,25 @@ impl Context {
     /// backend. Control-plane discovery remains the same manual black-box
     /// mechanism; only the advertised stream endpoint changes.
     pub fn start_iroh_pair(&mut self) -> Result<(), ScenarioError> {
+        self.start_iroh_pair_mode(true)
+    }
+
+    pub fn start_iroh_pair_secure(&mut self) -> Result<(), ScenarioError> {
+        self.start_iroh_pair_mode(false)
+    }
+
+    fn start_iroh_pair_mode(&mut self, insecure_development: bool) -> Result<(), ScenarioError> {
         let a_ports = allocate_ports()?;
         let b_ports = allocate_ports()?;
 
-        let (mut a_entry, mut a_command, mut a_restart) = build_spawn(SpawnConfig {
+        let spawn = |config: SpawnConfig<'_>| {
+            if insecure_development {
+                build_spawn(config)
+            } else {
+                build_spawn_secure(config)
+            }
+        };
+        let (mut a_entry, mut a_command, mut a_restart) = spawn(SpawnConfig {
             layout: &self.layout,
             alias: "a",
             nickname: "alpha",
@@ -411,7 +457,7 @@ impl Context {
             heartbeat: self.heartbeat,
             peer_timeout: self.peer_timeout,
         });
-        let (mut b_entry, mut b_command, mut b_restart) = build_spawn(SpawnConfig {
+        let (mut b_entry, mut b_command, mut b_restart) = spawn(SpawnConfig {
             layout: &self.layout,
             alias: "b",
             nickname: "beta",
@@ -908,6 +954,23 @@ pub fn relay_scenarios() -> Vec<ScenarioDef> {
     ]
 }
 
+pub fn security_scenarios() -> Vec<ScenarioDef> {
+    vec![
+        ScenarioDef {
+            name: "S01_missing_human_authorization_is_rejected",
+            run: Box::new(s01_missing_human_authorization_is_rejected),
+        },
+        ScenarioDef {
+            name: "S02_revocation_domains_do_not_collide",
+            run: Box::new(s02_revocation_domains_do_not_collide),
+        },
+        ScenarioDef {
+            name: "S03_revoked_human_authorization_is_rejected",
+            run: Box::new(s03_revoked_human_authorization_is_rejected),
+        },
+    ]
+}
+
 fn start_relay(ctx: &Context, bind: SocketAddr) -> Result<CliProcess, ScenarioError> {
     let config_dir = ctx.layout.root.join("relay-only-config");
     std::fs::create_dir_all(&config_dir)
@@ -924,6 +987,227 @@ fn start_relay(ctx: &Context, bind: SocketAddr) -> Result<CliProcess, ScenarioEr
     Err(ScenarioError::infra(format!(
         "relay did not listen on {bind}"
     )))
+}
+
+fn wait_cli(
+    ctx: &Context,
+    alias: &str,
+    args: &[&str],
+    label: &str,
+) -> Result<std::process::Output, ScenarioError> {
+    ctx.spawn_cli(alias, args)?
+        .wait_timeout(Duration::from_secs(20))
+        .map_err(|error| ScenarioError::infra(format!("wait {label}: {error}")))
+}
+
+fn stream_probe_result(
+    ctx: &Context,
+    client: &str,
+    endpoint: &str,
+    label: &str,
+) -> Result<std::process::Output, ScenarioError> {
+    wait_cli(
+        ctx,
+        client,
+        &["stream-test", "--endpoint", endpoint, "--mode", "connect"],
+        label,
+    )
+}
+
+fn append_test_revocation(
+    ctx: &Context,
+    alias: &str,
+    record: RevocationRecord,
+) -> Result<(), ScenarioError> {
+    let config_dir = ctx
+        .entries
+        .get(alias)
+        .ok_or_else(|| ScenarioError::infra(format!("no {alias} entry")))?
+        .config_dir
+        .clone();
+    let path = Path::new(&config_dir).join("revocations.json");
+    let mut records: Vec<RevocationRecord> = if path.exists() {
+        serde_json::from_str(
+            &std::fs::read_to_string(&path)
+                .map_err(|error| ScenarioError::infra(format!("read revocations: {error}")))?,
+        )
+        .map_err(|error| ScenarioError::infra(format!("decode revocations: {error}")))?
+    } else {
+        Vec::new()
+    };
+    records.push(record);
+    std::fs::write(
+        path,
+        serde_json::to_vec_pretty(&records)
+            .map_err(|error| ScenarioError::infra(format!("encode revocations: {error}")))?,
+    )
+    .map_err(|error| ScenarioError::infra(format!("write revocations: {error}")))
+}
+
+fn s01_missing_human_authorization_is_rejected(ctx: &mut Context) -> Result<(), ScenarioError> {
+    ctx.start_sister_secure("a", "alpha", &[])?;
+    let a_addr = ctx.peer_addr("a")?;
+    ctx.start_sister_secure("b", "beta", &[a_addr])?;
+    let b_id = ctx.introspect("b")?.identity.id.as_u64();
+    let a_introspect = introspect_addr_of(ctx, "a")?;
+    assert::eventually(
+        a_introspect,
+        "a learns b",
+        Duration::from_secs(8),
+        |snapshot| snapshot.peers.iter().any(|peer| peer.id == b_id),
+    )?;
+
+    let source = ctx.layout.root.join("security-no-human-source");
+    let destination = ctx.layout.root.join("security-no-human-destination");
+    std::fs::write(&source, b"must be denied")
+        .map_err(|error| ScenarioError::infra(format!("write security source: {error}")))?;
+    let source_arg = source.to_string_lossy().to_string();
+    let destination_arg = format!("#{b_id}:{}", destination.display());
+    let output = wait_cli(
+        ctx,
+        "a",
+        &["cp", &source_arg, &destination_arg],
+        "unauthorized copy",
+    )?;
+    if output.status.success() {
+        return Err(ScenarioError::assertion(
+            "copy without Human Authorization unexpectedly succeeded",
+        ));
+    }
+    assert::assert_eq(
+        destination.exists(),
+        false,
+        "unauthorized copy leaves no file",
+    )?;
+    Ok(())
+}
+
+fn s02_revocation_domains_do_not_collide(ctx: &mut Context) -> Result<(), ScenarioError> {
+    ctx.start_iroh_pair_secure()?;
+    let endpoint = ctx
+        .run_cli("a", &["endpoint", "--json"])?
+        .parse::<serde_json::Value>()
+        .map_err(|error| ScenarioError::assertion(format!("decode Iroh endpoint: {error}")))?
+        .get("endpoint")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| ScenarioError::assertion("Iroh endpoint export has no endpoint"))?
+        .to_string();
+    let b_id = ctx.introspect("b")?.identity.id.as_u64();
+    let (authority, authority_key) = ctx.ensure_iroh_authority();
+
+    let valid = stream_probe_result(ctx, "b", &endpoint, "valid Iroh probe")?;
+    assert::assert_eq(valid.status.success(), true, "valid Iroh session")?;
+
+    append_test_revocation(
+        ctx,
+        "a",
+        RevocationRecord::issue(
+            &authority,
+            &authority_key,
+            MembershipKind::Human,
+            b_id,
+            unix_now(),
+            "human serial collision probe".into(),
+        ),
+    )?;
+    let sister_survives_human_revoke =
+        stream_probe_result(ctx, "b", &endpoint, "Sister after Human revoke")?;
+    assert::assert_eq(
+        sister_survives_human_revoke.status.success(),
+        true,
+        "Human revoke does not revoke Sister serial",
+    )?;
+
+    append_test_revocation(
+        ctx,
+        "a",
+        RevocationRecord::issue(
+            &authority,
+            &authority_key,
+            MembershipKind::Sister,
+            b_id,
+            unix_now(),
+            "Sister revoked".into(),
+        ),
+    )?;
+    let revoked = stream_probe_result(ctx, "b", &endpoint, "revoked Sister probe")?;
+    assert::assert_eq(revoked.status.success(), false, "revoked Sister session")?;
+    Ok(())
+}
+
+fn s03_revoked_human_authorization_is_rejected(ctx: &mut Context) -> Result<(), ScenarioError> {
+    ctx.start_sister_secure("a", "alpha", &[])?;
+    let a_addr = ctx.peer_addr("a")?;
+    ctx.start_sister_secure("b", "beta", &[a_addr])?;
+    let b_id = ctx.introspect("b")?.identity.id.as_u64();
+    let a_introspect = introspect_addr_of(ctx, "a")?;
+    assert::eventually(
+        a_introspect,
+        "a learns b",
+        Duration::from_secs(8),
+        |snapshot| snapshot.peers.iter().any(|peer| peer.id == b_id),
+    )?;
+
+    ctx.run_cli("a", &["network", "init"])?;
+    let a_config = PathBuf::from(
+        ctx.entries
+            .get("a")
+            .ok_or_else(|| ScenarioError::infra("no a entry"))?
+            .config_dir
+            .clone(),
+    );
+    let b_config = PathBuf::from(
+        ctx.entries
+            .get("b")
+            .ok_or_else(|| ScenarioError::infra("no b entry"))?
+            .config_dir
+            .clone(),
+    );
+    for file in ["network.json", "network-authority-key"] {
+        std::fs::copy(a_config.join(file), b_config.join(file))
+            .map_err(|error| ScenarioError::infra(format!("copy {file}: {error}")))?;
+    }
+    ctx.run_cli("a", &["human", "init", "--name", "security-owner"])?;
+
+    let source = ctx.layout.root.join("security-human-source");
+    let first_destination = ctx.layout.root.join("security-human-ok");
+    let revoked_destination = ctx.layout.root.join("security-human-revoked");
+    std::fs::write(&source, b"authorized before revoke")
+        .map_err(|error| ScenarioError::infra(format!("write human source: {error}")))?;
+    let source_arg = source.to_string_lossy().to_string();
+    let first_destination_arg = format!("#{b_id}:{}", first_destination.display());
+    let first = ctx.run_cli("a", &["cp", &source_arg, &first_destination_arg])?;
+    assert::assert_contains(&first, "Copied", "authorized copy")?;
+
+    ctx.run_cli(
+        "b",
+        &[
+            "network",
+            "revoke",
+            "--membership-kind",
+            "human",
+            "--membership-serial",
+            "1",
+        ],
+    )?;
+    let revoked_destination_arg = format!("#{b_id}:{}", revoked_destination.display());
+    let second = wait_cli(
+        ctx,
+        "a",
+        &["cp", &source_arg, &revoked_destination_arg],
+        "revoked human copy",
+    )?;
+    if second.status.success() {
+        return Err(ScenarioError::assertion(
+            "copy with revoked Human membership unexpectedly succeeded",
+        ));
+    }
+    assert::assert_eq(
+        revoked_destination.exists(),
+        false,
+        "revoked Human copy leaves no file",
+    )?;
+    Ok(())
 }
 
 fn stop_relay(mut process: CliProcess) -> Result<(), ScenarioError> {
