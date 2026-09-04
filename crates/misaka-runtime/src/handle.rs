@@ -25,6 +25,9 @@ impl SisterHandle {
 
     /// Send the side-effect-free reachability probe to a known Sister.
     pub async fn ping(&self, sister_id: u64) -> Result<()> {
+        if sister_id == self.node.identity.id.as_u64() {
+            return Ok(());
+        }
         let envelope = Self::ping_envelope(
             self.node.config.network_id,
             self.node.identity.id.as_u64(),
