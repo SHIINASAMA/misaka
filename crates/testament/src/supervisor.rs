@@ -212,6 +212,8 @@ fn build_spawn_with_mode(
         peer_timeout.to_string(),
         "--introspect".into(),
         introspect_port.to_string(),
+        "--api-port".into(),
+        "0".into(),
     ];
     if insecure_development {
         args.push("--insecure-development".into());
@@ -321,6 +323,8 @@ pub fn command_for_entry(entry: &SisterEntry, fallback_binary: &Path) -> std::io
         peer_timeout.to_string(),
         "--introspect".to_string(),
         introspect_port.to_string(),
+        "--api-port".to_string(),
+        "0".to_string(),
     ];
     // Persisted manifests predate a mode field and represent the existing
     // compatibility suite, whose restart contract keeps this explicit flag.
@@ -420,6 +424,8 @@ fn command_args_for_entry(entry: &SisterEntry) -> std::io::Result<Vec<String>> {
         peer_timeout.to_string(),
         "--introspect".into(),
         introspect_port.to_string(),
+        "--api-port".into(),
+        "0".into(),
     ];
     if let Some(stream_port) = stream_port_from_entry(entry)? {
         args.splice(3..3, ["--stream-port".into(), stream_port.to_string()]);
