@@ -1,253 +1,199 @@
-//! Opaque byte-forwarding relay service.
+//! Iroh-native relay service.
 //!
-//! The relay is deliberately not a Sister. It has no peer store, discovery,
-//! scheduler, identity authority, or payload decryption responsibility.
+//! A relay is infrastructure only. It is not a Sister, does not join a
+//! Misaka Network, and does not inspect or authorize application payloads.
 
-use misaka_core::NetworkId;
-use std::collections::HashMap;
+use iroh_relay::server::{
+    CertConfig, RelayConfig as IrohRelayConfig, Server, ServerConfig, TlsConfig,
+};
+use rustls::pki_types::CertificateDer;
+use std::fs::File;
+use std::io::BufReader;
 use std::net::SocketAddr;
-use std::sync::Arc;
-use tokio::io::AsyncReadExt;
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{oneshot, Mutex};
+use std::path::{Path, PathBuf};
 
-const MAGIC: &[u8; 8] = b"MSKRELAY";
-const REGISTER: u8 = 1;
-const DIAL: u8 = 2;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct RelayTarget {
-    network_id: NetworkId,
-    sister_id: u64,
+/// Configuration for one Iroh relay service.
+#[derive(Debug, Clone)]
+pub struct RelayOptions {
+    /// Public relay address. HTTP in development mode, HTTPS when TLS files
+    /// are configured.
+    pub bind: SocketAddr,
+    /// Plain HTTP address used for the relay captive-portal service when TLS
+    /// is enabled. Defaults to port 80 on the bind address.
+    pub http_bind: Option<SocketAddr>,
+    /// PEM certificate chain for HTTPS mode.
+    pub tls_cert: Option<PathBuf>,
+    /// PEM private key for HTTPS mode.
+    pub tls_key: Option<PathBuf>,
 }
 
-type Pending = Arc<Mutex<HashMap<RelayTarget, oneshot::Sender<TcpStream>>>>;
+impl RelayOptions {
+    pub fn http(bind: SocketAddr) -> Self {
+        Self {
+            bind,
+            http_bind: None,
+            tls_cert: None,
+            tls_key: None,
+        }
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum RelayError {
-    #[error("relay I/O failed: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("invalid relay handshake")]
-    Handshake,
-    #[error("Sister #{sister_id} is not registered in network {network_id}")]
-    UnknownPeer {
-        network_id: NetworkId,
-        sister_id: u64,
-    },
-    #[error("Sister #{sister_id} already has a pending registration in network {network_id}")]
-    DuplicatePeer {
-        network_id: NetworkId,
-        sister_id: u64,
-    },
+    #[error("Iroh relay configuration is invalid: {0}")]
+    InvalidConfig(String),
+    #[error("Iroh relay TLS I/O failed: {0}")]
+    TlsIo(#[from] std::io::Error),
+    #[error("Iroh relay TLS configuration failed: {0}")]
+    Tls(String),
+    #[error("Iroh relay failed: {0}")]
+    Iroh(String),
 }
 
-/// Owns one opaque TCP relay listener. It never becomes a Misaka peer.
+/// Owns one native Iroh relay server. It never becomes a Misaka peer.
 pub struct RelayService {
-    listener: TcpListener,
-    pending: Pending,
+    server: Server,
 }
 
 impl RelayService {
+    /// Bind an HTTP-only Iroh relay. This is useful for local development;
+    /// public deployments should configure TLS with [`Self::bind_with_options`].
     pub async fn bind(address: SocketAddr) -> Result<Self, RelayError> {
-        Ok(Self {
-            listener: TcpListener::bind(address).await?,
-            pending: Arc::new(Mutex::new(HashMap::new())),
-        })
+        Self::bind_with_options(RelayOptions::http(address)).await
     }
 
+    /// Bind an Iroh relay with either plain HTTP or configured HTTPS.
+    pub async fn bind_with_options(options: RelayOptions) -> Result<Self, RelayError> {
+        let config = build_server_config(&options)?;
+        let server = Server::spawn(config)
+            .await
+            .map_err(|error| RelayError::Iroh(error.to_string()))?;
+        Ok(Self { server })
+    }
+
+    /// Return the address used by Iroh clients: HTTPS when TLS is enabled,
+    /// otherwise HTTP.
     pub fn local_addr(&self) -> Result<SocketAddr, RelayError> {
-        Ok(self.listener.local_addr()?)
+        self.server
+            .https_addr()
+            .or_else(|| self.server.http_addr())
+            .ok_or_else(|| RelayError::Iroh("relay server has no bound address".to_string()))
     }
 
-    pub async fn run(self) -> Result<(), RelayError> {
-        tracing::info!(address = %self.listener.local_addr()?, "relay listening");
-        loop {
-            let (stream, address) = self.listener.accept().await?;
-            let pending = Arc::clone(&self.pending);
-            tokio::spawn(async move {
-                if let Err(error) = handle_connection(stream, pending).await {
-                    tracing::debug!(peer = %address, error = %error, "relay connection closed");
-                }
-            });
-        }
+    pub fn is_tls_enabled(&self) -> bool {
+        self.server.https_addr().is_some()
+    }
+
+    /// Wait until the native Iroh relay server stops.
+    pub async fn run(mut self) -> Result<(), RelayError> {
+        tracing::info!(
+            address = %self.local_addr()?,
+            tls = self.is_tls_enabled(),
+            "Iroh relay listening"
+        );
+        let result = self
+            .server
+            .join()
+            .await
+            .map_err(|error| RelayError::Iroh(error.to_string()))?;
+        result.map_err(|error| RelayError::Iroh(error.to_string()))
     }
 }
 
-async fn handle_connection(mut stream: TcpStream, pending: Pending) -> Result<(), RelayError> {
-    let mut magic = [0u8; MAGIC.len()];
-    stream.read_exact(&mut magic).await?;
-    if magic != *MAGIC {
-        return Err(RelayError::Handshake);
-    }
-    let role = stream.read_u8().await?;
-    let mut network_bytes = [0u8; 16];
-    stream.read_exact(&mut network_bytes).await?;
-    let network_id = NetworkId::from_bytes(network_bytes);
-    let sister_id = stream.read_u64().await?;
-    let target = RelayTarget {
-        network_id,
-        sister_id,
-    };
-    match role {
-        REGISTER => {
-            let (sender, receiver) = oneshot::channel();
-            let mut registrations = pending.lock().await;
-            if registrations.contains_key(&target) {
-                return Err(RelayError::DuplicatePeer {
-                    network_id,
-                    sister_id,
-                });
-            }
-            registrations.insert(target, sender);
-            drop(registrations);
-            let mut peer = tokio::select! {
-                result = receiver => {
-                    result.map_err(|_| RelayError::UnknownPeer { network_id, sister_id })?
-                }
-                result = stream.read_u8() => {
-                    pending.lock().await.remove(&target);
-                    return Err(match result {
-                        Ok(_) => RelayError::Handshake,
-                        Err(_) => RelayError::UnknownPeer { network_id, sister_id },
-                    });
-                }
-            };
-            let _ = tokio::io::copy_bidirectional(&mut stream, &mut peer).await?;
-            pending.lock().await.remove(&target);
-            Ok(())
+fn build_server_config(options: &RelayOptions) -> Result<ServerConfig, RelayError> {
+    let mut relay = IrohRelayConfig::new(options.bind);
+    match (&options.tls_cert, &options.tls_key) {
+        (None, None) => {}
+        (Some(cert), Some(key)) => {
+            let server_config = load_tls_config(cert, key)?;
+            let http_bind = options
+                .http_bind
+                .unwrap_or_else(|| SocketAddr::new(options.bind.ip(), 80));
+            relay.http_bind_addr = http_bind;
+            relay.tls = Some(TlsConfig::new(
+                options.bind,
+                CertConfig::Manual { server_config },
+            ));
         }
-        DIAL => {
-            let sender = pending
-                .lock()
-                .await
-                .remove(&target)
-                .ok_or(RelayError::UnknownPeer {
-                    network_id,
-                    sister_id,
-                })?;
-            sender.send(stream).map_err(|_| RelayError::UnknownPeer {
-                network_id,
-                sister_id,
-            })?;
-            Ok(())
+        _ => {
+            return Err(RelayError::InvalidConfig(
+                "--relay-tls-cert and --relay-tls-key must be provided together".to_string(),
+            ));
         }
-        _ => Err(RelayError::Handshake),
     }
+
+    let mut config = ServerConfig::default();
+    config.relay = Some(relay);
+    Ok(config)
+}
+
+fn load_tls_config(cert_path: &Path, key_path: &Path) -> Result<rustls::ServerConfig, RelayError> {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    let mut cert_reader = BufReader::new(File::open(cert_path)?);
+    let certificates = rustls_pemfile::certs(&mut cert_reader)
+        .collect::<Result<Vec<CertificateDer<'static>>, _>>()
+        .map_err(|error| RelayError::Tls(error.to_string()))?;
+    if certificates.is_empty() {
+        return Err(RelayError::InvalidConfig(format!(
+            "TLS certificate file is empty: {}",
+            cert_path.display()
+        )));
+    }
+
+    let mut key_reader = BufReader::new(File::open(key_path)?);
+    let private_key = rustls_pemfile::private_key(&mut key_reader)
+        .map_err(|error| RelayError::Tls(error.to_string()))?
+        .ok_or_else(|| {
+            RelayError::InvalidConfig(format!(
+                "TLS private key file is empty: {}",
+                key_path.display()
+            ))
+        })?;
+
+    rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certificates, private_key)
+        .map_err(|error| RelayError::Tls(error.to_string()))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{RelayService, DIAL, MAGIC, REGISTER};
-    use misaka_core::NetworkId;
+    use super::{RelayOptions, RelayService};
     use std::net::SocketAddr;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
 
-    async fn hello(stream: &mut TcpStream, role: u8, network_id: NetworkId, id: u64) {
-        stream.write_all(MAGIC).await.unwrap();
-        stream.write_u8(role).await.unwrap();
-        stream.write_all(network_id.as_bytes()).await.unwrap();
-        stream.write_u64(id).await.unwrap();
-    }
-
     #[tokio::test]
-    async fn relay_pairs_register_and_dial_without_inspecting_payload() {
+    async fn native_iroh_relay_serves_health_endpoint() {
         let relay = RelayService::bind("127.0.0.1:0".parse::<SocketAddr>().unwrap())
             .await
             .unwrap();
         let address = relay.local_addr().unwrap();
-        tokio::spawn(async move {
-            let _ = relay.run().await;
-        });
+        let task = tokio::spawn(relay.run());
 
-        let network_id = NetworkId::generate();
-        let mut registered = TcpStream::connect(address).await.unwrap();
-        hello(&mut registered, REGISTER, network_id, 42).await;
-        let mut dialed = TcpStream::connect(address).await.unwrap();
-        hello(&mut dialed, DIAL, network_id, 42).await;
-        dialed.write_all(b"relay-payload").await.unwrap();
-        let mut received = [0u8; 13];
-        registered.read_exact(&mut received).await.unwrap();
-        assert_eq!(&received, b"relay-payload");
-    }
-
-    #[tokio::test]
-    async fn identical_sister_ids_in_different_networks_do_not_cross_route() {
-        let relay = RelayService::bind("127.0.0.1:0".parse::<SocketAddr>().unwrap())
+        let mut client = TcpStream::connect(address).await.unwrap();
+        client
+            .write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
             .await
             .unwrap();
-        let address = relay.local_addr().unwrap();
-        tokio::spawn(async move {
-            let _ = relay.run().await;
-        });
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        let response = String::from_utf8_lossy(&response);
+        assert!(response.starts_with("HTTP/1.1 200"), "response: {response}");
 
-        let first = NetworkId::generate();
-        let second = NetworkId::generate();
-        let mut first_registered = TcpStream::connect(address).await.unwrap();
-        hello(&mut first_registered, REGISTER, first, 7).await;
-        let mut second_registered = TcpStream::connect(address).await.unwrap();
-        hello(&mut second_registered, REGISTER, second, 7).await;
-
-        let mut second_dialed = TcpStream::connect(address).await.unwrap();
-        hello(&mut second_dialed, DIAL, second, 7).await;
-        second_dialed.write_all(b"second").await.unwrap();
-        let mut received = [0u8; 6];
-        second_registered.read_exact(&mut received).await.unwrap();
-        assert_eq!(&received, b"second");
-        assert!(tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            first_registered.read_u8()
-        )
-        .await
-        .is_err());
+        task.abort();
     }
 
-    #[tokio::test]
-    async fn duplicate_registration_does_not_replace_existing_peer() {
-        let relay = RelayService::bind("127.0.0.1:0".parse::<SocketAddr>().unwrap())
-            .await
-            .unwrap();
-        let address = relay.local_addr().unwrap();
-        tokio::spawn(async move {
-            let _ = relay.run().await;
-        });
-
-        let network_id = NetworkId::generate();
-        let mut first = TcpStream::connect(address).await.unwrap();
-        hello(&mut first, REGISTER, network_id, 9).await;
-        let mut duplicate = TcpStream::connect(address).await.unwrap();
-        hello(&mut duplicate, REGISTER, network_id, 9).await;
-
-        let mut dialed = TcpStream::connect(address).await.unwrap();
-        hello(&mut dialed, DIAL, network_id, 9).await;
-        dialed.write_all(b"first-registration").await.unwrap();
-        let mut received = [0u8; 18];
-        first.read_exact(&mut received).await.unwrap();
-        assert_eq!(&received, b"first-registration");
-    }
-
-    #[tokio::test]
-    async fn disconnected_registration_releases_pending_target() {
-        let relay = RelayService::bind("127.0.0.1:0".parse::<SocketAddr>().unwrap())
-            .await
-            .unwrap();
-        let address = relay.local_addr().unwrap();
-        tokio::spawn(async move {
-            let _ = relay.run().await;
-        });
-
-        let network_id = NetworkId::generate();
-        let mut disconnected = TcpStream::connect(address).await.unwrap();
-        hello(&mut disconnected, REGISTER, network_id, 10).await;
-        disconnected.shutdown().await.unwrap();
-
-        let mut registered = TcpStream::connect(address).await.unwrap();
-        hello(&mut registered, REGISTER, network_id, 10).await;
-        let mut dialed = TcpStream::connect(address).await.unwrap();
-        hello(&mut dialed, DIAL, network_id, 10).await;
-        dialed.write_all(b"recovered").await.unwrap();
-        let mut received = [0u8; 9];
-        registered.read_exact(&mut received).await.unwrap();
-        assert_eq!(&received, b"recovered");
+    #[test]
+    fn tls_files_must_be_configured_as_a_pair() {
+        let options = RelayOptions {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            http_bind: None,
+            tls_cert: Some("cert.pem".into()),
+            tls_key: None,
+        };
+        let error = super::build_server_config(&options).unwrap_err();
+        assert!(error.to_string().contains("provided together"));
     }
 }

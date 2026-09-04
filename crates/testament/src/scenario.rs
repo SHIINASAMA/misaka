@@ -87,7 +87,7 @@ impl Context {
         self.do_spawn(alias, entry, cmd, restart)
     }
 
-    /// Start a Sister and an independent opaque relay in the same process.
+    /// Start a Sister and an independent native Iroh relay in the same process.
     pub fn start_sister_with_relay(
         &mut self,
         alias: &str,
@@ -812,8 +812,9 @@ pub fn network_scenarios() -> Vec<ScenarioDef> {
     ]
 }
 
-/// Black-box relay checks. These deliberately exercise the public `misaka`
-/// binary so Testament remains an external harness rather than a relay peer.
+/// Black-box Iroh relay checks. These deliberately exercise the public
+/// `misaka` binary so Testament remains an external harness rather than an
+/// Iroh peer.
 pub fn relay_scenarios() -> Vec<ScenarioDef> {
     vec![
         ScenarioDef {
@@ -821,16 +822,16 @@ pub fn relay_scenarios() -> Vec<ScenarioDef> {
             run: Box::new(r01_relay_only_starts_without_sister),
         },
         ScenarioDef {
-            name: "R02_relay_same_network_register_dial",
-            run: Box::new(r02_relay_same_network_register_dial),
+            name: "R02_iroh_relay_health_endpoint",
+            run: Box::new(r02_iroh_relay_health_endpoint),
         },
         ScenarioDef {
-            name: "R03_relay_networks_do_not_collide",
-            run: Box::new(r03_relay_networks_do_not_collide),
+            name: "R03_iroh_relay_accepts_multiple_clients",
+            run: Box::new(r03_iroh_relay_accepts_multiple_clients),
         },
         ScenarioDef {
-            name: "R04_relay_foreign_network_isolated",
-            run: Box::new(r04_relay_foreign_network_isolated),
+            name: "R04_iroh_relay_handles_unknown_paths",
+            run: Box::new(r04_iroh_relay_handles_unknown_paths),
         },
         ScenarioDef {
             name: "R05_sister_relay_keeps_sister_functional",
@@ -847,10 +848,6 @@ pub fn relay_scenarios() -> Vec<ScenarioDef> {
     ]
 }
 
-const RELAY_MAGIC: &[u8; 8] = b"MSKRELAY";
-const RELAY_REGISTER: u8 = 1;
-const RELAY_DIAL: u8 = 2;
-
 fn start_relay(ctx: &Context, bind: SocketAddr) -> Result<CliProcess, ScenarioError> {
     let config_dir = ctx.layout.root.join("relay-only-config");
     std::fs::create_dir_all(&config_dir)
@@ -859,7 +856,7 @@ fn start_relay(ctx: &Context, bind: SocketAddr) -> Result<CliProcess, ScenarioEr
     let process = ctx.spawn_cli_with_config(&config_dir, &["relay", "--bind", &bind_arg])?;
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while std::time::Instant::now() < deadline {
-        if std::net::TcpStream::connect_timeout(&bind, Duration::from_millis(100)).is_ok() {
+        if http_get(bind, "/healthz").is_ok_and(|response| response.starts_with("HTTP/1.1 200")) {
             return Ok(process);
         }
         std::thread::sleep(Duration::from_millis(20));
@@ -880,45 +877,21 @@ fn stop_relay(mut process: CliProcess) -> Result<(), ScenarioError> {
     Ok(())
 }
 
-fn relay_hello(
-    stream: &mut std::net::TcpStream,
-    role: u8,
-    network_id: misaka_core::NetworkId,
-    sister_id: u64,
-) -> Result<(), ScenarioError> {
+fn http_get(bind: SocketAddr, path: &str) -> Result<String, ScenarioError> {
+    let mut stream = std::net::TcpStream::connect_timeout(&bind, Duration::from_secs(2))
+        .map_err(|error| ScenarioError::assertion(format!("connect Iroh relay: {error}")))?;
     stream
-        .write_all(RELAY_MAGIC)
-        .and_then(|_| stream.write_all(&[role]))
-        .and_then(|_| stream.write_all(network_id.as_bytes()))
-        .and_then(|_| stream.write_all(&sister_id.to_be_bytes()))
-        .map_err(|error| ScenarioError::assertion(format!("write relay handshake: {error}")))
-}
-
-fn relay_pair(
-    bind: SocketAddr,
-    first_network: misaka_core::NetworkId,
-    second_network: Option<misaka_core::NetworkId>,
-) -> Result<(), ScenarioError> {
-    let mut first = std::net::TcpStream::connect_timeout(&bind, Duration::from_secs(2))
-        .map_err(|error| ScenarioError::assertion(format!("connect relay register: {error}")))?;
-    relay_hello(&mut first, RELAY_REGISTER, first_network, 42)?;
-    let second_network = second_network.unwrap_or(first_network);
-    let mut dial = std::net::TcpStream::connect_timeout(&bind, Duration::from_secs(2))
-        .map_err(|error| ScenarioError::assertion(format!("connect relay dial: {error}")))?;
-    relay_hello(&mut dial, RELAY_DIAL, second_network, 42)?;
-    dial.write_all(b"relay-payload")
-        .map_err(|error| ScenarioError::assertion(format!("write relay payload: {error}")))?;
-    let mut received = [0u8; 13];
-    first
         .set_read_timeout(Some(Duration::from_secs(2)))
         .map_err(|error| ScenarioError::assertion(format!("set relay read timeout: {error}")))?;
-    first
-        .read_exact(&mut received)
-        .map_err(|error| ScenarioError::assertion(format!("read relay payload: {error}")))?;
-    if received != *b"relay-payload" {
-        return Err(ScenarioError::assertion("relay payload changed"));
-    }
-    Ok(())
+    let request = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|error| ScenarioError::assertion(format!("write relay request: {error}")))?;
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .map_err(|error| ScenarioError::assertion(format!("read relay response: {error}")))?;
+    Ok(response)
 }
 
 fn r01_relay_only_starts_without_sister(ctx: &mut Context) -> Result<(), ScenarioError> {
@@ -935,7 +908,7 @@ fn r01_relay_only_starts_without_sister(ctx: &mut Context) -> Result<(), Scenari
     stop_relay(relay)
 }
 
-fn r02_relay_same_network_register_dial(ctx: &mut Context) -> Result<(), ScenarioError> {
+fn r02_iroh_relay_health_endpoint(ctx: &mut Context) -> Result<(), ScenarioError> {
     let bind = format!(
         "127.0.0.1:{}",
         alloc_port().map_err(|error| ScenarioError::infra(error.to_string()))?
@@ -943,12 +916,20 @@ fn r02_relay_same_network_register_dial(ctx: &mut Context) -> Result<(), Scenari
     .parse()
     .unwrap();
     let relay = start_relay(ctx, bind)?;
-    let result = relay_pair(bind, misaka_core::NetworkId::generate(), None);
+    let result = http_get(bind, "/healthz").and_then(|response| {
+        if response.starts_with("HTTP/1.1 200") {
+            Ok(())
+        } else {
+            Err(ScenarioError::assertion(
+                "Iroh relay health endpoint was not healthy",
+            ))
+        }
+    });
     stop_relay(relay)?;
     result
 }
 
-fn r03_relay_networks_do_not_collide(ctx: &mut Context) -> Result<(), ScenarioError> {
+fn r03_iroh_relay_accepts_multiple_clients(ctx: &mut Context) -> Result<(), ScenarioError> {
     let bind = format!(
         "127.0.0.1:{}",
         alloc_port().map_err(|error| ScenarioError::infra(error.to_string()))?
@@ -956,33 +937,18 @@ fn r03_relay_networks_do_not_collide(ctx: &mut Context) -> Result<(), ScenarioEr
     .parse()
     .unwrap();
     let relay = start_relay(ctx, bind)?;
-    let first_network = misaka_core::NetworkId::generate();
-    let second_network = misaka_core::NetworkId::generate();
-    let mut first = std::net::TcpStream::connect(bind).unwrap();
-    relay_hello(&mut first, RELAY_REGISTER, first_network, 7)?;
-    let mut second = std::net::TcpStream::connect(bind).unwrap();
-    relay_hello(&mut second, RELAY_REGISTER, second_network, 7)?;
-    let mut second_dial = std::net::TcpStream::connect(bind).unwrap();
-    relay_hello(&mut second_dial, RELAY_DIAL, second_network, 7)?;
-    second_dial.write_all(b"network-b").unwrap();
-    let mut received = [0u8; 9];
-    second.read_exact(&mut received).unwrap();
-    if received != *b"network-b" {
-        return Err(ScenarioError::assertion("relay crossed network targets"));
-    }
-    first
-        .set_read_timeout(Some(Duration::from_millis(100)))
-        .unwrap();
-    let mut unexpected = [0u8; 1];
-    if first.read(&mut unexpected).is_ok() {
+    let first = http_get(bind, "/healthz")?;
+    let second = http_get(bind, "/healthz")?;
+    stop_relay(relay)?;
+    if !first.starts_with("HTTP/1.1 200") || !second.starts_with("HTTP/1.1 200") {
         return Err(ScenarioError::assertion(
-            "foreign relay payload reached target",
+            "Iroh relay did not serve multiple clients",
         ));
     }
-    stop_relay(relay)
+    Ok(())
 }
 
-fn r04_relay_foreign_network_isolated(ctx: &mut Context) -> Result<(), ScenarioError> {
+fn r04_iroh_relay_handles_unknown_paths(ctx: &mut Context) -> Result<(), ScenarioError> {
     let bind = format!(
         "127.0.0.1:{}",
         alloc_port().map_err(|error| ScenarioError::infra(error.to_string()))?
@@ -990,20 +956,14 @@ fn r04_relay_foreign_network_isolated(ctx: &mut Context) -> Result<(), ScenarioE
     .parse()
     .unwrap();
     let relay = start_relay(ctx, bind)?;
-    let network = misaka_core::NetworkId::generate();
-    let foreign = misaka_core::NetworkId::generate();
-    let mut registered = std::net::TcpStream::connect(bind).unwrap();
-    relay_hello(&mut registered, RELAY_REGISTER, network, 42)?;
-    let mut dial = std::net::TcpStream::connect(bind).unwrap();
-    relay_hello(&mut dial, RELAY_DIAL, foreign, 42)?;
-    dial.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
-    let mut response = [0u8; 1];
-    if dial.read(&mut response).is_ok_and(|read| read > 0) {
+    let response = http_get(bind, "/not-found")?;
+    stop_relay(relay)?;
+    if !response.starts_with("HTTP/1.1 404") {
         return Err(ScenarioError::assertion(
-            "foreign network dial reached target",
+            "Iroh relay did not return 404 for an unknown path",
         ));
     }
-    stop_relay(relay)
+    Ok(())
 }
 
 fn r05_sister_relay_keeps_sister_functional(ctx: &mut Context) -> Result<(), ScenarioError> {

@@ -147,8 +147,8 @@ endpoint-first connection with discovery disabled and no control-plane peer.
 Transfer and Tunnel preambles. NetworkId is persisted per config directory
 and included in Hello/State, mDNS, peer persistence, and Direct TCP/Iroh
 logical stream handshakes. Testament's `relay-verify` command covers R01-R07
-for relay-only startup, namespaced pairing, Sister+Relay composition, and
-bounded shutdown.
+for native Iroh relay startup, health/lifecycle behavior, Sister+Relay
+composition, and bounded shutdown.
 
 Transfer v1 is layered above the selected `NetworkStream`: `MTR1` uses fixed
 64 KiB chunks, per-chunk integrity checks, a SHA-256 content digest, explicit

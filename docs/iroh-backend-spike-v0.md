@@ -92,6 +92,10 @@ lifecycle and rotation requirements.
   that connection. The opt-in runtime listener now owns each accepted Iroh
   session and dispatches its logical streams independently; Direct TCP keeps
   its existing one-stream-per-accepted-socket behavior.
+- `misaka relay` and `misaka start --relay` host the native `iroh-relay`
+  server. HTTP mode is intended for local/private development; PEM certificate
+  and key options enable HTTPS for a public relay. The old `MSKRELAY`
+  `REGISTER`/`DIAL` protocol is no longer part of the transport architecture.
 - `ConnectionManager` caches an established Iroh session per Sister and opens
   later logical streams on it. A caller's explicit `mark_disconnected` only
   marks logical-stream state; it does not tear down a healthy Iroh session.

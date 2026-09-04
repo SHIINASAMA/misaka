@@ -107,13 +107,26 @@ enum Command {
         #[arg(long, default_value_t = 0)]
         introspect: u16,
 
-        /// Also host the opaque relay service alongside this Sister.
+        /// Also host the native Iroh relay service alongside this Sister.
         #[arg(long)]
         relay: bool,
 
         /// Relay bind address when --relay is enabled.
         #[arg(long, default_value = "0.0.0.0:443")]
         relay_bind: SocketAddr,
+
+        /// Plain HTTP bind address for the relay captive-portal service when
+        /// TLS is enabled.
+        #[arg(long)]
+        relay_http_bind: Option<SocketAddr>,
+
+        /// PEM certificate chain for the integrated Iroh relay.
+        #[arg(long)]
+        relay_tls_cert: Option<PathBuf>,
+
+        /// PEM private key for the integrated Iroh relay.
+        #[arg(long)]
+        relay_tls_key: Option<PathBuf>,
     },
 
     /// Export the local Iroh endpoint address for cross-domain preflight.
@@ -123,11 +136,24 @@ enum Command {
         json: bool,
     },
 
-    /// Run only the opaque NetworkId-namespaced relay service.
+    /// Run only the native Iroh relay service.
     Relay {
-        /// TCP address on which the relay listens.
+        /// Public address on which the Iroh relay listens.
         #[arg(long, default_value = "0.0.0.0:443")]
         bind: SocketAddr,
+
+        /// Plain HTTP bind address for the relay captive-portal service when
+        /// TLS is enabled.
+        #[arg(long)]
+        http_bind: Option<SocketAddr>,
+
+        /// PEM certificate chain for HTTPS mode.
+        #[arg(long)]
+        tls_cert: Option<PathBuf>,
+
+        /// PEM private key for HTTPS mode.
+        #[arg(long)]
+        tls_key: Option<PathBuf>,
     },
 
     /// Experimental Network Stream v0 black-box client.
@@ -304,6 +330,9 @@ async fn async_main() -> Result<(), MisakaError> {
             introspect,
             relay,
             relay_bind,
+            relay_http_bind,
+            relay_tls_cert,
+            relay_tls_key,
         } => {
             init_tracing(&log_format);
             // 加载或生成身份 (持久化)
@@ -431,8 +460,14 @@ async fn async_main() -> Result<(), MisakaError> {
             )
             .await?;
             let relay_service = if relay {
+                let options = misaka_relay::RelayOptions {
+                    bind: relay_bind,
+                    http_bind: relay_http_bind,
+                    tls_cert: relay_tls_cert,
+                    tls_key: relay_tls_key,
+                };
                 Some(
-                    misaka_relay::RelayService::bind(relay_bind)
+                    misaka_relay::RelayService::bind_with_options(options)
                         .await
                         .map_err(|error| MisakaError::Other(error.to_string()))?,
                 )
@@ -531,14 +566,24 @@ async fn async_main() -> Result<(), MisakaError> {
             }
         }
 
-        Command::Relay { bind } => {
+        Command::Relay {
+            bind,
+            http_bind,
+            tls_cert,
+            tls_key,
+        } => {
             tracing_subscriber::fmt().with_target(false).init();
-            misaka_relay::RelayService::bind(bind)
-                .await
-                .map_err(|error| MisakaError::Other(error.to_string()))?
-                .run()
-                .await
-                .map_err(|error| MisakaError::Other(error.to_string()))?;
+            misaka_relay::RelayService::bind_with_options(misaka_relay::RelayOptions {
+                bind,
+                http_bind,
+                tls_cert,
+                tls_key,
+            })
+            .await
+            .map_err(|error| MisakaError::Other(error.to_string()))?
+            .run()
+            .await
+            .map_err(|error| MisakaError::Other(error.to_string()))?;
         }
 
         Command::Connect { sister } => {
@@ -2495,7 +2540,35 @@ mod stream_tests {
         let relay = Cli::try_parse_from(["misaka", "relay", "--bind", "127.0.0.1:4430"]).unwrap();
         assert!(matches!(
             relay.command,
-            Command::Relay { bind } if bind == "127.0.0.1:4430".parse::<SocketAddr>().unwrap()
+            Command::Relay { bind, .. } if bind == "127.0.0.1:4430".parse::<SocketAddr>().unwrap()
+        ));
+    }
+
+    #[test]
+    fn relay_commands_accept_tls_configuration() {
+        let cli = Cli::try_parse_from([
+            "misaka",
+            "relay",
+            "--bind",
+            "0.0.0.0:443",
+            "--http-bind",
+            "0.0.0.0:80",
+            "--tls-cert",
+            "/etc/misaka/relay.crt",
+            "--tls-key",
+            "/etc/misaka/relay.key",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Relay {
+                http_bind: Some(http_bind),
+                tls_cert: Some(tls_cert),
+                tls_key: Some(tls_key),
+                ..
+            } if http_bind == "0.0.0.0:80".parse::<SocketAddr>().unwrap()
+                && tls_cert == std::path::Path::new("/etc/misaka/relay.crt")
+                && tls_key == std::path::Path::new("/etc/misaka/relay.key")
         ));
     }
 

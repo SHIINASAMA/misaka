@@ -2,12 +2,12 @@
 name = "misaka-relay"
 version.workspace = true
 edition.workspace = true
-description = "Minimal byte-forwarding relay for Misaka end-to-end streams"
+description = "Iroh-native relay service for Misaka Network"
 
 [dependencies]
-misaka-core = { path = "../misaka-core" }
-clap.workspace = true
-tokio.workspace = true
+iroh-relay = { version = "1.1", default-features = false, features = ["server", "tls-aws-lc-rs"] }
+rustls.workspace = true
+rustls-pemfile = "2"
 thiserror.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
+tokio.workspace = true
