@@ -9,6 +9,7 @@ name = "misaka-relay"
 path = "src/main.rs"
 
 [dependencies]
+misaka-core = { path = "../misaka-core" }
 clap.workspace = true
 tokio.workspace = true
 thiserror.workspace = true

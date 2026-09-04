@@ -1939,6 +1939,7 @@ dependencies = [
  "iroh",
  "misaka-core",
  "misaka-network",
+ "misaka-relay",
  "misaka-runtime",
  "serde",
  "serde_json",
@@ -1984,6 +1985,7 @@ name = "misaka-relay"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "misaka-core",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
