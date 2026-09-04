@@ -104,6 +104,12 @@ pub struct PingResponse {
     pub status: &'static str,
 }
 
+pub struct ApiServer {
+    listener: TcpListener,
+    app: Router,
+    bound: SocketAddr,
+}
+
 pub fn router(handle: SisterHandle) -> Router {
     Router::new()
         .route("/api/v1/overview", get(overview))
@@ -127,19 +133,40 @@ pub fn validate_bind(bind: SocketAddr) -> Result<(), ApiError> {
 
 pub async fn serve(
     handle: SisterHandle,
-    bind: SocketAddr,
+    address: SocketAddr,
     shutdown: ShutdownToken,
 ) -> Result<SocketAddr, ApiError> {
+    let server = bind(handle, address).await?;
+    let bound = server.bound;
+    server.run(shutdown).await?;
+    Ok(bound)
+}
+
+pub async fn bind(handle: SisterHandle, bind: SocketAddr) -> Result<ApiServer, ApiError> {
     validate_bind(bind)?;
     let listener = TcpListener::bind(bind).await.map_err(ApiError::internal)?;
     let bound = listener.local_addr().map_err(ApiError::internal)?;
     tracing::info!(event = "api_started", address = %bound, "local Sister API started");
-    let graceful_shutdown = async move { shutdown.cancelled().await };
-    axum::serve(listener, router(handle))
-        .with_graceful_shutdown(graceful_shutdown)
-        .await
-        .map_err(ApiError::internal)?;
-    Ok(bound)
+    Ok(ApiServer {
+        listener,
+        app: router(handle),
+        bound,
+    })
+}
+
+impl ApiServer {
+    pub fn local_addr(&self) -> SocketAddr {
+        self.bound
+    }
+
+    pub async fn run(self, shutdown: ShutdownToken) -> Result<(), ApiError> {
+        let graceful_shutdown = async move { shutdown.cancelled().await };
+        axum::serve(self.listener, self.app)
+            .with_graceful_shutdown(graceful_shutdown)
+            .await
+            .map_err(ApiError::internal)?;
+        Ok(())
+    }
 }
 
 async fn overview(State(handle): State<SisterHandle>) -> Result<Json<OverviewResponse>, ApiError> {
@@ -148,7 +175,7 @@ async fn overview(State(handle): State<SisterHandle>) -> Result<Json<OverviewRes
     Ok(Json(OverviewResponse {
         network_id: snapshot.network_id.to_string(),
         this_sister: snapshot.identity.id.as_u64(),
-        this_nickname: snapshot.identity.nickname.to_string(),
+        this_nickname: snapshot.identity.nickname.as_str().to_string(),
         online_sisters,
         known_sisters: online_sisters,
         active_streams: snapshot.stream_summary.streams,
@@ -210,7 +237,7 @@ fn all_sisters(snapshot: &IntrospectionSnapshot) -> Vec<SisterResponse> {
     let mut sisters = Vec::with_capacity(snapshot.peers.len() + 1);
     sisters.push(SisterResponse {
         id: snapshot.identity.id.as_u64(),
-        nickname: snapshot.identity.nickname.to_string(),
+        nickname: snapshot.identity.nickname.as_str().to_string(),
         hostname: snapshot.identity.hostname.clone(),
         platform: snapshot.identity.platform.clone(),
         version: snapshot.identity.version.clone(),
@@ -292,6 +319,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(overview.status(), StatusCode::OK);
+        let overview_body = to_bytes(overview.into_body(), 4096).await.unwrap();
+        let overview_json: serde_json::Value = serde_json::from_slice(&overview_body).unwrap();
+        assert_eq!(overview_json["this_nickname"], "api");
 
         let sisters = app
             .clone()

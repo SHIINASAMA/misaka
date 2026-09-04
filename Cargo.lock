@@ -2064,6 +2064,7 @@ dependencies = [
  "bincode",
  "clap",
  "iroh",
+ "misaka-api",
  "misaka-core",
  "misaka-network",
  "misaka-relay",

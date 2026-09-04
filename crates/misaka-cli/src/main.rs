@@ -128,6 +128,10 @@ enum Command {
         #[arg(long, default_value_t = 0)]
         introspect: u16,
 
+        /// Local loopback HTTP API port used by the separately hosted Web UI.
+        #[arg(long, default_value_t = 31702)]
+        api_port: u16,
+
         /// Also host the native Iroh relay service alongside this Sister.
         #[arg(long)]
         relay: bool,
@@ -439,6 +443,7 @@ async fn async_main() -> Result<(), MisakaError> {
             advertise_host,
             log_format,
             introspect,
+            api_port,
             relay,
             relay_bind,
             relay_http_bind,
@@ -651,10 +656,18 @@ async fn async_main() -> Result<(), MisakaError> {
             let shutdown = runtime.shutdown();
             let signal_task = shutdown.install_signal_handler();
             let relay_task = relay_service.map(|service| tokio::spawn(service.run()));
+            let api_addr: SocketAddr = format!("127.0.0.1:{api_port}").parse().unwrap();
+            let api_server = misaka_api::bind(runtime.handle(), api_addr)
+                .await
+                .map_err(|error| MisakaError::Other(error.to_string()))?;
+            let api_task = tokio::spawn(api_server.run(shutdown.token()));
             let result = runtime.run().await;
             signal_task.abort();
             if let Some(task) = relay_task {
                 task.abort();
+            }
+            if let Err(error) = api_task.await {
+                tracing::warn!(?error, "local API task did not exit cleanly");
             }
             result?;
         }
@@ -3448,6 +3461,27 @@ mod stream_tests {
             cli.command,
             Command::Start {
                 probe_only: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn start_api_port_defaults_and_accepts_override() {
+        let default = Cli::try_parse_from(["misaka", "start"]).unwrap();
+        assert!(matches!(
+            default.command,
+            Command::Start {
+                api_port: 31702,
+                ..
+            }
+        ));
+
+        let custom = Cli::try_parse_from(["misaka", "start", "--api-port", "32002"]).unwrap();
+        assert!(matches!(
+            custom.command,
+            Command::Start {
+                api_port: 32002,
                 ..
             }
         ));
