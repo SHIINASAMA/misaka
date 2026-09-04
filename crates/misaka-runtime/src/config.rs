@@ -1,3 +1,4 @@
+use misaka_core::NetworkId;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -47,6 +48,8 @@ pub enum DiscoveryMode {
 /// Testament (外部 harness) 可提供短而确定性的间隔，无需等待真实超时。
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
+    /// Namespace of the independent Misaka Network this Sister belongs to.
+    pub network_id: NetworkId,
     /// 监听端口
     pub listen_port: u16,
     /// 实验性 Network Stream 监听端口 (None = 禁用)
@@ -86,6 +89,7 @@ pub struct RuntimeConfig {
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
+            network_id: NetworkId::default(),
             listen_port: 31700,
             stream_port: None,
             stream_backend: StreamBackend::DirectTcp,
@@ -109,6 +113,7 @@ impl Default for RuntimeConfig {
 #[cfg(test)]
 mod tests {
     use super::{RuntimeConfig, StreamBackend};
+    use misaka_core::NetworkId;
 
     #[test]
     fn stream_listener_is_opt_in() {
@@ -121,5 +126,10 @@ mod tests {
             RuntimeConfig::default().stream_backend,
             StreamBackend::DirectTcp
         ));
+    }
+
+    #[test]
+    fn runtime_config_defaults_to_the_compatibility_network_namespace() {
+        assert_eq!(RuntimeConfig::default().network_id, NetworkId::default());
     }
 }

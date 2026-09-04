@@ -1,9 +1,13 @@
+use crate::NetworkId;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 
 /// 单个 peer 的状态表项 —— 我们“知道”的关于某个 Sister 的信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerState {
+    /// Namespace this peer belongs to.
+    #[serde(default)]
+    pub network_id: NetworkId,
     pub id: u64,
     pub nickname: String,
     pub hostname: String,
@@ -37,6 +41,8 @@ pub struct PeerState {
 /// 持久化用的最小化 peer 描述 (写入 peers.json，供独立进程解析)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerBlueprint {
+    #[serde(default)]
+    pub network_id: NetworkId,
     pub id: u64,
     pub addr: String,
     #[serde(default)]
@@ -52,6 +58,7 @@ pub struct PeerBlueprint {
 impl From<&PeerState> for PeerBlueprint {
     fn from(p: &PeerState) -> Self {
         Self {
+            network_id: p.network_id,
             id: p.id,
             addr: p.addr.clone(),
             stream_endpoints: p.stream_endpoints.clone(),
@@ -153,6 +160,7 @@ mod tests {
 
     fn state(id: u64, addr: &str) -> PeerState {
         PeerState {
+            network_id: NetworkId::default(),
             id,
             nickname: format!("misaka-{}", id),
             hostname: "h".into(),

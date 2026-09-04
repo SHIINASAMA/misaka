@@ -53,6 +53,7 @@ impl SisterRuntime {
         let advertise_host = config.advertise_host;
         let introspection_addr = config.introspection_addr;
         let stream_port = config.stream_port;
+        let network_id = config.network_id;
         let stream_security = config.stream_security.clone();
         let stream_backend = config.stream_backend.clone();
         let shutdown = Shutdown::new();
@@ -76,7 +77,10 @@ impl SisterRuntime {
             (Some(port), StreamBackend::DirectTcp) => match stream_security {
                 crate::config::StreamSecurity::InsecureLoopback => Some(StreamAcceptor::Direct(
                     backend
-                        .listen(NetworkEndpoint::Tcp(format!("127.0.0.1:{port}").parse()?))
+                        .listen_for_network(
+                            NetworkEndpoint::Tcp(format!("127.0.0.1:{port}").parse()?),
+                            network_id,
+                        )
                         .await
                         .map_err(|error| crate::Error::Network(error.to_string()))?,
                 )),
@@ -119,7 +123,7 @@ impl SisterRuntime {
                 }
                 let endpoint = NetworkEndpoint::Iroh(backend.endpoint_addr());
                 backend
-                    .listen(endpoint)
+                    .listen_for_network(endpoint, network_id)
                     .await
                     .map_err(|error| crate::Error::Network(error.to_string()))?;
                 Some(StreamAcceptor::Iroh(backend))

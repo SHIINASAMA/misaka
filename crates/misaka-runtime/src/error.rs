@@ -9,6 +9,8 @@ pub enum MisakaError {
     Network(String),
     #[error("Protocol serialization error: {0}")]
     Serde(String),
+    #[error("Protocol error: {0}")]
+    Protocol(String),
     #[error("Crypto error: {0}")]
     Crypto(String),
     #[error("Address parse error: {0}")]

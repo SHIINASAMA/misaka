@@ -90,6 +90,9 @@ impl Envelope {
 /// 握手 payload
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HelloData {
+    /// Namespace of the independent Misaka Network.
+    #[serde(default)]
+    pub network_id: super::identity::NetworkId,
     pub identity: super::identity::SisterIdentity,
     /// 发送方自己声明的监听地址，用于建 peer 表 (不要用 TCP 源地址)
     pub listen_addr: String,
@@ -104,6 +107,9 @@ pub struct HelloData {
 /// 状态 payload —— Sister 上报自身局部状态
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateData {
+    /// Namespace of the independent Misaka Network.
+    #[serde(default)]
+    pub network_id: super::identity::NetworkId,
     pub identity: super::identity::SisterIdentity,
     /// 发送方自己声明的监听地址，用于建 peer 表 (不要用 TCP 源地址)
     pub listen_addr: String,
@@ -120,6 +126,58 @@ pub struct StateData {
     pub queued_jobs: usize,
     pub uptime_secs: u64,
     pub capabilities: Vec<String>,
+}
+
+#[cfg(test)]
+mod network_id_tests {
+    use super::{HelloData, StateData};
+    use crate::{NetworkId, SisterIdentity};
+
+    fn identity() -> SisterIdentity {
+        SisterIdentity::new(
+            7,
+            "alpha".into(),
+            "host".into(),
+            "test".into(),
+            "0.1".into(),
+            31700,
+        )
+    }
+
+    #[test]
+    fn hello_roundtrips_network_id() {
+        let value = HelloData {
+            network_id: NetworkId::parse("01234567-89ab-cdef-0123-456789abcdef").unwrap(),
+            identity: identity(),
+            listen_addr: "127.0.0.1:31700".into(),
+            stream_addr: None,
+            stream_certificate: None,
+        };
+        let decoded: HelloData =
+            bincode::deserialize(&bincode::serialize(&value).unwrap()).unwrap();
+        assert_eq!(decoded.network_id, value.network_id);
+    }
+
+    #[test]
+    fn state_roundtrips_network_id() {
+        let value = StateData {
+            network_id: NetworkId::generate(),
+            identity: identity(),
+            listen_addr: "127.0.0.1:31700".into(),
+            stream_addr: None,
+            stream_certificate: None,
+            cpu_usage: 0.0,
+            memory_total: 1,
+            memory_used: 1,
+            running_jobs: 0,
+            queued_jobs: 0,
+            uptime_secs: 1,
+            capabilities: vec![],
+        };
+        let decoded: StateData =
+            bincode::deserialize(&bincode::serialize(&value).unwrap()).unwrap();
+        assert_eq!(decoded.network_id, value.network_id);
+    }
 }
 
 /// 任务 payload

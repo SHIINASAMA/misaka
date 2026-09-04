@@ -15,6 +15,7 @@ use sha2::{Digest, Sha256};
 
 use misaka_runtime::error::MisakaError;
 use misaka_runtime::identity_store::IdentityStore;
+use misaka_runtime::network_id_store::NetworkIdStore;
 use misaka_runtime::node::SisterNode;
 use misaka_runtime::peer_store::PeerStore;
 use misaka_runtime::resources::{ResourceProvider, SysinfoResourceProvider};
@@ -40,6 +41,10 @@ struct Cli {
     /// Force Iroh to use the configured relay and disable direct IP transports.
     #[arg(long, global = true, requires = "iroh_relay")]
     iroh_relay_only: bool,
+
+    /// Explicit independent Misaka Network namespace.
+    #[arg(long, global = true, value_name = "UUID")]
+    network_id: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -237,6 +242,12 @@ fn main() -> Result<(), MisakaError> {
 
 async fn async_main() -> Result<(), MisakaError> {
     let cli = Cli::parse();
+    let requested_network_id = cli
+        .network_id
+        .as_deref()
+        .map(misaka_core::NetworkId::parse)
+        .transpose()
+        .map_err(|error| MisakaError::Other(format!("invalid --network-id: {error}")))?;
     let iroh_relay = cli
         .iroh_relay
         .map(|value| {
@@ -269,6 +280,8 @@ async fn async_main() -> Result<(), MisakaError> {
             // 加载或生成身份 (持久化)
             let data_dir =
                 IdentityStore::config_dir().map_err(|e| MisakaError::Other(e.to_string()))?;
+            let network_id = NetworkIdStore::load_or_init(&data_dir, requested_network_id)
+                .map_err(|e| MisakaError::Other(e.to_string()))?;
             let identity = IdentityStore::load_or_init(nickname.clone(), port)
                 .map_err(|e| MisakaError::Other(e.to_string()))?;
             let stream_security = if stream_secure {
@@ -341,6 +354,7 @@ async fn async_main() -> Result<(), MisakaError> {
                 _ => misaka_runtime::config::DiscoveryMode::Mdns,
             };
             let config = misaka_runtime::config::RuntimeConfig {
+                network_id,
                 listen_port: port,
                 stream_port: (stream_port != 0).then_some(stream_port),
                 stream_backend,
@@ -404,6 +418,12 @@ async fn async_main() -> Result<(), MisakaError> {
                     server_name: server_name.as_deref(),
                     json,
                     duration_secs,
+                    network_id: NetworkIdStore::load_or_init(
+                        &IdentityStore::config_dir()
+                            .map_err(|error| MisakaError::Other(error.to_string()))?,
+                        requested_network_id,
+                    )
+                    .map_err(|error| MisakaError::Other(error.to_string()))?,
                     iroh_options: iroh_options.clone(),
                 },
             )
@@ -832,6 +852,7 @@ struct StreamTestOptions<'a> {
     server_name: Option<&'a str>,
     json: bool,
     duration_secs: Option<u64>,
+    network_id: misaka_core::NetworkId,
     iroh_options: IrohTransportOptions,
 }
 
@@ -847,6 +868,7 @@ async fn run_stream_test(
         server_name,
         json,
         duration_secs,
+        network_id,
         iroh_options,
     } = options;
     let connect_started = tokio::time::Instant::now();
@@ -880,7 +902,7 @@ async fn run_stream_test(
                 let backend = misaka_network::DirectTcpBackend;
                 tokio::time::timeout(
                     Duration::from_secs(5),
-                    backend.connect(NetworkEndpoint::Tcp(addr)),
+                    backend.connect_for_network(NetworkEndpoint::Tcp(addr), network_id),
                 )
                 .await
                 .map_err(|_| "stream connect timed out".to_string())?
@@ -892,7 +914,7 @@ async fn run_stream_test(
                 let backend = bind_iroh_backend(&data_dir, iroh_options).await?;
                 tokio::time::timeout(
                     Duration::from_secs(10),
-                    backend.connect(NetworkEndpoint::Iroh(endpoint)),
+                    backend.connect_for_network(NetworkEndpoint::Iroh(endpoint), network_id),
                 )
                 .await
                 .map_err(|_| "Iroh stream connect timed out".to_string())?
@@ -1545,13 +1567,17 @@ impl TransferV2Transport {
                 )
                 .await?
             }
-            Self::Iroh { backend, endpoint } => tokio::time::timeout(
-                Duration::from_secs(10),
-                backend.connect(NetworkEndpoint::Iroh(endpoint.clone())),
-            )
-            .await
-            .map_err(|_| "Iroh transfer stream connect timed out".to_string())?
-            .map_err(|error| error.to_string())?,
+            Self::Iroh { backend, endpoint } => {
+                let network_id = local_network_id()?;
+                tokio::time::timeout(
+                    Duration::from_secs(10),
+                    backend
+                        .connect_for_network(NetworkEndpoint::Iroh(endpoint.clone()), network_id),
+                )
+                .await
+                .map_err(|_| "Iroh transfer stream connect timed out".to_string())?
+                .map_err(|error| error.to_string())?
+            }
         };
         if matches!(self, Self::Iroh { .. }) {
             let mut stream = stream;
@@ -1845,16 +1871,20 @@ async fn connect_peer_stream(
     peer_certificate: Option<&[u8]>,
     iroh_options: IrohTransportOptions,
 ) -> Result<misaka_network::NetworkStream, String> {
+    let network_id = local_network_id()?;
     let stream = if matches!(&endpoint, NetworkEndpoint::Iroh(_)) {
         if peer_certificate.is_some() {
             return Err("Iroh streams use endpoint-authenticated encryption; do not provide a TLS certificate".to_string());
         }
         let data_dir = IdentityStore::config_dir().map_err(|error| error.to_string())?;
         let backend = bind_iroh_backend(&data_dir, iroh_options).await?;
-        tokio::time::timeout(Duration::from_secs(10), backend.connect(endpoint))
-            .await
-            .map_err(|_| "Iroh stream connect timed out".to_string())?
-            .map_err(|error| error.to_string())?
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            backend.connect_for_network(endpoint, network_id),
+        )
+        .await
+        .map_err(|_| "Iroh stream connect timed out".to_string())?
+        .map_err(|error| error.to_string())?
     } else if let Some(peer_certificate) = peer_certificate {
         let data_dir = IdentityStore::config_dir().map_err(|error| error.to_string())?;
         let identity = misaka_runtime::tls_identity_store::TlsIdentityStore::load(&data_dir)
@@ -1871,10 +1901,13 @@ async fn connect_peer_stream(
             .map_err(|error| error.to_string())?
     } else {
         let backend = misaka_network::DirectTcpBackend;
-        tokio::time::timeout(Duration::from_secs(10), backend.connect(endpoint))
-            .await
-            .map_err(|_| "stream connect timed out".to_string())?
-            .map_err(|error| error.to_string())?
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            backend.connect_for_network(endpoint, network_id),
+        )
+        .await
+        .map_err(|_| "stream connect timed out".to_string())?
+        .map_err(|error| error.to_string())?
     };
     let mut stream = stream;
     let mut greeting = [0u8; 5];
@@ -1885,6 +1918,11 @@ async fn connect_peer_stream(
         return Err(format!("unexpected stream greeting: {greeting:?}"));
     }
     Ok(stream)
+}
+
+fn local_network_id() -> Result<misaka_core::NetworkId, String> {
+    let data_dir = IdentityStore::config_dir().map_err(|error| error.to_string())?;
+    NetworkIdStore::load_or_init(&data_dir, None).map_err(|error| error.to_string())
 }
 
 async fn bind_iroh_backend(

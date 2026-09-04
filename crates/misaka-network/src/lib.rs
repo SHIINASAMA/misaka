@@ -1,5 +1,6 @@
 //! Transport-neutral Network Stream v0 primitives with a Direct TCP backend.
 
+use misaka_core::NetworkId;
 use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::io;
@@ -12,7 +13,7 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-const HANDSHAKE_LEN: usize = MAGIC.len() + 1;
+const HANDSHAKE_LEN: usize = MAGIC.len() + 1 + 16;
 pub const MAGIC: &[u8; 13] = b"MISAKA_STREAM";
 pub const PROTOCOL_VERSION: u8 = 1;
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -35,6 +36,11 @@ pub enum NetworkError {
     Tls(String),
     #[error("unsupported protocol version: expected {expected}, got {actual}")]
     UnsupportedVersion { expected: u8, actual: u8 },
+    #[error("network mismatch: expected {expected}, got {actual}")]
+    NetworkMismatch {
+        expected: NetworkId,
+        actual: NetworkId,
+    },
     #[error("I/O failed: {0}")]
     Io(#[source] io::Error),
     #[error("unsupported network endpoint: {0}")]
@@ -100,6 +106,24 @@ impl std::str::FromStr for NetworkEndpoint {
 pub trait NetworkBackend: Send + Sync {
     async fn listen(&self, endpoint: NetworkEndpoint) -> Result<NetworkListener>;
     async fn connect(&self, endpoint: NetworkEndpoint) -> Result<NetworkStream>;
+
+    async fn listen_for_network(
+        &self,
+        endpoint: NetworkEndpoint,
+        network_id: NetworkId,
+    ) -> Result<NetworkListener> {
+        let _ = network_id;
+        self.listen(endpoint).await
+    }
+
+    async fn connect_for_network(
+        &self,
+        endpoint: NetworkEndpoint,
+        network_id: NetworkId,
+    ) -> Result<NetworkStream> {
+        let _ = network_id;
+        self.connect(endpoint).await
+    }
 }
 
 /// The v0 backend: direct TCP with the Network Stream handshake.
@@ -108,11 +132,27 @@ pub struct DirectTcpBackend;
 
 impl NetworkBackend for DirectTcpBackend {
     async fn listen(&self, endpoint: NetworkEndpoint) -> Result<NetworkListener> {
-        direct_tcp::listen(endpoint).await
+        direct_tcp::listen(endpoint, NetworkId::default()).await
     }
 
     async fn connect(&self, endpoint: NetworkEndpoint) -> Result<NetworkStream> {
-        direct_tcp::connect(endpoint).await
+        direct_tcp::connect(endpoint, NetworkId::default()).await
+    }
+
+    async fn listen_for_network(
+        &self,
+        endpoint: NetworkEndpoint,
+        network_id: NetworkId,
+    ) -> Result<NetworkListener> {
+        direct_tcp::listen(endpoint, network_id).await
+    }
+
+    async fn connect_for_network(
+        &self,
+        endpoint: NetworkEndpoint,
+        network_id: NetworkId,
+    ) -> Result<NetworkStream> {
+        direct_tcp::connect(endpoint, network_id).await
     }
 }
 
@@ -367,17 +407,30 @@ fn validate_handshake(handshake: &[u8; HANDSHAKE_LEN]) -> Result<()> {
     Ok(())
 }
 
+fn validate_network_id(handshake: &[u8; HANDSHAKE_LEN], expected: NetworkId) -> Result<()> {
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&handshake[MAGIC.len() + 1..]);
+    let actual = NetworkId::from_bytes(bytes);
+    if actual != expected {
+        return Err(NetworkError::NetworkMismatch { expected, actual });
+    }
+    Ok(())
+}
+
 mod direct_tcp {
     use super::{
-        validate_handshake, AsyncStream, ListenerFuture, NetworkEndpoint, NetworkError,
-        NetworkListener, NetworkListenerDriver, NetworkStream, Result, HANDSHAKE_LEN,
-        HANDSHAKE_TIMEOUT, MAGIC, PROTOCOL_VERSION,
+        validate_handshake, validate_network_id, AsyncStream, ListenerFuture, NetworkEndpoint,
+        NetworkError, NetworkId, NetworkListener, NetworkListenerDriver, NetworkStream, Result,
+        HANDSHAKE_LEN, HANDSHAKE_TIMEOUT, MAGIC, PROTOCOL_VERSION,
     };
     use std::net::SocketAddr;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
 
-    pub(super) async fn listen(endpoint: NetworkEndpoint) -> Result<NetworkListener> {
+    pub(super) async fn listen(
+        endpoint: NetworkEndpoint,
+        network_id: NetworkId,
+    ) -> Result<NetworkListener> {
         let NetworkEndpoint::Tcp(addr) = endpoint else {
             return Err(NetworkError::UnsupportedEndpoint(
                 "DirectTcpBackend requires tcp:// endpoint".to_string(),
@@ -388,10 +441,14 @@ mod direct_tcp {
         tracing::info!(event = "stream_listener_started", address = %bound, "network stream listener started");
         Ok(NetworkListener::from_driver(DirectTcpListener {
             inner: listener,
+            network_id,
         }))
     }
 
-    pub(super) async fn connect(endpoint: NetworkEndpoint) -> Result<NetworkStream> {
+    pub(super) async fn connect(
+        endpoint: NetworkEndpoint,
+        network_id: NetworkId,
+    ) -> Result<NetworkStream> {
         let NetworkEndpoint::Tcp(addr) = endpoint else {
             return Err(NetworkError::UnsupportedEndpoint(
                 "DirectTcpBackend requires tcp:// endpoint".to_string(),
@@ -400,7 +457,7 @@ mod direct_tcp {
         let mut stream = TcpStream::connect(addr)
             .await
             .map_err(NetworkError::Connect)?;
-        client_handshake(&mut stream).await?;
+        client_handshake(&mut stream, network_id).await?;
         tracing::info!(event = "stream_connected", peer_addr = %addr, "network stream connected");
         let local_endpoint = stream.local_addr().ok().map(|addr| addr.to_string());
         let remote_endpoint = stream.peer_addr().ok().map(|addr| addr.to_string());
@@ -412,6 +469,7 @@ mod direct_tcp {
 
     struct DirectTcpListener {
         inner: TcpListener,
+        network_id: NetworkId,
     }
 
     impl NetworkListenerDriver for DirectTcpListener {
@@ -424,14 +482,17 @@ mod direct_tcp {
         fn accept(&self) -> ListenerFuture<'_> {
             Box::pin(async move {
                 let (mut stream, addr) = self.inner.accept().await.map_err(NetworkError::Io)?;
-                tokio::time::timeout(HANDSHAKE_TIMEOUT, server_handshake(&mut stream))
-                    .await
-                    .map_err(|_| NetworkError::Handshake {
-                        reason: format!(
-                            "handshake timed out after {} seconds",
-                            HANDSHAKE_TIMEOUT.as_secs()
-                        ),
-                    })??;
+                tokio::time::timeout(
+                    HANDSHAKE_TIMEOUT,
+                    server_handshake(&mut stream, self.network_id),
+                )
+                .await
+                .map_err(|_| NetworkError::Handshake {
+                    reason: format!(
+                        "handshake timed out after {} seconds",
+                        HANDSHAKE_TIMEOUT.as_secs()
+                    ),
+                })??;
                 tracing::info!(event = "stream_accepted", peer_addr = %addr, "network stream accepted");
                 let local_endpoint = stream.local_addr().ok().map(|addr| addr.to_string());
                 Ok((
@@ -450,10 +511,11 @@ mod direct_tcp {
         }
     }
 
-    async fn client_handshake(stream: &mut TcpStream) -> Result<()> {
+    async fn client_handshake(stream: &mut TcpStream, network_id: NetworkId) -> Result<()> {
         let mut request = [0u8; HANDSHAKE_LEN];
         request[..MAGIC.len()].copy_from_slice(MAGIC);
         request[MAGIC.len()] = PROTOCOL_VERSION;
+        request[MAGIC.len() + 1..].copy_from_slice(network_id.as_bytes());
         stream
             .write_all(&request)
             .await
@@ -462,15 +524,18 @@ mod direct_tcp {
             })?;
 
         let response = read_handshake(stream).await?;
-        validate_handshake(&response)
+        validate_handshake(&response)?;
+        validate_network_id(&response, network_id)
     }
 
-    async fn server_handshake(stream: &mut TcpStream) -> Result<()> {
+    async fn server_handshake(stream: &mut TcpStream, network_id: NetworkId) -> Result<()> {
         let request = read_handshake(stream).await?;
         validate_handshake(&request)?;
+        validate_network_id(&request, network_id)?;
         let mut response = [0u8; HANDSHAKE_LEN];
         response[..MAGIC.len()].copy_from_slice(MAGIC);
         response[MAGIC.len()] = PROTOCOL_VERSION;
+        response[MAGIC.len() + 1..].copy_from_slice(network_id.as_bytes());
         stream
             .write_all(&response)
             .await
@@ -502,6 +567,7 @@ mod tests {
         connect, listen, IrohBackend, ListenerFuture, NetworkBackend, NetworkEndpoint,
         NetworkError, NetworkListener, NetworkListenerDriver, NetworkStream, PathInfo, IROH_ALPN,
     };
+    use misaka_core::NetworkId;
     use std::net::{Ipv4Addr, SocketAddr};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -571,6 +637,7 @@ mod tests {
 
     #[tokio::test]
     async fn iroh_backend_roundtrips_a_network_stream() {
+        let network_id = NetworkId::generate();
         let server_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
             .alpns(vec![IROH_ALPN.to_vec()])
             .bind_addr("127.0.0.1:0")
@@ -590,7 +657,7 @@ mod tests {
         let server_address = iroh::EndpointAddr::new(server.endpoint().id())
             .with_ip_addr(server.endpoint().bound_sockets()[0]);
         let listener = server
-            .listen(NetworkEndpoint::Iroh(server_address.clone()))
+            .listen_for_network(NetworkEndpoint::Iroh(server_address.clone()), network_id)
             .await
             .unwrap();
         let accept_task = tokio::spawn(async move {
@@ -600,7 +667,7 @@ mod tests {
                 .unwrap()
         });
         let mut outgoing = client
-            .connect(NetworkEndpoint::Iroh(server_address))
+            .connect_for_network(NetworkEndpoint::Iroh(server_address), network_id)
             .await
             .unwrap();
         let path = outgoing.path_info();
@@ -787,7 +854,10 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
-            stream.write_all(b"MISAKA_STREAM\x7f").await.unwrap();
+            let mut handshake = [0u8; 13 + 1 + 16];
+            handshake[..13].copy_from_slice(b"MISAKA_STREAM");
+            handshake[13] = 0x7f;
+            stream.write_all(&handshake).await.unwrap();
         });
 
         let result = connect(address).await;
@@ -855,6 +925,30 @@ mod tests {
         stream.read_exact(&mut response).await.unwrap();
         assert_eq!(&response, b"backend-ok");
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn direct_tcp_rejects_a_peer_from_another_network() {
+        let expected = NetworkId::generate();
+        let foreign = NetworkId::generate();
+        let backend = super::DirectTcpBackend;
+        let listener = backend
+            .listen_for_network(
+                NetworkEndpoint::Tcp("127.0.0.1:0".parse().unwrap()),
+                expected,
+            )
+            .await
+            .unwrap();
+        let address = listener.local_addr();
+        let accept_task = tokio::spawn(async move { listener.accept().await });
+        let result = backend
+            .connect_for_network(NetworkEndpoint::Tcp(address), foreign)
+            .await;
+        assert!(result.is_err());
+        assert!(matches!(
+            accept_task.await.unwrap(),
+            Err(NetworkError::NetworkMismatch { .. })
+        ));
     }
 
     #[tokio::test]

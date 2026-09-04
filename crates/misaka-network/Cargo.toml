@@ -5,6 +5,7 @@ edition.workspace = true
 description = "Misaka Network stream primitives"
 
 [dependencies]
+misaka-core = { path = "../misaka-core" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

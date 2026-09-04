@@ -49,6 +49,7 @@ impl Default for Scheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use misaka_core::NetworkId;
 
     fn local(cpu_usage: f32, queued_jobs: usize) -> LocalState {
         LocalState {
@@ -64,6 +65,7 @@ mod tests {
 
     fn peer(id: u64, cpu_usage: f32) -> PeerState {
         PeerState {
+            network_id: NetworkId::default(),
             id,
             nickname: format!("sister-{id}"),
             hostname: "test".into(),

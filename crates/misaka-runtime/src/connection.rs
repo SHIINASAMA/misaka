@@ -99,6 +99,7 @@ impl SisterConnector {
         if candidates.is_empty() {
             return Err(invalid_error.unwrap_or(ConnectionError::NoStreamEndpoint(sister)));
         }
+        let network_id = self.peers.network_id();
         let mut attempts = FuturesUnordered::new();
         for candidate in rank_candidates(candidates) {
             let direct = self.backend;
@@ -106,7 +107,7 @@ impl SisterConnector {
             attempts.push(async move {
                 let result = match candidate.endpoint.clone() {
                     NetworkEndpoint::Tcp(_) => direct
-                        .connect(candidate.endpoint.clone())
+                        .connect_for_network(candidate.endpoint.clone(), network_id)
                         .await
                         .map(|stream| ConnectedStream {
                             stream,
@@ -114,7 +115,10 @@ impl SisterConnector {
                         }),
                     NetworkEndpoint::Iroh(endpoint) => match iroh {
                         Some(backend) => match backend
-                            .connect_session(NetworkEndpoint::Iroh(endpoint))
+                            .connect_session_for_network(
+                                NetworkEndpoint::Iroh(endpoint),
+                                network_id,
+                            )
                             .await
                         {
                             Ok(session) => {
@@ -192,7 +196,11 @@ impl IrohSisterConnector {
             let NetworkEndpoint::Iroh(_) = endpoint else {
                 continue;
             };
-            match self.backend.connect(endpoint).await {
+            match self
+                .backend
+                .connect_for_network(endpoint, self.peers.network_id())
+                .await
+            {
                 Ok(stream) => return Ok(stream),
                 Err(error) => {
                     last_error = Some(ConnectionError::Connect {
@@ -412,6 +420,7 @@ mod tests {
         });
 
         let peer = PeerState {
+            network_id: misaka_core::NetworkId::default(),
             id: 42,
             nickname: "peer".into(),
             hostname: "host".into(),
@@ -459,6 +468,7 @@ mod tests {
         });
 
         let peer = PeerState {
+            network_id: misaka_core::NetworkId::default(),
             id: 42,
             nickname: "peer".into(),
             hostname: "host".into(),
@@ -557,6 +567,7 @@ mod tests {
         });
 
         let peer = PeerState {
+            network_id: misaka_core::NetworkId::default(),
             id: 42,
             nickname: "peer".into(),
             hostname: "host".into(),
@@ -673,6 +684,7 @@ mod tests {
         });
 
         let peer = PeerState {
+            network_id: misaka_core::NetworkId::default(),
             id: 42,
             nickname: "peer".into(),
             hostname: "host".into(),
@@ -758,6 +770,7 @@ mod tests {
         });
 
         let peer = PeerState {
+            network_id: misaka_core::NetworkId::default(),
             id: 42,
             nickname: "peer".into(),
             hostname: "host".into(),
@@ -829,6 +842,7 @@ mod tests {
         });
 
         let peer = PeerState {
+            network_id: misaka_core::NetworkId::default(),
             id: 42,
             nickname: "peer".into(),
             hostname: "host".into(),

@@ -7,7 +7,7 @@
 use crate::peer_registry::PeerRegistry;
 use crate::peer_store::PeerStore;
 use misaka_core::introspection::PeerSnapshot;
-use misaka_core::{PeerState, PeerStateTable, SisterIdentity};
+use misaka_core::{NetworkId, PeerState, PeerStateTable, SisterIdentity};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -15,11 +15,24 @@ use std::time::Duration;
 pub struct PeerService {
     registry: PeerRegistry,
     data_dir: PathBuf,
+    network_id: NetworkId,
 }
 
 impl PeerService {
     pub fn new(registry: PeerRegistry, data_dir: PathBuf) -> Self {
-        Self { registry, data_dir }
+        Self::new_with_network_id(registry, data_dir, NetworkId::default())
+    }
+
+    pub fn new_with_network_id(
+        registry: PeerRegistry,
+        data_dir: PathBuf,
+        network_id: NetworkId,
+    ) -> Self {
+        Self {
+            registry,
+            data_dir,
+            network_id,
+        }
     }
 
     pub async fn all(&self) -> Vec<PeerState> {
@@ -42,11 +55,24 @@ impl PeerService {
         self.registry.is_empty().await
     }
 
+    pub fn network_id(&self) -> NetworkId {
+        self.network_id
+    }
+
     pub async fn contains(&self, id: u64) -> bool {
         self.registry.contains(id).await
     }
 
     pub async fn upsert(&self, state: PeerState) {
+        if state.network_id != self.network_id {
+            tracing::debug!(
+                peer_id = state.id,
+                peer_network_id = %state.network_id,
+                network_id = %self.network_id,
+                "ignoring peer from another network"
+            );
+            return;
+        }
         self.registry.upsert(state).await;
     }
 
@@ -62,11 +88,16 @@ impl PeerService {
     pub async fn remember_peer(
         &self,
         identity: &SisterIdentity,
+        network_id: NetworkId,
         listen_addr: &str,
         stream_addr: Option<&str>,
         stream_certificate: Option<Vec<u8>>,
     ) {
+        if network_id != self.network_id {
+            return;
+        }
         self.upsert(PeerState {
+            network_id,
             id: identity.id.as_u64(),
             nickname: identity.nickname.as_str().to_string(),
             hostname: identity.hostname.clone(),
@@ -108,6 +139,7 @@ mod tests {
 
     fn state(id: u64) -> PeerState {
         PeerState {
+            network_id: NetworkId::default(),
             id,
             nickname: "peer".into(),
             hostname: "host".into(),
@@ -140,6 +172,23 @@ mod tests {
         let saved = PeerStore::load_from_dir(dir.path());
         let first = saved.iter().find(|peer| peer.id == 1).unwrap();
         assert_eq!(first.stream_endpoints, vec!["tcp://127.0.0.1:31701"]);
+    }
+
+    #[tokio::test]
+    async fn service_rejects_peers_from_another_network() {
+        let dir = TempDir::new();
+        let network_id = NetworkId::generate();
+        let service = PeerService::new_with_network_id(
+            PeerRegistry::new(),
+            dir.path().to_path_buf(),
+            network_id,
+        );
+        let mut foreign = state(9);
+        foreign.network_id = NetworkId::generate();
+        service.upsert(foreign).await;
+        assert!(service.is_empty().await);
+        service.persist().await;
+        assert!(PeerStore::load_from_dir(dir.path()).is_empty());
     }
 }
 

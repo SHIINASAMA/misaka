@@ -73,9 +73,11 @@ impl PeerRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use misaka_core::NetworkId;
 
     fn state(id: u64, addr: &str) -> PeerState {
         PeerState {
+            network_id: NetworkId::default(),
             id,
             nickname: format!("sister-{id}"),
             hostname: "host".into(),

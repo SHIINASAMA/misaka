@@ -12,6 +12,7 @@ use crate::{
 use futures_util::StreamExt;
 use iroh::endpoint::{Connection, IncomingAddr, RecvStream, SendStream};
 use iroh::{Endpoint, EndpointAddr};
+use misaka_core::NetworkId;
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -94,6 +95,15 @@ impl IrohBackend {
     /// Establish one long-lived Iroh connection without opening a logical
     /// stream yet. Call `IrohSession::open_stream` for each operation.
     pub async fn connect_session(&self, endpoint: NetworkEndpoint) -> Result<IrohSession> {
+        self.connect_session_for_network(endpoint, NetworkId::default())
+            .await
+    }
+
+    pub async fn connect_session_for_network(
+        &self,
+        endpoint: NetworkEndpoint,
+        network_id: NetworkId,
+    ) -> Result<IrohSession> {
         let NetworkEndpoint::Iroh(endpoint_addr) = endpoint else {
             return Err(NetworkError::UnsupportedEndpoint(
                 "IrohBackend requires iroh:// endpoint".to_string(),
@@ -104,7 +114,11 @@ impl IrohBackend {
             .connect(endpoint_addr, &self.alpn)
             .await
             .map_err(|error| NetworkError::Iroh(error.to_string()))?;
-        Ok(IrohSession::new(self.endpoint.clone(), connection))
+        Ok(IrohSession::new(
+            self.endpoint.clone(),
+            connection,
+            network_id,
+        ))
     }
 
     /// Accept one long-lived Iroh connection without consuming a logical
@@ -118,7 +132,11 @@ impl IrohBackend {
             .await
             .map_err(|_| NetworkError::Iroh("Iroh connection handshake timed out".to_string()))?
             .map_err(|error| NetworkError::Iroh(error.to_string()))?;
-        Ok(IrohSession::new(self.endpoint.clone(), connection))
+        Ok(IrohSession::new(
+            self.endpoint.clone(),
+            connection,
+            NetworkId::default(),
+        ))
     }
 
     pub fn endpoint(&self) -> &Endpoint {
@@ -140,6 +158,7 @@ pub struct IrohSession {
     endpoint: Endpoint,
     connection: Connection,
     path_telemetry: IrohPathTelemetry,
+    network_id: NetworkId,
 }
 
 impl std::fmt::Debug for IrohSession {
@@ -152,7 +171,7 @@ impl std::fmt::Debug for IrohSession {
 }
 
 impl IrohSession {
-    fn new(endpoint: Endpoint, connection: Connection) -> Self {
+    fn new(endpoint: Endpoint, connection: Connection, network_id: NetworkId) -> Self {
         let path_telemetry = IrohPathTelemetry::new(
             connection.clone(),
             connection_path_info(&endpoint, &connection),
@@ -161,6 +180,7 @@ impl IrohSession {
             endpoint,
             connection,
             path_telemetry,
+            network_id,
         }
     }
 
@@ -185,8 +205,8 @@ impl IrohSession {
             .await
             .map_err(|error| NetworkError::Iroh(error.to_string()))?;
         tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
-            write_handshake(&mut send).await?;
-            read_and_validate_handshake(&mut recv).await
+            write_handshake(&mut send, self.network_id).await?;
+            read_and_validate_handshake(&mut recv, self.network_id).await
         })
         .await
         .map_err(|_| NetworkError::Handshake {
@@ -213,8 +233,8 @@ impl IrohSession {
                 })?
                 .map_err(|error| NetworkError::Iroh(error.to_string()))?;
         tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
-            read_and_validate_handshake(&mut recv).await?;
-            write_handshake(&mut send).await
+            read_and_validate_handshake(&mut recv, self.network_id).await?;
+            write_handshake(&mut send, self.network_id).await
         })
         .await
         .map_err(|_| NetworkError::Handshake {
@@ -235,6 +255,15 @@ impl IrohSession {
 
 impl crate::NetworkBackend for IrohBackend {
     async fn listen(&self, endpoint: NetworkEndpoint) -> Result<NetworkListener> {
+        self.listen_for_network(endpoint, NetworkId::default())
+            .await
+    }
+
+    async fn listen_for_network(
+        &self,
+        endpoint: NetworkEndpoint,
+        network_id: NetworkId,
+    ) -> Result<NetworkListener> {
         let NetworkEndpoint::Iroh(endpoint_addr) = endpoint else {
             return Err(NetworkError::UnsupportedEndpoint(
                 "IrohBackend requires iroh:// endpoint".to_string(),
@@ -260,10 +289,20 @@ impl crate::NetworkBackend for IrohBackend {
         Ok(NetworkListener::from_driver(IrohListener {
             endpoint: self.endpoint.clone(),
             local_addr,
+            network_id,
         }))
     }
 
     async fn connect(&self, endpoint: NetworkEndpoint) -> Result<NetworkStream> {
+        self.connect_for_network(endpoint, NetworkId::default())
+            .await
+    }
+
+    async fn connect_for_network(
+        &self,
+        endpoint: NetworkEndpoint,
+        network_id: NetworkId,
+    ) -> Result<NetworkStream> {
         let NetworkEndpoint::Iroh(endpoint_addr) = endpoint else {
             return Err(NetworkError::UnsupportedEndpoint(
                 "IrohBackend requires iroh:// endpoint".to_string(),
@@ -279,8 +318,8 @@ impl crate::NetworkBackend for IrohBackend {
             .await
             .map_err(|error| NetworkError::Iroh(error.to_string()))?;
         tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
-            write_handshake(&mut send).await?;
-            read_and_validate_handshake(&mut recv).await
+            write_handshake(&mut send, network_id).await?;
+            read_and_validate_handshake(&mut recv, network_id).await
         })
         .await
         .map_err(|_| NetworkError::Handshake {
@@ -310,6 +349,7 @@ impl crate::NetworkBackend for IrohBackend {
 struct IrohListener {
     endpoint: Endpoint,
     local_addr: SocketAddr,
+    network_id: NetworkId,
 }
 
 impl NetworkListenerDriver for IrohListener {
@@ -344,8 +384,8 @@ impl NetworkListenerDriver for IrohListener {
                     })?
                     .map_err(|error| NetworkError::Iroh(error.to_string()))?;
             tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
-                read_and_validate_handshake(&mut recv).await?;
-                write_handshake(&mut send).await
+                read_and_validate_handshake(&mut recv, self.network_id).await?;
+                write_handshake(&mut send, self.network_id).await
             })
             .await
             .map_err(|_| NetworkError::Handshake {
@@ -600,10 +640,11 @@ impl AsyncWrite for IrohStream {
     }
 }
 
-async fn write_handshake(stream: &mut SendStream) -> Result<()> {
+async fn write_handshake(stream: &mut SendStream, network_id: NetworkId) -> Result<()> {
     let mut handshake = [0u8; HANDSHAKE_LEN];
     handshake[..MAGIC.len()].copy_from_slice(MAGIC);
     handshake[MAGIC.len()] = PROTOCOL_VERSION;
+    handshake[MAGIC.len() + 1..].copy_from_slice(network_id.as_bytes());
     stream
         .write_all(&handshake)
         .await
@@ -618,7 +659,7 @@ async fn write_handshake(stream: &mut SendStream) -> Result<()> {
         })
 }
 
-async fn read_and_validate_handshake(stream: &mut RecvStream) -> Result<()> {
+async fn read_and_validate_handshake(stream: &mut RecvStream, network_id: NetworkId) -> Result<()> {
     let mut handshake = [0u8; HANDSHAKE_LEN];
     stream
         .read_exact(&mut handshake)
@@ -626,7 +667,8 @@ async fn read_and_validate_handshake(stream: &mut RecvStream) -> Result<()> {
         .map_err(|error| NetworkError::Handshake {
             reason: format!("read Iroh handshake: {error}"),
         })?;
-    validate_handshake(&handshake)
+    validate_handshake(&handshake)?;
+    crate::validate_network_id(&handshake, network_id)
 }
 
 fn _assert_async_stream<T: AsyncStream>() {}

@@ -28,8 +28,15 @@ pub(crate) async fn dispatch(
 
         MessageType::Hello => {
             let hello: HelloData = bincode::deserialize(&env.data)?;
+            if hello.network_id != node.config.network_id {
+                return Err(crate::Error::Protocol(format!(
+                    "peer belongs to network {} instead of {}",
+                    hello.network_id, node.config.network_id
+                )));
+            }
             node.remember_peer(
                 &hello.identity,
+                hello.network_id,
                 &hello.listen_addr,
                 hello.stream_addr.as_deref(),
                 hello.stream_certificate,
@@ -40,6 +47,7 @@ pub(crate) async fn dispatch(
                 node.identity.id.as_u64(),
                 env.from,
                 bincode::serialize(&HelloData {
+                    network_id: node.config.network_id,
                     identity: node.identity.as_ref().clone(),
                     listen_addr: node.listen_addr.to_string(),
                     stream_addr: node.stream_endpoint(),
@@ -51,6 +59,15 @@ pub(crate) async fn dispatch(
 
         MessageType::State => {
             let state: StateData = bincode::deserialize(&env.data)?;
+            if state.network_id != node.config.network_id {
+                tracing::debug!(
+                    peer_id = env.from,
+                    peer_network_id = %state.network_id,
+                    network_id = %node.config.network_id,
+                    "ignoring state from another network"
+                );
+                return Ok(());
+            }
             tracing::info!(
                 event = "peer_state_updated",
                 sister_id = node.identity.id.as_u64(),
@@ -65,6 +82,7 @@ pub(crate) async fn dispatch(
             );
             node.peers
                 .upsert(misaka_core::PeerState {
+                    network_id: state.network_id,
                     id: state.identity.id.as_u64(),
                     nickname: state.identity.nickname.as_str().to_string(),
                     hostname: state.identity.hostname,

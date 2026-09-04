@@ -12,7 +12,7 @@ use crate::state::{LocalJob, LocalState};
 use crate::stream_registry::StreamRegistry;
 use misaka_core::introspection::{IntrospectionSnapshot, ResourceSnapshot};
 use misaka_core::protocol::*;
-use misaka_core::{PeerState, SisterIdentity};
+use misaka_core::{NetworkId, PeerState, SisterIdentity};
 use misaka_network::NetworkEndpoint;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -69,7 +69,9 @@ impl SisterNode {
         // 从磁盘 seed 已知 peers (供 run 独立进程复用地址)
         let seeded = PeerStore::load_from_dir(&data_dir)
             .into_iter()
+            .filter(|bp| bp.network_id == config.network_id)
             .map(|bp| PeerState {
+                network_id: bp.network_id,
                 id: bp.id,
                 nickname: bp.nickname,
                 hostname: bp.hostname,
@@ -87,7 +89,11 @@ impl SisterNode {
                 capabilities: vec![],
             })
             .collect();
-        let peers = PeerService::new(PeerRegistry::new_seeded(seeded), data_dir);
+        let peers = PeerService::new_with_network_id(
+            PeerRegistry::new_seeded(seeded),
+            data_dir,
+            config.network_id,
+        );
 
         Self {
             identity: Arc::new(identity),
@@ -234,12 +240,19 @@ impl SisterNode {
     pub(crate) async fn remember_peer(
         &self,
         identity: &SisterIdentity,
+        network_id: NetworkId,
         listen_addr: &str,
         stream_addr: Option<&str>,
         stream_certificate: Option<Vec<u8>>,
     ) {
         self.peers
-            .remember_peer(identity, listen_addr, stream_addr, stream_certificate)
+            .remember_peer(
+                identity,
+                network_id,
+                listen_addr,
+                stream_addr,
+                stream_certificate,
+            )
             .await;
     }
 
@@ -250,6 +263,7 @@ impl SisterNode {
             self.identity.id.as_u64(),
             0,
             bincode::serialize(&HelloData {
+                network_id: self.config.network_id,
                 identity: self.identity.as_ref().clone(),
                 listen_addr: self.listen_addr.to_string(),
                 stream_addr: self.stream_endpoint(),
@@ -258,8 +272,15 @@ impl SisterNode {
         );
         let reply = self.send_to(addr, &env).await?;
         let hello: HelloData = bincode::deserialize(&reply.data)?;
+        if hello.network_id != self.config.network_id {
+            return Err(crate::Error::Protocol(format!(
+                "peer belongs to network {} instead of {}",
+                hello.network_id, self.config.network_id
+            )));
+        }
         self.remember_peer(
             &hello.identity,
+            hello.network_id,
             &hello.listen_addr,
             hello.stream_addr.as_deref(),
             hello.stream_certificate,
@@ -466,6 +487,7 @@ impl SisterNode {
             let s = match crate::discovery::advertise(
                 self.identity.nickname.as_str(),
                 self.identity.id.as_u64(),
+                self.config.network_id,
                 &self.identity.hostname,
                 &self.identity.platform,
                 self.listen_addr,
@@ -506,6 +528,9 @@ impl SisterNode {
                 if peer_id == self.identity.id.as_u64() {
                     continue;
                 }
+                if peer.network_id != self.config.network_id {
+                    continue;
+                }
                 // 已有记录且地址没变，跳过
                 if self.peers.addr_of(peer_id).await == Some(addr) {
                     continue;
@@ -540,6 +565,7 @@ impl SisterNode {
                     // 记录 host/platform (handshake 会更新 version 等，这里补齐 host/platform)
                     self.peers
                         .upsert(PeerState {
+                            network_id: peer.network_id,
                             id: peer_id,
                             nickname: nick,
                             hostname: host,
@@ -638,6 +664,7 @@ impl SisterNode {
             let state_data = {
                 let ls = self.local_state.read().await;
                 StateData {
+                    network_id: self.config.network_id,
                     identity: self.identity.as_ref().clone(),
                     listen_addr: self.listen_addr.to_string(),
                     stream_addr: self.stream_endpoint(),

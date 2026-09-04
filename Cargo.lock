@@ -1968,6 +1968,7 @@ dependencies = [
  "futures-util",
  "iroh",
  "iroh-relay",
+ "misaka-core",
  "rcgen 0.13.2",
  "rustls",
  "serde",
