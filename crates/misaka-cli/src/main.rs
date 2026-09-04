@@ -987,9 +987,7 @@ async fn run_stream_test(
                 .map_err(|error| error.to_string())?
             }
             NetworkEndpoint::Iroh(endpoint) => {
-                let data_dir = IdentityStore::config_dir()
-                    .map_err(|error| format!("load Iroh config dir: {error}"))?;
-                let backend = bind_iroh_backend(&data_dir, iroh_options).await?;
+                let backend = bind_iroh_client_backend(iroh_options).await?;
                 tokio::time::timeout(
                     Duration::from_secs(10),
                     backend.connect_for_network(NetworkEndpoint::Iroh(endpoint), network_id),
@@ -1954,8 +1952,7 @@ async fn connect_peer_stream(
         if peer_certificate.is_some() {
             return Err("Iroh streams use endpoint-authenticated encryption; do not provide a TLS certificate".to_string());
         }
-        let data_dir = IdentityStore::config_dir().map_err(|error| error.to_string())?;
-        let backend = bind_iroh_backend(&data_dir, iroh_options).await?;
+        let backend = bind_iroh_client_backend(iroh_options).await?;
         tokio::time::timeout(
             Duration::from_secs(10),
             backend.connect_for_network(endpoint, network_id),
