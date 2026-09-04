@@ -79,6 +79,7 @@ pub(crate) async fn run(node: &SisterNode) -> crate::Result<()> {
                 if let Some(creator_addr) = job.creator_addr {
                     if let Ok(addr) = creator_addr.parse::<SocketAddr>() {
                         let env = misaka_core::Envelope::new(
+                            node.config.network_id,
                             misaka_core::MessageType::JobResponse,
                             node.identity.id.as_u64(),
                             job.creator,

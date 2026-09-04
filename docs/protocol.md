@@ -6,6 +6,7 @@ All peer messages use the shared `misaka-core::Envelope`:
 
 ```rust
 pub struct Envelope {
+    pub network_id: NetworkId,
     pub protocol_version: u16,
     pub msg_type: MessageType,
     pub from: u64,
@@ -14,7 +15,7 @@ pub struct Envelope {
 }
 ```
 
-`Envelope::new` sets the current `PROTOCOL_VERSION` automatically. The Ping/Pong message types are part of protocol version 2; a receiver rejects an unknown or mismatched protocol version before dispatching the message. `from` and `to` are Sister IDs; `to = 0` is used for broadcast-style State messages.
+`Envelope::new` sets the current `PROTOCOL_VERSION` automatically. The Ping/Pong message types are part of protocol version 2; the NetworkId-bearing envelope is protocol version 3. A receiver rejects an unknown or mismatched protocol version, or an envelope for another NetworkId, before dispatching the message. `from` and `to` are Sister IDs; `to = 0` is used for broadcast-style State messages.
 
 The payload in `data` is bincode-encoded message-specific data:
 

@@ -91,18 +91,26 @@ async fn handle_connection(mut stream: TcpStream, pending: Pending) -> Result<()
     match role {
         REGISTER => {
             let (sender, receiver) = oneshot::channel();
-            if pending.lock().await.insert(target, sender).is_some() {
+            let mut registrations = pending.lock().await;
+            if registrations.contains_key(&target) {
                 return Err(RelayError::DuplicatePeer {
                     network_id,
                     sister_id,
                 });
             }
-            let Ok(mut peer) = receiver.await else {
-                pending.lock().await.remove(&target);
-                return Err(RelayError::UnknownPeer {
-                    network_id,
-                    sister_id,
-                });
+            registrations.insert(target, sender);
+            drop(registrations);
+            let mut peer = tokio::select! {
+                result = receiver => {
+                    result.map_err(|_| RelayError::UnknownPeer { network_id, sister_id })?
+                }
+                result = stream.read_u8() => {
+                    pending.lock().await.remove(&target);
+                    return Err(match result {
+                        Ok(_) => RelayError::Handshake,
+                        Err(_) => RelayError::UnknownPeer { network_id, sister_id },
+                    });
+                }
             };
             let _ = tokio::io::copy_bidirectional(&mut stream, &mut peer).await?;
             pending.lock().await.remove(&target);
@@ -192,5 +200,54 @@ mod tests {
         )
         .await
         .is_err());
+    }
+
+    #[tokio::test]
+    async fn duplicate_registration_does_not_replace_existing_peer() {
+        let relay = RelayService::bind("127.0.0.1:0".parse::<SocketAddr>().unwrap())
+            .await
+            .unwrap();
+        let address = relay.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = relay.run().await;
+        });
+
+        let network_id = NetworkId::generate();
+        let mut first = TcpStream::connect(address).await.unwrap();
+        hello(&mut first, REGISTER, network_id, 9).await;
+        let mut duplicate = TcpStream::connect(address).await.unwrap();
+        hello(&mut duplicate, REGISTER, network_id, 9).await;
+
+        let mut dialed = TcpStream::connect(address).await.unwrap();
+        hello(&mut dialed, DIAL, network_id, 9).await;
+        dialed.write_all(b"first-registration").await.unwrap();
+        let mut received = [0u8; 18];
+        first.read_exact(&mut received).await.unwrap();
+        assert_eq!(&received, b"first-registration");
+    }
+
+    #[tokio::test]
+    async fn disconnected_registration_releases_pending_target() {
+        let relay = RelayService::bind("127.0.0.1:0".parse::<SocketAddr>().unwrap())
+            .await
+            .unwrap();
+        let address = relay.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = relay.run().await;
+        });
+
+        let network_id = NetworkId::generate();
+        let mut disconnected = TcpStream::connect(address).await.unwrap();
+        hello(&mut disconnected, REGISTER, network_id, 10).await;
+        disconnected.shutdown().await.unwrap();
+
+        let mut registered = TcpStream::connect(address).await.unwrap();
+        hello(&mut registered, REGISTER, network_id, 10).await;
+        let mut dialed = TcpStream::connect(address).await.unwrap();
+        hello(&mut dialed, DIAL, network_id, 10).await;
+        dialed.write_all(b"recovered").await.unwrap();
+        let mut received = [0u8; 9];
+        registered.read_exact(&mut received).await.unwrap();
+        assert_eq!(&received, b"recovered");
     }
 }

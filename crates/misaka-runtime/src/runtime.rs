@@ -1265,6 +1265,7 @@ mod tests {
         )
         .await
         .unwrap();
+        assert!(runtime.listener.local_addr().unwrap().ip().is_loopback());
         let stream_addr = runtime.stream_addr().unwrap();
         let shutdown = runtime.shutdown();
         let task = tokio::spawn(runtime.run());

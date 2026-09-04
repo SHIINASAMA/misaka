@@ -58,7 +58,12 @@ impl SisterNode {
     pub fn new(identity: SisterIdentity, encryption_key: [u8; 32], config: RuntimeConfig) -> Self {
         let data_dir = config.data_dir.clone();
         let port = config.listen_port;
-        let bind_addr: SocketAddr = format!("0.0.0.0:{port}").parse().unwrap();
+        let bind_host = if config.probe_only {
+            "127.0.0.1"
+        } else {
+            "0.0.0.0"
+        };
+        let bind_addr: SocketAddr = format!("{bind_host}:{port}").parse().unwrap();
         // 告知 peer 的连接地址: 单机测试用 127.0.0.1; 局域网环境可换成机器 IP。
         let listen_addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
         // 启动时立刻刷新一次本机状态
@@ -119,7 +124,12 @@ impl SisterNode {
     /// 让本节点能感知局域网中其他 Sister，需要本机真实 IP (非 127.0.0.1)。
     /// 单机测试时保持 127.0.0.1 即可；跨机部署时暴露本机局域网 IP。
     pub fn set_advertise_host(&mut self, host: &str) {
-        self.bind_addr = format!("0.0.0.0:{}", self.config.listen_port)
+        let bind_host = if self.config.probe_only {
+            "127.0.0.1"
+        } else {
+            "0.0.0.0"
+        };
+        self.bind_addr = format!("{bind_host}:{}", self.config.listen_port)
             .parse()
             .unwrap();
         self.listen_addr = format!("{}:{}", host, self.config.listen_port)
@@ -260,6 +270,7 @@ impl SisterNode {
     /// 手工插入一个 peer (Phase 1 没有 mDNS 时用 --peer 指定)
     pub async fn add_known_peer(&self, addr: SocketAddr) -> crate::Result<()> {
         let env = Envelope::new(
+            self.config.network_id,
             MessageType::Hello,
             self.identity.id.as_u64(),
             0,
@@ -329,6 +340,7 @@ impl SisterNode {
     pub async fn request_work_from(&self, peer_id: u64) -> crate::Result<()> {
         if let Some(addr) = self.peers.addr_of(peer_id).await {
             let env = Envelope::new(
+                self.config.network_id,
                 MessageType::JobRequest,
                 self.identity.id.as_u64(),
                 peer_id,
@@ -400,6 +412,7 @@ impl SisterNode {
             }
         };
         let env = Envelope::new(
+            self.config.network_id,
             MessageType::Job,
             creator,
             executor,
@@ -682,6 +695,7 @@ impl SisterNode {
             let data = bincode::serialize(&state_data)?;
             for addr in addrs {
                 let env = Envelope::new(
+                    self.config.network_id,
                     MessageType::State,
                     self.identity.id.as_u64(),
                     0,

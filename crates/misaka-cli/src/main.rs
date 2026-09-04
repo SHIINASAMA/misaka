@@ -350,11 +350,27 @@ async fn async_main() -> Result<(), MisakaError> {
                     let backend = bind_iroh_backend(&data_dir, iroh_options.clone())
                         .await
                         .map_err(|error| MisakaError::Other(error.to_string()))?;
+                    let endpoint = backend.endpoint().clone();
+                    let online =
+                        misaka_runtime::iroh_endpoint_store::IrohEndpointStore::wait_for_online(
+                            &endpoint,
+                            Duration::from_secs(5),
+                        )
+                        .await;
+                    if !online {
+                        tracing::warn!(
+                            "Iroh endpoint did not become online before export; persisting current address and waiting for updates"
+                        );
+                    }
                     misaka_runtime::iroh_endpoint_store::IrohEndpointStore::save(
                         &data_dir,
                         &backend.endpoint_addr(),
                     )
                     .map_err(|error| MisakaError::Other(error.to_string()))?;
+                    misaka_runtime::iroh_endpoint_store::IrohEndpointStore::spawn_refresh(
+                        data_dir.clone(),
+                        endpoint,
+                    );
                     misaka_runtime::config::StreamBackend::Iroh(backend)
                 }
                 other => {
@@ -810,7 +826,16 @@ async fn probe_peer(identity: &misaka_core::SisterIdentity, addr: SocketAddr) ->
     let Ok(crypto) = misaka_runtime::crypto::Crypto::new(&default_encryption_key()) else {
         return false;
     };
-    let ping = Envelope::new(MessageType::Ping, identity.id.as_u64(), 0, vec![]);
+    let Ok(network_id) = local_network_id() else {
+        return false;
+    };
+    let ping = Envelope::new(
+        network_id,
+        MessageType::Ping,
+        identity.id.as_u64(),
+        0,
+        vec![],
+    );
     let transport = misaka_runtime::network::PeerTransport::new(crypto);
     tokio::time::timeout(Duration::from_millis(400), transport.send_to(addr, &ping))
         .await

@@ -9,15 +9,18 @@ the Sister protocol or introducing another backend.
 
 Use a separate `MISAKA_CONFIG_DIR` on each host. Start both Sisters with the
 opt-in Iroh backend and `--probe-only`. The preflight measurement itself does
-not require the original control-plane TCP listener or a `:31700` bootstrap:
+not require a remotely reachable original control-plane TCP listener or a
+`:31700` bootstrap; probe-only keeps that legacy listener loopback-only:
 
 ```bash
+NETWORK_ID=01234567-89ab-cdef-0123-456789abcdef
+
 MISAKA_CONFIG_DIR=/path/to/sister-a-config \
-  misaka start --port 31700 --stream-backend iroh --discovery off \
+  misaka --network-id "$NETWORK_ID" start --port 31700 --stream-backend iroh --discovery off \
   --probe-only --introspect 31702
 
 MISAKA_CONFIG_DIR=/path/to/sister-b-config \
-  misaka start --port 31700 --stream-backend iroh --discovery off \
+  misaka --network-id "$NETWORK_ID" start --port 31700 --stream-backend iroh --discovery off \
   --probe-only --introspect 31702
 
 # Optional: force both hosts to use one trusted Iroh relay and disable IP paths.
@@ -30,14 +33,14 @@ band. The command persists the NetworkId and Iroh transport identity for the
 Sister; it does not contact a peer:
 
 ```bash
-MISAKA_CONFIG_DIR=/path/to/sister-a-config misaka endpoint --json
-MISAKA_CONFIG_DIR=/path/to/sister-b-config misaka endpoint --json
+MISAKA_CONFIG_DIR=/path/to/sister-a-config \
+  misaka --network-id "$NETWORK_ID" endpoint --json
+MISAKA_CONFIG_DIR=/path/to/sister-b-config \
+  misaka --network-id "$NETWORK_ID" endpoint --json
 ```
 
-Both hosts must use the same `network_id` value. If an explicit namespace is
-needed for a test, pass the same `--network-id <UUID>` to `start` and
-`endpoint`; a persisted different value is rejected rather than silently
-switching networks.
+Both hosts now use the same explicit `NETWORK_ID` from the start. A persisted
+different value is rejected rather than silently switching networks.
 
 The endpoint record can now be passed directly to the ephemeral probe client:
 

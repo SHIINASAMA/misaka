@@ -13,11 +13,18 @@ pub(crate) async fn dispatch(
     env: Envelope,
     stream: &mut TcpStream,
 ) -> crate::Result<()> {
+    if env.network_id != node.config.network_id {
+        return Err(crate::Error::Protocol(format!(
+            "envelope belongs to network {} instead of {}",
+            env.network_id, node.config.network_id
+        )));
+    }
     match env.msg_type {
         MessageType::Ping => {
             // Ping/Pong is intentionally side-effect free: unlike Hello, it
             // never records the sender in the peer registry or PeerStore.
             let reply = Envelope::new(
+                node.config.network_id,
                 MessageType::Pong,
                 node.identity.id.as_u64(),
                 env.from,
@@ -43,6 +50,7 @@ pub(crate) async fn dispatch(
             )
             .await;
             let reply = Envelope::new(
+                node.config.network_id,
                 MessageType::Hello,
                 node.identity.id.as_u64(),
                 env.from,
@@ -116,7 +124,13 @@ pub(crate) async fn dispatch(
                     );
                     node.send_fire(
                         addr,
-                        &Envelope::new(MessageType::Job, env.from, job.executor, env.data.clone()),
+                        &Envelope::new(
+                            node.config.network_id,
+                            MessageType::Job,
+                            env.from,
+                            job.executor,
+                            env.data.clone(),
+                        ),
                     )
                     .await?;
                     return Ok(());
@@ -174,6 +188,7 @@ pub(crate) async fn dispatch(
                         created_at: now_secs(),
                     };
                     let envelope = Envelope::new(
+                        node.config.network_id,
                         MessageType::Job,
                         node.identity.id.as_u64(),
                         requester,
@@ -201,6 +216,7 @@ pub(crate) async fn dispatch(
                     .send_fire(
                         addr,
                         &Envelope::new(
+                            node.config.network_id,
                             MessageType::Ack,
                             node.identity.id.as_u64(),
                             requester,

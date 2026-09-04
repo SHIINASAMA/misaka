@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// Current version of the encrypted wire envelope.
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
 /// Service preamble for the v0 file-transfer stream.
 pub const TRANSFER_MAGIC: &[u8; 4] = b"MTR0";
 /// Service preamble for the resumable file-transfer stream.
@@ -68,6 +68,8 @@ pub enum MessageType {
 /// 网络层封装的消息 (对等)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Envelope {
+    /// Namespace of the independent Misaka Network.
+    pub network_id: super::identity::NetworkId,
     pub protocol_version: u16,
     pub msg_type: MessageType,
     pub from: u64,     // 发送方 Sister ID
@@ -76,8 +78,15 @@ pub struct Envelope {
 }
 
 impl Envelope {
-    pub fn new(msg_type: MessageType, from: u64, to: u64, data: Vec<u8>) -> Self {
+    pub fn new(
+        network_id: super::identity::NetworkId,
+        msg_type: MessageType,
+        from: u64,
+        to: u64,
+        data: Vec<u8>,
+    ) -> Self {
         Self {
+            network_id,
             protocol_version: PROTOCOL_VERSION,
             msg_type,
             from,
@@ -320,10 +329,13 @@ mod tests {
 
     #[test]
     fn envelope_roundtrips_bincode() {
-        let env = Envelope::new(MessageType::State, 10032, 0, vec![1, 2, 3]);
+        use crate::NetworkId;
+        let network_id = NetworkId::parse("01234567-89ab-cdef-0123-456789abcdef").unwrap();
+        let env = Envelope::new(network_id, MessageType::State, 10032, 0, vec![1, 2, 3]);
         let bytes = bincode::serialize(&env).unwrap();
         let back: Envelope = bincode::deserialize(&bytes).unwrap();
         assert_eq!(back.protocol_version, PROTOCOL_VERSION);
+        assert_eq!(back.network_id, network_id);
         assert_eq!(back.msg_type, MessageType::State);
         assert_eq!(back.from, 10032);
         assert_eq!(back.data, vec![1, 2, 3]);

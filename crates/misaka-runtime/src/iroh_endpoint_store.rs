@@ -5,8 +5,10 @@
 //! export the actual live UDP/relay address without binding a second endpoint
 //! with the same identity.
 
-use iroh::EndpointAddr;
+use futures_util::StreamExt;
+use iroh::{EndpointAddr, Watcher};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use thiserror::Error;
 
 const ENDPOINT_FILE: &str = "iroh-endpoint.json";
@@ -41,11 +43,41 @@ impl IrohEndpointStore {
     pub fn path(directory: &Path) -> PathBuf {
         directory.join(ENDPOINT_FILE)
     }
+
+    /// Wait for a bounded period for at least one Iroh relay to establish.
+    ///
+    /// Direct addresses may be usable before this completes, so callers can
+    /// still export the current address after a timeout and let the watcher
+    /// refresh it when relay connectivity becomes available.
+    pub async fn wait_for_online(endpoint: &iroh::Endpoint, timeout: Duration) -> bool {
+        tokio::time::timeout(timeout, endpoint.online())
+            .await
+            .is_ok()
+    }
+
+    /// Keep the persisted endpoint address in sync with Iroh's address watcher.
+    pub fn spawn_refresh(directory: PathBuf, endpoint: iroh::Endpoint) {
+        tokio::spawn(async move {
+            let mut addresses = endpoint.watch_addr().stream();
+            loop {
+                tokio::select! {
+                    _ = endpoint.closed() => break,
+                    address = addresses.next() => {
+                        let Some(address) = address else { break };
+                        if let Err(error) = Self::save(&directory, &address) {
+                            tracing::warn!(?error, "failed to refresh persisted Iroh endpoint");
+                        }
+                    }
+                }
+            }
+        });
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::IrohEndpointStore;
+    use std::time::Duration;
 
     #[test]
     fn endpoint_address_roundtrips_without_binding_a_second_endpoint() {
@@ -58,5 +90,16 @@ mod tests {
         assert_eq!(IrohEndpointStore::load(&directory).unwrap(), Some(endpoint));
 
         let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    async fn online_wait_is_bounded_when_no_relay_is_available() {
+        let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .alpns(vec![b"misaka/test".to_vec()])
+            .bind()
+            .await
+            .unwrap();
+        assert!(!IrohEndpointStore::wait_for_online(&endpoint, Duration::from_millis(20)).await);
+        endpoint.close().await;
     }
 }
