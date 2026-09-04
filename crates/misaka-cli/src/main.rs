@@ -106,6 +106,14 @@ enum Command {
         /// Read-only loopback introspection port (0 disables it).
         #[arg(long, default_value_t = 0)]
         introspect: u16,
+
+        /// Also host the opaque relay service alongside this Sister.
+        #[arg(long)]
+        relay: bool,
+
+        /// Relay bind address when --relay is enabled.
+        #[arg(long, default_value = "0.0.0.0:443")]
+        relay_bind: SocketAddr,
     },
 
     /// Export the local Iroh endpoint address for cross-domain preflight.
@@ -113,6 +121,13 @@ enum Command {
         /// Emit one machine-readable endpoint record as JSON.
         #[arg(long)]
         json: bool,
+    },
+
+    /// Run only the opaque NetworkId-namespaced relay service.
+    Relay {
+        /// TCP address on which the relay listens.
+        #[arg(long, default_value = "0.0.0.0:443")]
+        bind: SocketAddr,
     },
 
     /// Experimental Network Stream v0 black-box client.
@@ -287,6 +302,8 @@ async fn async_main() -> Result<(), MisakaError> {
             advertise_host,
             log_format,
             introspect,
+            relay,
+            relay_bind,
         } => {
             init_tracing(&log_format);
             // 加载或生成身份 (持久化)
@@ -393,10 +410,23 @@ async fn async_main() -> Result<(), MisakaError> {
                     .collect(),
             )
             .await?;
+            let relay_service = if relay {
+                Some(
+                    misaka_relay::RelayService::bind(relay_bind)
+                        .await
+                        .map_err(|error| MisakaError::Other(error.to_string()))?,
+                )
+            } else {
+                None
+            };
             let shutdown = runtime.shutdown();
             let signal_task = shutdown.install_signal_handler();
+            let relay_task = relay_service.map(|service| tokio::spawn(service.run()));
             let result = runtime.run().await;
             signal_task.abort();
+            if let Some(task) = relay_task {
+                task.abort();
+            }
             result?;
         }
 
@@ -467,6 +497,16 @@ async fn async_main() -> Result<(), MisakaError> {
                 println!("Iroh endpoint: {endpoint}");
             }
             backend.close().await;
+        }
+
+        Command::Relay { bind } => {
+            tracing_subscriber::fmt().with_target(false).init();
+            misaka_relay::RelayService::bind(bind)
+                .await
+                .map_err(|error| MisakaError::Other(error.to_string()))?
+                .run()
+                .await
+                .map_err(|error| MisakaError::Other(error.to_string()))?;
         }
 
         Command::Connect { sister } => {
@@ -2389,6 +2429,32 @@ mod stream_tests {
                 probe_only: true,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn relay_commands_accept_integrated_and_relay_only_modes() {
+        let sister = Cli::try_parse_from([
+            "misaka",
+            "start",
+            "--relay",
+            "--relay-bind",
+            "127.0.0.1:4430",
+        ])
+        .unwrap();
+        assert!(matches!(
+            sister.command,
+            Command::Start {
+                relay: true,
+                relay_bind,
+                ..
+            } if relay_bind == "127.0.0.1:4430".parse::<SocketAddr>().unwrap()
+        ));
+
+        let relay = Cli::try_parse_from(["misaka", "relay", "--bind", "127.0.0.1:4430"]).unwrap();
+        assert!(matches!(
+            relay.command,
+            Command::Relay { bind } if bind == "127.0.0.1:4430".parse::<SocketAddr>().unwrap()
         ));
     }
 

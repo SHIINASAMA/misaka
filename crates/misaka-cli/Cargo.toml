@@ -12,6 +12,7 @@ path = "src/main.rs"
 misaka-core = { path = "../misaka-core" }
 misaka-runtime = { path = "../misaka-runtime" }
 misaka-network = { path = "../misaka-network" }
+misaka-relay = { path = "../misaka-relay" }
 iroh.workspace = true
 bincode.workspace = true
 serde.workspace = true
