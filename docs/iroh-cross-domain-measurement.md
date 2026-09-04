@@ -8,23 +8,38 @@ the Sister protocol or introducing another backend.
 ## Setup
 
 Use a separate `MISAKA_CONFIG_DIR` on each host. Start both Sisters with the
-opt-in Iroh backend and a manual control-plane peer address:
+opt-in Iroh backend and `--probe-only`. The preflight measurement itself does
+not require the original control-plane TCP listener or a `:31700` bootstrap:
 
 ```bash
 MISAKA_CONFIG_DIR=/path/to/sister-a-config \
-  misaka start --port 31700 --stream-backend iroh --discovery manual \
-  --peer <sister-b-control-ip>:31700 --introspect 31702
+  misaka start --port 31700 --stream-backend iroh --discovery off \
+  --probe-only --introspect 31702
 
 MISAKA_CONFIG_DIR=/path/to/sister-b-config \
-  misaka start --port 31700 --stream-backend iroh --discovery manual \
-  --peer <sister-a-control-ip>:31700 --introspect 31702
+  misaka start --port 31700 --stream-backend iroh --discovery off \
+  --probe-only --introspect 31702
 
 # Optional: force both hosts to use one trusted Iroh relay and disable IP paths.
 # Add both flags to each start command for the UDP-restricted condition:
 #   --iroh-relay https://<relay-host> --iroh-relay-only
 ```
 
-After the control-plane Hello exchange, inspect the initiator's peer state:
+Export each local endpoint directly and exchange these two records out of
+band. The command persists the NetworkId and Iroh transport identity for the
+Sister; it does not contact a peer:
+
+```bash
+MISAKA_CONFIG_DIR=/path/to/sister-a-config misaka endpoint --json
+MISAKA_CONFIG_DIR=/path/to/sister-b-config misaka endpoint --json
+```
+
+Both hosts must use the same `network_id` value. If an explicit namespace is
+needed for a test, pass the same `--network-id <UUID>` to `start` and
+`endpoint`; a persisted different value is rejected rather than silently
+switching networks.
+
+The endpoint record can now be passed directly to the ephemeral probe client:
 
 ```bash
 MISAKA_CONFIG_DIR=/path/to/sister-a-config misaka ps --json

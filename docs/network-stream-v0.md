@@ -75,9 +75,11 @@ for a secure listener and `SecureSisterConnector` consumes the pinned peer
 certificate learned through peer state. Trust provisioning is required before
 using a non-loopback address.
 
-The handshake contains only the `MISAKA_STREAM` magic and protocol version 1.
-It carries no Sister identity, credentials, permissions, service metadata, or
-capability list.
+The handshake contains the `MISAKA_STREAM` magic, protocol version 1, and the
+16-byte NetworkId namespace. It still carries no Sister identity,
+credentials, permissions, service metadata, or capability list. A stream
+handshake from another NetworkId is rejected before application bytes are
+exposed.
 
 ## Runtime and testing
 
@@ -134,6 +136,16 @@ transports disabled; this local fixture is not a substitute for external
 cross-domain or NAT measurements. The runtime unit suite verifies that
 `ConnectionManager` reuses one Iroh session for two explicit logical streams
 and establishes a fresh Iroh session after the old session is closed.
+
+The public `misaka endpoint --json` command exports a local Iroh endpoint
+without control-plane bootstrap. Outbound Iroh CLI probes use ephemeral
+transport identities, while Sister listeners retain their persisted identity.
+`--probe-only` allows raw handshake/echo/large measurements but rejects
+Transfer and Tunnel preambles. NetworkId is persisted per config directory
+and included in Hello/State, mDNS, peer persistence, and Direct TCP/Iroh
+logical stream handshakes. Testament's `relay-verify` command covers R01-R07
+for relay-only startup, namespaced pairing, Sister+Relay composition, and
+bounded shutdown.
 
 Transfer v1 is layered above the selected `NetworkStream`: `MTR1` uses fixed
 64 KiB chunks, per-chunk integrity checks, a SHA-256 content digest, explicit
