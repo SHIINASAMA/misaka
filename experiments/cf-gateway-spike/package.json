@@ -1,0 +1,9 @@
+{
+  "name": "cf-gateway-spike",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DevDependencies harness for building the Cloudflare Rust Worker spike (wrangler).",
+  "devDependencies": {
+    "wrangler": "^4.129.0"
+  }
+}

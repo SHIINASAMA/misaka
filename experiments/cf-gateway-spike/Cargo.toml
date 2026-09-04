@@ -1,0 +1,34 @@
+[package]
+name = "cf-gateway-spike"
+version = "0.1.0"
+edition = "2021"
+description = "Cloudflare Gateway packaging spike: prove misaka-core reaches a Workers Wasm bundle"
+
+# Standalone workspace: keeps `[profile.release]` below effective (workspace
+# members inherit profiles from the root only) and leaves the repo root
+# Cargo.toml untouched. `misaka-core` is still consumed as a path dependency.
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+worker = "0.8"
+serde_json = "1"
+misaka-core = { path = "../../crates/misaka-core" }
+# misaka-core pulls `getrandom` transitively via `rand`/`ed25519-dalek`.
+# On wasm32-unknown-unknown the JS (WebCrypto) backend must be selected; enable
+# it here so the whole dependency graph unifies on a buildable backend.
+getrandom = { version = "0.2", features = ["js"] }
+# misaka-core pulls `uuid` transitively (NetworkId). Its `v4` path needs a
+# randomness source on wasm32-unknown-unknown; route it through the js backend.
+uuid = { version = "1", features = ["js"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+# NOTE: `strip = true` is intentionally omitted. wasm-bindgen >= 0.2.125
+# hard-requires the externref table, which `strip` removes, so enabling it
+# makes `worker-build` fail with "externref table required for catch wrappers"
+# (cloudflare/workers-rs#1014; upstream fix wasm-bindgen#5205 pending).
+# worker-build runs wasm-opt, which strips debug/name sections regardless.

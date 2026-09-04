@@ -1,0 +1,38 @@
+Cloudflare Gateway Packaging Spike - size report
+=================================================
+
+Toolchain:
+  rustc                1.98.0
+  worker / worker-build 0.8.5
+  wasm-bindgen         0.2.127
+  wrangler             4.129.0
+
+Pipeline (all PASS):
+  wasm32 compile  ->  worker-build --release  ->  wrangler deploy --dry-run --outdir dist
+
+Artifacts:
+  Wasm raw size (post wasm-opt): 561969 bytes (build/index_bg.wasm)
+  Final Wrangler bundle:         dist/*.wasm + dist/shim.js
+  Total Upload:                  580.26 KiB
+  Final gzip upload (Wrangler):  224.07 KiB   <-- acceptance value
+  Measured gzip (this script):   218 KiB
+
+Cloudflare limits:
+  Free   3 MiB gzip   (3072 KiB)
+  Paid  10 MiB gzip
+  Raw   64 MiB
+
+Result: PASS   (gzip 224.07 KiB, tier EXCELLENT < 1 MiB)
+
+Verification the bundle is not a hollow Hello World:
+  GET /         -> 200 "misaka gateway spike"
+  GET /verify   -> 200 {"valid":true}
+  Executed at runtime (miniflare): serde_json deserialize -> PeerRecord::verify()
+    -> TransportBinding verify -> Ed25519 verify -> sha2 domain helper.
+
+Conclusion:
+  misaka-core can currently be reused directly by a Cloudflare Rust Worker.
+  No crate split is required. The only adaptations needed were:
+    1. getrandom/uuid wasm rng backend selection (js) via feature unification.
+    2. `strip = true` must be omitted (wasm-bindgen >= 0.2.125 requires the
+       externref table; see cloudflare/workers-rs#1014).
