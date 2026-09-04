@@ -32,6 +32,8 @@ button, a { -webkit-tap-highlight-color: transparent; }
 .eyebrow { color: #67e8f9; letter-spacing: .14em; text-transform: uppercase; font-size: .68rem; font-weight: 700; }
 .mono { font-family: var(--mantine-font-family-monospace); }
 .muted { color: #8490aa; }
+.inline-action { border: 0; padding: 0; color: #67e8f9; background: transparent; text-decoration: underline; cursor: pointer; font: inherit; }
+.inline-action:focus-visible { outline: 2px solid #67e8f9; outline-offset: 3px; }
 .focus-ring:focus-visible { outline: 2px solid #67e8f9; outline-offset: 3px; }
 
 .pulse-rail { position: relative; display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
