@@ -31,6 +31,12 @@ The payload in `data` is bincode-encoded message-specific data:
   service;
 - `Ping`/`Pong`: empty payloads used for a read-only compatibility probe.
 
+Transfer v0/v1/v2 and tunnel requests optionally carry a signed
+`CommandAuthorization`. Authenticated deployments bind this to the exact file
+destination or remote socket and reject replayed nonces at the receiving
+Sister. The optional field preserves the compatibility mode used by the
+black-box Testament scenarios.
+
 ## Wire framing and encryption
 
 Peer TCP traffic is a sequence of length-prefixed encrypted envelopes:

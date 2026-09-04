@@ -1742,6 +1742,12 @@ async fn run_copy(
         iroh_options,
     )
     .await?;
+    let authorization = load_cli_authorization(
+        local_network_id()?,
+        None,
+        Permission::FileSend,
+        vec![format!("destination={}", remote_path.display())],
+    )?;
 
     let mut file = tokio::fs::File::open(source)
         .await
@@ -1764,6 +1770,7 @@ async fn run_copy(
         destination: remote_path.display().to_string(),
         size,
         digest,
+        authorization,
     };
     let encoded = bincode::serialize(&request).map_err(|error| error.to_string())?;
     stream
@@ -1845,6 +1852,12 @@ async fn run_copy_v1(
         iroh_options,
     )
     .await?;
+    let authorization = load_cli_authorization(
+        local_network_id()?,
+        None,
+        Permission::FileSend,
+        vec![format!("destination={}", remote_path.display())],
+    )?;
 
     let mut file = tokio::fs::File::open(source)
         .await
@@ -1870,6 +1883,7 @@ async fn run_copy_v1(
             size,
             digest,
             chunk_size: TRANSFER_V1_CHUNK_SIZE,
+            authorization,
         },
     )
     .await?;
@@ -1978,6 +1992,12 @@ async fn run_copy_v2(
         offset: 0,
         len: 0,
         chunk_digest: [0; 32],
+        authorization: load_cli_authorization(
+            local_network_id()?,
+            None,
+            Permission::FileSend,
+            vec![format!("destination={}", remote_path.display())],
+        )?,
     };
     let transport = TransferV2Transport::new(
         endpoint,
@@ -2315,6 +2335,7 @@ async fn run_tunnel(
         endpoint,
         peer_certificate,
         remote,
+        Permission::TunnelOpen,
         listener,
         iroh_options,
     )
@@ -2326,6 +2347,7 @@ async fn serve_tunnel(
     endpoint: NetworkEndpoint,
     peer_certificate: Option<Vec<u8>>,
     remote: SocketAddr,
+    permission: Permission,
     listener: tokio::net::TcpListener,
     iroh_options: IrohTransportOptions,
 ) -> Result<(), String> {
@@ -2349,6 +2371,7 @@ async fn serve_tunnel(
                         sister_id,
                         peer_certificate.as_deref(),
                         remote,
+                        permission,
                         iroh_options,
                     )
                     .await
@@ -2393,6 +2416,7 @@ async fn run_ssh(
         endpoint,
         peer.stream_certificate,
         remote,
+        Permission::ShellOpen,
         listener,
         iroh_options,
     ));
@@ -2550,6 +2574,20 @@ fn load_cli_command_authorization(
     target: Option<u64>,
     command: &str,
 ) -> Result<Option<CommandAuthorization>, String> {
+    load_cli_authorization(
+        network_id,
+        target,
+        Permission::JobSubmit,
+        vec![format!("command={command}")],
+    )
+}
+
+fn load_cli_authorization(
+    network_id: NetworkId,
+    target: Option<u64>,
+    permission: Permission,
+    constraints: Vec<String>,
+) -> Result<Option<CommandAuthorization>, String> {
     let data_dir = IdentityStore::config_dir().map_err(|error| error.to_string())?;
     let human = HumanIdentityStore::load(&data_dir).map_err(|error| error.to_string())?;
     let human_key = HumanIdentityStore::load_key(&data_dir).map_err(|error| error.to_string())?;
@@ -2580,9 +2618,9 @@ fn load_cli_command_authorization(
         human,
         membership.clone(),
         membership.role,
-        Permission::JobSubmit,
+        permission,
         target.map(|id| Principal::Sister(misaka_core::SisterId(id))),
-        vec![format!("command={command}")],
+        constraints,
         now,
         now.saturating_add(300),
         uuid::Uuid::new_v4().into_bytes(),
@@ -2596,12 +2634,20 @@ async fn proxy_tunnel(
     sister_id: u64,
     peer_certificate: Option<&[u8]>,
     remote: SocketAddr,
+    permission: Permission,
     iroh_options: IrohTransportOptions,
 ) -> Result<(), String> {
     let mut stream =
         connect_peer_stream(endpoint, sister_id, peer_certificate, iroh_options).await?;
+    let authorization = load_cli_authorization(
+        local_network_id()?,
+        None,
+        permission,
+        vec![format!("remote={remote}")],
+    )?;
     let request = bincode::serialize(&TunnelRequest {
         remote: remote.to_string(),
+        authorization,
     })
     .map_err(|error| error.to_string())?;
     stream

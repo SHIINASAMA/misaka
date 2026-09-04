@@ -488,6 +488,9 @@ pub struct TransferRequest {
     pub destination: String,
     pub size: u64,
     pub digest: [u8; 32],
+    /// Human authorization for the file.send operation.
+    #[serde(default)]
+    pub authorization: Option<super::identity::CommandAuthorization>,
 }
 
 /// Completion result for a v0 file-transfer service.
@@ -507,6 +510,9 @@ pub struct TransferV1Request {
     pub size: u64,
     pub digest: [u8; 32],
     pub chunk_size: u32,
+    /// Human authorization for the file.send operation.
+    #[serde(default)]
+    pub authorization: Option<super::identity::CommandAuthorization>,
 }
 
 /// Receiver's durable progress for a resumable transfer.
@@ -555,6 +561,9 @@ pub struct TransferV2Request {
     pub offset: u64,
     pub len: u32,
     pub chunk_digest: [u8; 32],
+    /// Human authorization for the file.send operation.
+    #[serde(default)]
+    pub authorization: Option<super::identity::CommandAuthorization>,
 }
 
 /// Durable completed chunk indexes returned by a Transfer v2 prepare request.
@@ -578,6 +587,9 @@ pub struct TransferV2Ack {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TunnelRequest {
     pub remote: String,
+    /// Human authorization for tunnel.open or shell.open.
+    #[serde(default)]
+    pub authorization: Option<super::identity::CommandAuthorization>,
 }
 
 #[cfg(test)]
@@ -619,6 +631,7 @@ mod tests {
             destination: "/tmp/result.bin".into(),
             size: 3,
             digest: [7; 32],
+            authorization: None,
         };
         let encoded = bincode::serialize(&request).unwrap();
         let decoded: TransferRequest = bincode::deserialize(&encoded).unwrap();
@@ -632,6 +645,7 @@ mod tests {
             size: 131072,
             digest: [7; 32],
             chunk_size: TRANSFER_V1_CHUNK_SIZE,
+            authorization: None,
         };
         let encoded = bincode::serialize(&request).unwrap();
         let decoded: TransferV1Request = bincode::deserialize(&encoded).unwrap();
@@ -690,6 +704,7 @@ mod tests {
                 offset: 0,
                 len: 0,
                 chunk_digest: [0; 32],
+                authorization: None,
             },
             TransferV2Request {
                 operation: TransferV2Operation::Chunk,
@@ -702,6 +717,7 @@ mod tests {
                 offset: 65_536,
                 len: 65_536,
                 chunk_digest: [8; 32],
+                authorization: None,
             },
             TransferV2Request {
                 operation: TransferV2Operation::Finalize,
@@ -714,6 +730,7 @@ mod tests {
                 offset: 0,
                 len: 0,
                 chunk_digest: [0; 32],
+                authorization: None,
             },
         ];
         for request in requests {
@@ -750,6 +767,7 @@ mod tests {
     fn tunnel_contract_roundtrips_bincode() {
         let request = TunnelRequest {
             remote: "127.0.0.1:22".into(),
+            authorization: None,
         };
         let encoded = bincode::serialize(&request).unwrap();
         assert_eq!(

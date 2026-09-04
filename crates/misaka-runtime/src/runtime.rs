@@ -14,7 +14,7 @@ use misaka_core::protocol::{
     TransferV2Ack, TransferV2Operation, TransferV2Request, TransferV2Resume, TunnelRequest,
     TRANSFER_MAGIC, TRANSFER_V1_CHUNK_SIZE, TRANSFER_V1_MAGIC, TRANSFER_V2_MAGIC, TUNNEL_MAGIC,
 };
-use misaka_core::SisterIdentity;
+use misaka_core::{CommandAuthorization, Permission, SisterIdentity};
 use misaka_network::{NetworkBackend, NetworkEndpoint};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -525,7 +525,13 @@ async fn log_and_echo_stream(
     let connected_for = stream.connected_for();
     let path = stream.path_info();
     let object_store_root = session_node.peers.data_dir().join("objects");
-    let result = echo_stream(stream, &object_store_root, session_node.config.probe_only).await;
+    let result = echo_stream(
+        stream,
+        &object_store_root,
+        session_node.config.probe_only,
+        Some(&session_node),
+    )
+    .await;
     log_stream_close(&session_node, &stats, connected_for, &path, addr, result);
     drop(registration);
 }
@@ -542,9 +548,13 @@ async fn log_and_echo_stream_after_greeting(
     let connected_for = stream.connected_for();
     let path = stream.path_info();
     let object_store_root = session_node.peers.data_dir().join("objects");
-    let result =
-        echo_stream_after_greeting(stream, &object_store_root, session_node.config.probe_only)
-            .await;
+    let result = echo_stream_after_greeting(
+        stream,
+        &object_store_root,
+        session_node.config.probe_only,
+        Some(&session_node),
+    )
+    .await;
     log_stream_close(&session_node, &stats, connected_for, &path, addr, result);
     drop(registration);
 }
@@ -577,15 +587,17 @@ async fn echo_stream(
     mut stream: misaka_network::NetworkStream,
     object_store_root: &Path,
     probe_only: bool,
+    node: Option<&SisterNode>,
 ) -> std::io::Result<()> {
     stream.write_all(b"world").await?;
-    echo_stream_after_greeting(stream, object_store_root, probe_only).await
+    echo_stream_after_greeting(stream, object_store_root, probe_only, node).await
 }
 
 async fn echo_stream_after_greeting(
     mut stream: misaka_network::NetworkStream,
     object_store_root: &Path,
     probe_only: bool,
+    node: Option<&SisterNode>,
 ) -> std::io::Result<()> {
     let mut preamble = [0u8; TRANSFER_MAGIC.len()];
     if stream.read_exact(&mut preamble).await.is_err() {
@@ -598,7 +610,7 @@ async fn echo_stream_after_greeting(
                 "probe-only listener rejects file transfer",
             ));
         }
-        return receive_transfer(stream).await;
+        return receive_transfer_with_node(stream, node).await;
     }
     if preamble == *TRANSFER_V1_MAGIC {
         if probe_only {
@@ -607,7 +619,7 @@ async fn echo_stream_after_greeting(
                 "probe-only listener rejects file transfer",
             ));
         }
-        return receive_transfer_v1(stream).await;
+        return receive_transfer_v1_with_node(stream, node).await;
     }
     if preamble == *TRANSFER_V2_MAGIC {
         if probe_only {
@@ -616,7 +628,12 @@ async fn echo_stream_after_greeting(
                 "probe-only listener rejects file transfer",
             ));
         }
-        return receive_transfer_v2_with_store(stream, Some(object_store_root.to_owned())).await;
+        return receive_transfer_v2_with_store_and_node(
+            stream,
+            Some(object_store_root.to_owned()),
+            node,
+        )
+        .await;
     }
     if preamble == *TUNNEL_MAGIC {
         if probe_only {
@@ -625,7 +642,7 @@ async fn echo_stream_after_greeting(
                 "probe-only listener rejects tunnel",
             ));
         }
-        return receive_tunnel(stream).await;
+        return receive_tunnel_with_node(stream, node).await;
     }
     stream.write_all(&preamble).await?;
     let mut buffer = [0u8; 64 * 1024];
@@ -638,7 +655,10 @@ async fn echo_stream_after_greeting(
     }
 }
 
-async fn receive_transfer(mut stream: misaka_network::NetworkStream) -> std::io::Result<()> {
+async fn receive_transfer_with_node(
+    mut stream: misaka_network::NetworkStream,
+    node: Option<&SisterNode>,
+) -> std::io::Result<()> {
     let mut length = [0u8; 4];
     stream.read_exact(&mut length).await?;
     let header_len = u32::from_be_bytes(length) as usize;
@@ -652,6 +672,14 @@ async fn receive_transfer(mut stream: misaka_network::NetworkStream) -> std::io:
     stream.read_exact(&mut header).await?;
     let request: TransferRequest = bincode::deserialize(&header)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    authorize_stream_operation(
+        node,
+        request.authorization.as_ref(),
+        Permission::FileSend,
+        &[format!("destination={}", request.destination)],
+        true,
+    )
+    .await?;
     let destination = std::path::PathBuf::from(&request.destination);
     if let Some(parent) = destination.parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -708,8 +736,24 @@ struct TransferV1State {
     offset: u64,
 }
 
-async fn receive_transfer_v1(mut stream: misaka_network::NetworkStream) -> std::io::Result<()> {
+#[cfg(test)]
+async fn receive_transfer_v1(stream: misaka_network::NetworkStream) -> std::io::Result<()> {
+    receive_transfer_v1_with_node(stream, None).await
+}
+
+async fn receive_transfer_v1_with_node(
+    mut stream: misaka_network::NetworkStream,
+    node: Option<&SisterNode>,
+) -> std::io::Result<()> {
     let request: TransferV1Request = read_bincode_frame(&mut stream, 1024 * 1024).await?;
+    authorize_stream_operation(
+        node,
+        request.authorization.as_ref(),
+        Permission::FileSend,
+        &[format!("destination={}", request.destination)],
+        true,
+    )
+    .await?;
     if request.chunk_size != TRANSFER_V1_CHUNK_SIZE {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -869,11 +913,28 @@ async fn receive_transfer_v2(stream: misaka_network::NetworkStream) -> std::io::
     receive_transfer_v2_with_store(stream, None).await
 }
 
+#[cfg(test)]
 async fn receive_transfer_v2_with_store(
-    mut stream: misaka_network::NetworkStream,
+    stream: misaka_network::NetworkStream,
     store_root: Option<PathBuf>,
 ) -> std::io::Result<()> {
+    receive_transfer_v2_with_store_and_node(stream, store_root, None).await
+}
+
+async fn receive_transfer_v2_with_store_and_node(
+    mut stream: misaka_network::NetworkStream,
+    store_root: Option<PathBuf>,
+    node: Option<&SisterNode>,
+) -> std::io::Result<()> {
     let request: TransferV2Request = read_bincode_frame(&mut stream, 1024 * 1024).await?;
+    authorize_stream_operation(
+        node,
+        request.authorization.as_ref(),
+        Permission::FileSend,
+        &[format!("destination={}", request.destination)],
+        request.operation == TransferV2Operation::Prepare,
+    )
+    .await?;
     validate_transfer_v2_request(&request)?;
     let (part_path, state_path) = transfer_v2_paths(&request.destination);
     let fallback_store_root = part_path
@@ -1250,7 +1311,10 @@ async fn write_transfer_result(
     write_bincode_frame(stream, &result).await
 }
 
-async fn receive_tunnel(mut stream: misaka_network::NetworkStream) -> std::io::Result<()> {
+async fn receive_tunnel_with_node(
+    mut stream: misaka_network::NetworkStream,
+    node: Option<&SisterNode>,
+) -> std::io::Result<()> {
     let mut length = [0u8; 4];
     stream.read_exact(&mut length).await?;
     let request_len = u32::from_be_bytes(length) as usize;
@@ -1264,6 +1328,19 @@ async fn receive_tunnel(mut stream: misaka_network::NetworkStream) -> std::io::R
     stream.read_exact(&mut encoded).await?;
     let request: TunnelRequest = bincode::deserialize(&encoded)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let permission = request
+        .authorization
+        .as_ref()
+        .map(|authorization| authorization.permission)
+        .unwrap_or(Permission::TunnelOpen);
+    authorize_stream_operation(
+        node,
+        request.authorization.as_ref(),
+        permission,
+        &[format!("remote={}", request.remote)],
+        true,
+    )
+    .await?;
     let remote = request
         .remote
         .parse::<SocketAddr>()
@@ -1280,6 +1357,71 @@ async fn receive_tunnel(mut stream: misaka_network::NetworkStream) -> std::io::R
         )
     })??;
     tokio::io::copy_bidirectional(&mut stream, &mut remote).await?;
+    Ok(())
+}
+
+async fn authorize_stream_operation(
+    node: Option<&SisterNode>,
+    authorization: Option<&CommandAuthorization>,
+    permission: Permission,
+    constraints: &[String],
+    record_nonce: bool,
+) -> std::io::Result<()> {
+    let Some(authorization) = authorization else {
+        return Ok(());
+    };
+    let node = node.ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "authorized stream request requires a runtime authorization context",
+        )
+    })?;
+    let authority =
+        crate::network_authority_store::NetworkAuthorityStore::load(&node.config.data_dir)
+            .map_err(|error| std::io::Error::other(error.to_string()))?
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "authorized stream request requires network.json",
+                )
+            })?;
+    if authorization.permission != permission
+        || !matches!(
+            authorization.permission,
+            Permission::FileSend | Permission::TunnelOpen | Permission::ShellOpen
+        )
+        || authorization.target.is_some()
+        || authorization.network_id != node.config.network_id
+        || !authorization.verify(&authority, crate::node::now_secs())
+        || authorization.constraints != constraints
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "stream authorization is invalid",
+        ));
+    }
+    if crate::revocation_store::RevocationStore::is_revoked(
+        &node.config.data_dir,
+        &authority,
+        authorization.network_id,
+        authorization.membership.serial,
+    )
+    .map_err(|error| std::io::Error::new(std::io::ErrorKind::PermissionDenied, error))?
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "stream authorization membership has been revoked",
+        ));
+    }
+    if record_nonce {
+        let _nonce_guard = node.authorization_nonce_lock.lock().await;
+        crate::authorization_nonce_store::AuthorizationNonceStore::record(
+            &node.config.data_dir,
+            authorization,
+            crate::node::now_secs(),
+        )
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::PermissionDenied, error))?;
+    }
     Ok(())
 }
 
@@ -1791,6 +1933,7 @@ mod tests {
             size: payload.len() as u64,
             digest: transfer_content_digest(&payload),
             chunk_size: TRANSFER_V1_CHUNK_SIZE,
+            authorization: None,
         };
 
         let (server_io, mut client_io) = tokio::io::duplex(1024 * 1024);
@@ -1876,6 +2019,7 @@ mod tests {
             offset: 0,
             len: 0,
             chunk_digest: [0; 32],
+            authorization: None,
         };
 
         let (server_io, mut client_io) = tokio::io::duplex(1024 * 1024);
@@ -2026,6 +2170,7 @@ mod tests {
                 offset: 0,
                 len: 0,
                 chunk_digest: [0; 32],
+                authorization: None,
             };
 
             let (server_io, mut client_io) = tokio::io::duplex(1024 * 1024);

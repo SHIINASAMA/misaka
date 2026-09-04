@@ -166,6 +166,7 @@ pub(crate) async fn dispatch_envelope(
                     ));
                 }
                 if job.executor == 0 || job.executor == node.identity.id.as_u64() {
+                    let _nonce_guard = node.authorization_nonce_lock.lock().await;
                     crate::authorization_nonce_store::AuthorizationNonceStore::record(
                         &node.config.data_dir,
                         authorization,

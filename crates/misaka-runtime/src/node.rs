@@ -54,6 +54,9 @@ pub struct SisterNode {
 
     /// In-memory active stream telemetry; never persisted or advertised.
     pub(crate) stream_registry: StreamRegistry,
+
+    /// Serializes durable authorization nonce updates within this Sister.
+    pub(crate) authorization_nonce_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl SisterNode {
@@ -115,6 +118,7 @@ impl SisterNode {
             transport: PeerTransport::new(Crypto::new(&encryption_key).unwrap()),
             shutdown: ShutdownToken::never(),
             stream_registry: StreamRegistry::default(),
+            authorization_nonce_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
