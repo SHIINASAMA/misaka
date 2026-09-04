@@ -12,6 +12,7 @@ pub const TXT_NICK: &str = "nick";
 pub const TXT_HOST: &str = "host";
 pub const TXT_PLATFORM: &str = "platform";
 pub const TXT_STREAM_PORT: &str = "stream_port";
+pub const TXT_STREAM_ENDPOINT: &str = "stream_endpoint";
 pub const TXT_NETWORK_ID: &str = "network_id";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +37,7 @@ pub fn advertise(
     platform: &str,
     addr: SocketAddr,
     stream_port: Option<u16>,
+    stream_endpoint: Option<String>,
     report: tokio::sync::mpsc::Sender<InstanceInformation>,
 ) -> Result<ServiceDiscovery, simple_mdns::SimpleMdnsError> {
     let mut info = InstanceInformation::new(nickname.to_string())
@@ -47,6 +49,9 @@ pub fn advertise(
         .with_attribute(TXT_PLATFORM.to_string(), Some(platform.to_string()));
     if let Some(stream_port) = stream_port {
         info = info.with_attribute(TXT_STREAM_PORT.to_string(), Some(stream_port.to_string()));
+    }
+    if let Some(stream_endpoint) = stream_endpoint {
+        info = info.with_attribute(TXT_STREAM_ENDPOINT.to_string(), Some(stream_endpoint));
     }
 
     ServiceDiscovery::new_with_scope(
@@ -64,6 +69,7 @@ pub fn instance_to_peer(instance: &InstanceInformation) -> Option<DiscoveredPeer
     let mut nick = None;
     let mut addr = None;
     let mut stream_port = None;
+    let mut stream_endpoint = None;
     let mut network_id = None;
 
     // TXT 属性
@@ -73,6 +79,7 @@ pub fn instance_to_peer(instance: &InstanceInformation) -> Option<DiscoveredPeer
             TXT_ID => id = v.parse::<u64>().ok(),
             TXT_NICK => nick = Some(v.to_string()),
             TXT_STREAM_PORT => stream_port = v.parse::<u16>().ok(),
+            TXT_STREAM_ENDPOINT => stream_endpoint = v.parse::<NetworkEndpoint>().ok(),
             TXT_NETWORK_ID => network_id = NetworkId::parse(v).ok(),
             _ => {}
         }
@@ -93,14 +100,17 @@ pub fn instance_to_peer(instance: &InstanceInformation) -> Option<DiscoveredPeer
         id,
         nickname: nick,
         control_addr: addr,
-        stream_endpoint: stream_port
-            .map(|port| NetworkEndpoint::Tcp(SocketAddr::new(addr.ip(), port))),
+        stream_endpoint: stream_endpoint.or_else(|| {
+            stream_port.map(|port| NetworkEndpoint::Tcp(SocketAddr::new(addr.ip(), port)))
+        }),
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{instance_to_peer, TXT_ID, TXT_NETWORK_ID, TXT_NICK, TXT_STREAM_PORT};
+    use super::{
+        instance_to_peer, TXT_ID, TXT_NETWORK_ID, TXT_NICK, TXT_STREAM_ENDPOINT, TXT_STREAM_PORT,
+    };
     use simple_mdns::InstanceInformation;
 
     #[test]
@@ -126,5 +136,20 @@ mod tests {
             peer.stream_endpoint,
             Some("tcp://127.0.0.1:31701".parse().unwrap())
         );
+    }
+
+    #[test]
+    fn discovery_metadata_prefers_an_iroh_endpoint_over_the_legacy_port() {
+        let endpoint = misaka_network::NetworkEndpoint::Iroh(iroh::EndpointAddr::new(
+            iroh::SecretKey::generate().public(),
+        ));
+        let instance = InstanceInformation::new("alpha".into())
+            .with_socket_address("127.0.0.1:31700".parse().unwrap())
+            .with_attribute(TXT_ID.into(), Some("42".into()))
+            .with_attribute(TXT_STREAM_PORT.into(), Some("31701".into()))
+            .with_attribute(TXT_STREAM_ENDPOINT.into(), Some(endpoint.to_string()));
+
+        let peer = instance_to_peer(&instance).unwrap();
+        assert_eq!(peer.stream_endpoint, Some(endpoint));
     }
 }

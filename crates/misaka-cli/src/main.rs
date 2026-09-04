@@ -1093,6 +1093,7 @@ async fn run_stream_test(
         iroh_options,
     } = options;
     let connect_started = tokio::time::Instant::now();
+    let is_iroh_endpoint = matches!(&endpoint, NetworkEndpoint::Iroh(_));
     let mut stream = if secure {
         let NetworkEndpoint::Tcp(addr) = endpoint else {
             return Err("--secure only supports a TCP endpoint".to_string());
@@ -1141,6 +1142,15 @@ async fn run_stream_test(
             }
         }
     };
+
+    if is_iroh_endpoint {
+        if let Some(auth) = load_cli_authenticated_session(network_id)? {
+            stream =
+                misaka_runtime::authenticated_session::authenticate_client(stream, &auth, None)
+                    .await
+                    .map_err(|error| format!("Iroh stream authentication failed: {error}"))?;
+        }
+    }
 
     let connect_ms = connect_started.elapsed().as_millis();
     let path = stream.path_info();
@@ -1737,6 +1747,7 @@ enum TransferV2Transport {
     Iroh {
         backend: misaka_network::IrohBackend,
         endpoint: iroh::EndpointAddr,
+        peer_id: u64,
     },
 }
 
@@ -1759,6 +1770,7 @@ impl TransferV2Transport {
                 Ok(Self::Iroh {
                     backend,
                     endpoint: endpoint_addr,
+                    peer_id,
                 })
             }
             endpoint => Ok(Self::Direct {
@@ -1786,16 +1798,31 @@ impl TransferV2Transport {
                 )
                 .await?
             }
-            Self::Iroh { backend, endpoint } => {
+            Self::Iroh {
+                backend,
+                endpoint,
+                peer_id,
+            } => {
                 let network_id = local_network_id()?;
-                tokio::time::timeout(
+                let stream = tokio::time::timeout(
                     Duration::from_secs(10),
                     backend
                         .connect_for_network(NetworkEndpoint::Iroh(endpoint.clone()), network_id),
                 )
                 .await
                 .map_err(|_| "Iroh transfer stream connect timed out".to_string())?
-                .map_err(|error| error.to_string())?
+                .map_err(|error| error.to_string())?;
+                if let Some(auth) = load_cli_authenticated_session(network_id)? {
+                    misaka_runtime::authenticated_session::authenticate_client(
+                        stream,
+                        &auth,
+                        Some(*peer_id),
+                    )
+                    .await
+                    .map_err(|error| format!("Iroh transfer authentication failed: {error}"))?
+                } else {
+                    stream
+                }
             }
         };
         if matches!(self, Self::Iroh { .. }) {
@@ -2096,13 +2123,20 @@ async fn connect_peer_stream(
             return Err("Iroh streams use endpoint-authenticated encryption; do not provide a TLS certificate".to_string());
         }
         let backend = bind_iroh_client_backend(iroh_options).await?;
-        tokio::time::timeout(
+        let stream = tokio::time::timeout(
             Duration::from_secs(10),
             backend.connect_for_network(endpoint, network_id),
         )
         .await
         .map_err(|_| "Iroh stream connect timed out".to_string())?
-        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())?;
+        if let Some(auth) = load_cli_authenticated_session(network_id)? {
+            misaka_runtime::authenticated_session::authenticate_client(stream, &auth, Some(peer_id))
+                .await
+                .map_err(|error| format!("Iroh stream authentication failed: {error}"))?
+        } else {
+            stream
+        }
     } else if let Some(peer_certificate) = peer_certificate {
         let data_dir = IdentityStore::config_dir().map_err(|error| error.to_string())?;
         let identity = misaka_runtime::tls_identity_store::TlsIdentityStore::load(&data_dir)
@@ -2141,6 +2175,27 @@ async fn connect_peer_stream(
 fn local_network_id() -> Result<misaka_core::NetworkId, String> {
     let data_dir = IdentityStore::config_dir().map_err(|error| error.to_string())?;
     NetworkIdStore::load_or_init(&data_dir, None).map_err(|error| error.to_string())
+}
+
+fn load_cli_authenticated_session(
+    network_id: misaka_core::NetworkId,
+) -> Result<Option<misaka_runtime::authenticated_session::AuthenticatedSessionConfig>, String> {
+    let data_dir = IdentityStore::config_dir().map_err(|error| error.to_string())?;
+    let authority = misaka_runtime::network_authority_store::NetworkAuthorityStore::load(&data_dir)
+        .map_err(|error| error.to_string())?;
+    let membership = misaka_runtime::membership_store::MembershipStore::load(&data_dir)
+        .map_err(|error| error.to_string())?;
+    let binding = TransportBindingStore::load(&data_dir).map_err(|error| error.to_string())?;
+    if authority.is_none() && membership.is_none() && binding.is_none() {
+        return Ok(None);
+    }
+    let identity = IdentityStore::load()
+        .map_err(|error| error.to_string())?
+        .ok_or("Iroh authentication requires a persisted Sister identity")?;
+    let sister_key = misaka_runtime::sister_key_store::SisterKeyStore::load(&data_dir)
+        .map_err(|error| error.to_string())?
+        .ok_or("Iroh authentication requires a persisted Sister identity key")?;
+    load_authenticated_session(&data_dir, network_id, &identity, &sister_key)
 }
 
 async fn bind_iroh_backend(

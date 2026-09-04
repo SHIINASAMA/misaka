@@ -231,6 +231,71 @@ impl SisterNode {
         self.transport.send_fire(addr, env).await
     }
 
+    /// Send a control-plane envelope to a known Sister. Iroh candidates are
+    /// preferred when this node is running the Iroh backend; TCP remains the
+    /// compatibility fallback while the control-plane migration is staged.
+    pub async fn send_to_peer(&self, peer_id: u64, env: &Envelope) -> crate::Result<Envelope> {
+        if let Some((backend, endpoint)) = self.iroh_peer_endpoint(peer_id).await {
+            let response = crate::control_channel::send(
+                backend,
+                endpoint,
+                self.config.network_id,
+                self.config.authenticated_session.as_ref(),
+                env,
+                true,
+            )
+            .await
+            .map_err(|error| crate::Error::Network(error.to_string()))?;
+            return response.ok_or_else(|| {
+                crate::Error::Network("Iroh control channel returned no response".to_string())
+            });
+        }
+        let addr =
+            self.peers.addr_of(peer_id).await.ok_or_else(|| {
+                crate::Error::Other(format!("no address for executor #{peer_id}"))
+            })?;
+        self.send_to(addr, env).await
+    }
+
+    pub async fn send_fire_to_peer(&self, peer_id: u64, env: &Envelope) -> crate::Result<()> {
+        if let Some((backend, endpoint)) = self.iroh_peer_endpoint(peer_id).await {
+            crate::control_channel::send(
+                backend,
+                endpoint,
+                self.config.network_id,
+                self.config.authenticated_session.as_ref(),
+                env,
+                false,
+            )
+            .await
+            .map_err(|error| crate::Error::Network(error.to_string()))?;
+            return Ok(());
+        }
+        let addr = self
+            .peers
+            .addr_of(peer_id)
+            .await
+            .ok_or_else(|| crate::Error::Other(format!("no address for Sister #{peer_id}")))?;
+        self.send_fire(addr, env).await
+    }
+
+    async fn iroh_peer_endpoint(
+        &self,
+        peer_id: u64,
+    ) -> Option<(&misaka_network::IrohBackend, NetworkEndpoint)> {
+        let StreamBackend::Iroh(backend) = &self.config.stream_backend else {
+            return None;
+        };
+        let peer = self.peers.get(peer_id).await?;
+        peer.stream_endpoints
+            .into_iter()
+            .filter_map(|endpoint| endpoint.parse::<NetworkEndpoint>().ok())
+            .find_map(|endpoint| match endpoint {
+                NetworkEndpoint::Iroh(_) => Some((backend, endpoint)),
+                NetworkEndpoint::Tcp(_) => None,
+            })
+    }
+
     /// 从 peer 表取一个 peer 的对外地址
     pub async fn peer_addr(&self, id: u64) -> Option<SocketAddr> {
         self.peers.addr_of(id).await
@@ -269,7 +334,45 @@ impl SisterNode {
 
     /// 手工插入一个 peer (Phase 1 没有 mDNS 时用 --peer 指定)
     pub async fn add_known_peer(&self, addr: SocketAddr) -> crate::Result<()> {
-        let env = Envelope::new(
+        let env = self.hello_envelope()?;
+        let reply = self.send_to(addr, &env).await?;
+        self.record_hello_reply(reply).await
+    }
+
+    /// Bootstrap a peer discovered through metadata. Iroh discovery must not
+    /// fall back to the legacy TCP control address: the endpoint candidate is
+    /// the bootstrap transport and the authenticated control channel is the
+    /// only protocol path.
+    pub async fn add_known_discovered_peer(
+        &self,
+        peer: &crate::discovery::DiscoveredPeer,
+    ) -> crate::Result<()> {
+        let env = self.hello_envelope()?;
+        let reply = match (&self.config.stream_backend, peer.stream_endpoint.clone()) {
+            (StreamBackend::Iroh(backend), Some(NetworkEndpoint::Iroh(endpoint))) => {
+                crate::control_channel::send(
+                    backend,
+                    NetworkEndpoint::Iroh(endpoint),
+                    self.config.network_id,
+                    self.config.authenticated_session.as_ref(),
+                    &env,
+                    true,
+                )
+                .await
+                .map_err(|error| crate::Error::Network(error.to_string()))?
+                .ok_or_else(|| {
+                    crate::Error::Network(
+                        "Iroh Hello control channel returned no response".to_string(),
+                    )
+                })?
+            }
+            _ => self.send_to(peer.control_addr, &env).await?,
+        };
+        self.record_hello_reply(reply).await
+    }
+
+    fn hello_envelope(&self) -> crate::Result<Envelope> {
+        Ok(Envelope::new(
             self.config.network_id,
             MessageType::Hello,
             self.identity.id.as_u64(),
@@ -281,8 +384,16 @@ impl SisterNode {
                 stream_addr: self.stream_endpoint(),
                 stream_certificate: self.stream_certificate(),
             })?,
-        );
-        let reply = self.send_to(addr, &env).await?;
+        ))
+    }
+
+    async fn record_hello_reply(&self, reply: Envelope) -> crate::Result<()> {
+        if reply.msg_type != MessageType::Hello {
+            return Err(crate::Error::Protocol(format!(
+                "expected Hello response, got {:?}",
+                reply.msg_type
+            )));
+        }
         let hello: HelloData = bincode::deserialize(&reply.data)?;
         if hello.network_id != self.config.network_id {
             return Err(crate::Error::Protocol(format!(
@@ -338,16 +449,14 @@ impl SisterNode {
 
     /// 请求一个空闲 peer 拿走我们排队中的任务 (Work Stealing)。
     pub async fn request_work_from(&self, peer_id: u64) -> crate::Result<()> {
-        if let Some(addr) = self.peers.addr_of(peer_id).await {
-            let env = Envelope::new(
-                self.config.network_id,
-                MessageType::JobRequest,
-                self.identity.id.as_u64(),
-                peer_id,
-                vec![],
-            );
-            let _ = self.send_fire(addr, &env).await;
-        }
+        let env = Envelope::new(
+            self.config.network_id,
+            MessageType::JobRequest,
+            self.identity.id.as_u64(),
+            peer_id,
+            vec![],
+        );
+        let _ = self.send_fire_to_peer(peer_id, &env).await;
         Ok(())
     }
 
@@ -376,8 +485,12 @@ impl SisterNode {
     ) -> crate::Result<JobResultData> {
         let my_listen = if executor == self.identity.id.as_u64() {
             self.listen_addr
+        } else if matches!(&self.config.stream_backend, StreamBackend::Iroh(_)) {
+            // Iroh JobResponse returns through the authenticated control
+            // channel; do not create a legacy TCP callback listener.
+            self.listen_addr
         } else {
-            // 开一个临时端口收返回结果
+            // Direct TCP compatibility still uses a temporary callback port.
             self.spawn_response_listener().await?
         };
 
@@ -401,16 +514,11 @@ impl SisterNode {
 
         let rx = self.jobs.reserve_pending(&job_id);
 
-        let exec_addr = match self.peers.addr_of(executor).await {
-            Some(addr) => addr,
-            None => {
-                self.jobs.cancel_pending(&job_id);
-                return Err(crate::Error::Other(format!(
-                    "no address for executor #{}",
-                    executor
-                )));
-            }
-        };
+        let exec_addr = self.peers.addr_of(executor).await.ok_or_else(|| {
+            self.jobs.cancel_pending(&job_id);
+            crate::Error::Other(format!("no address for executor #{}", executor))
+        })?;
+
         let env = Envelope::new(
             self.config.network_id,
             MessageType::Job,
@@ -418,7 +526,12 @@ impl SisterNode {
             executor,
             bincode::serialize(&job_data)?,
         );
-        if let Err(error) = self.send_fire(exec_addr, &env).await {
+        let delivery = if matches!(&self.config.stream_backend, StreamBackend::Iroh(_)) {
+            self.send_fire_to_peer(executor, &env).await
+        } else {
+            self.send_fire(exec_addr, &env).await
+        };
+        if let Err(error) = delivery {
             self.jobs.cancel_pending(&job_id);
             return Err(error);
         }
@@ -506,6 +619,7 @@ impl SisterNode {
                 &self.identity.platform,
                 self.listen_addr,
                 self.stream_addr().map(|addr| addr.port()),
+                self.stream_endpoint(),
                 tx,
             ) {
                 Ok(s) => s,
@@ -546,7 +660,15 @@ impl SisterNode {
                     continue;
                 }
                 // 已有记录且地址没变，跳过
-                if self.peers.addr_of(peer_id).await == Some(addr) {
+                let discovered_endpoint = peer.stream_endpoint.clone();
+                let endpoint_known = self.peers.get(peer_id).await.is_some_and(|known| {
+                    known.stream_endpoints
+                        == discovered_endpoint
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                });
+                if self.peers.addr_of(peer_id).await == Some(addr) && endpoint_known {
                     continue;
                 }
                 // 新 peer：握手建立连接，写进 peer 表
@@ -574,8 +696,18 @@ impl SisterNode {
                         peer_addr = %addr,
                         "mDNS peer discovered"
                     );
-                    // 握手
-                    let _ = self.add_known_peer(addr).await;
+                    // 握手。Iroh 节点完全走 Iroh control channel；Direct
+                    // TCP 节点继续使用旧的 control address。
+                    if let Err(error) = self.add_known_discovered_peer(&peer).await {
+                        tracing::warn!(
+                            event = "peer_handshake_failed",
+                            sister_id = self.identity.id.as_u64(),
+                            peer_id,
+                            error = %error,
+                            "discovered peer handshake failed"
+                        );
+                        continue;
+                    }
                     // 记录 host/platform (handshake 会更新 version 等，这里补齐 host/platform)
                     self.peers
                         .upsert(PeerState {
@@ -665,14 +797,8 @@ impl SisterNode {
                 state.queued_jobs = queued;
                 state.running_jobs = running;
             }
-            let addrs: Vec<SocketAddr> = self
-                .peers
-                .all()
-                .await
-                .into_iter()
-                .filter_map(|p| p.addr.parse().ok())
-                .collect();
-            if addrs.is_empty() {
+            let peers: Vec<u64> = self.peers.all().await.into_iter().map(|p| p.id).collect();
+            if peers.is_empty() {
                 continue;
             }
             let state_data = {
@@ -693,7 +819,7 @@ impl SisterNode {
                 }
             };
             let data = bincode::serialize(&state_data)?;
-            for addr in addrs {
+            for peer_id in peers {
                 let env = Envelope::new(
                     self.config.network_id,
                     MessageType::State,
@@ -701,7 +827,7 @@ impl SisterNode {
                     0,
                     data.clone(),
                 );
-                let _ = self.send_fire(addr, &env).await;
+                let _ = self.send_fire_to_peer(peer_id, &env).await;
             }
         }
         Ok(())

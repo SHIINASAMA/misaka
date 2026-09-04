@@ -85,7 +85,26 @@ pub(crate) async fn run(node: &SisterNode) -> crate::Result<()> {
                             job.creator,
                             bincode::serialize(&job_result)?,
                         );
-                        let _ = node.send_fire(addr, &env).await;
+                        let delivered = if matches!(
+                            &node.config.stream_backend,
+                            crate::config::StreamBackend::Iroh(_)
+                        ) {
+                            node.send_fire_to_peer(job.creator, &env).await
+                        } else {
+                            // The standalone `run --sister` command owns a
+                            // temporary response listener. Direct TCP must
+                            // preserve that callback address rather than
+                            // sending the result to the long-running Sister.
+                            node.send_fire(addr, &env).await
+                        };
+                        if delivered.is_err()
+                            && matches!(
+                                &node.config.stream_backend,
+                                crate::config::StreamBackend::Iroh(_)
+                            )
+                        {
+                            let _ = node.send_fire(addr, &env).await;
+                        }
                     }
                 }
             }

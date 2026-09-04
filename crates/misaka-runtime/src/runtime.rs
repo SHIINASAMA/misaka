@@ -30,7 +30,9 @@ use tokio::task::{JoinHandle, JoinSet};
 /// Orchestrates one complete Sister runtime.
 pub struct SisterRuntime {
     node: SisterNode,
-    listener: TcpListener,
+    /// Legacy TCP control listener. Iroh nodes use the authenticated Iroh
+    /// control channel instead and deliberately do not bind :31700.
+    listener: Option<TcpListener>,
     stream_listener: Option<StreamAcceptor>,
     shutdown: Shutdown,
     configured_peers: Vec<SocketAddr>,
@@ -71,7 +73,15 @@ impl SisterRuntime {
                 "introspection endpoint started"
             );
         }
-        let listener = node.start_listener().await?;
+        let listener = if matches!(&stream_backend, StreamBackend::DirectTcp) {
+            Some(node.start_listener().await?)
+        } else {
+            tracing::info!(
+                event = "legacy_control_listener_disabled",
+                "Iroh backend owns the control plane; legacy TCP listener is disabled"
+            );
+            None
+        };
         let backend = misaka_network::DirectTcpBackend;
         let stream_listener = match (stream_port, stream_backend) {
             (Some(port), StreamBackend::DirectTcp) => match stream_security {
@@ -178,7 +188,12 @@ impl SisterRuntime {
         loop {
             tokio::select! {
                 _ = node.shutdown.cancelled() => break,
-                accepted = listener.accept() => {
+                accepted = async {
+                    match &listener {
+                        Some(listener) => listener.accept().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
                     match accepted {
                         Ok((stream, addr)) => {
                             let node = node.clone();
@@ -442,11 +457,7 @@ async fn iroh_session_loop(node: SisterNode, session: misaka_network::IrohSessio
                                 }
                                 None => stream,
                             };
-                            log_and_echo_stream(
-                                stream_node,
-                                stream,
-                                SocketAddr::from(([0, 0, 0, 0], 0)),
-                            ).await;
+                            serve_iroh_stream(stream_node, stream).await;
                         });
                     }
                     Err(_) => break,
@@ -456,6 +467,50 @@ async fn iroh_session_loop(node: SisterNode, session: misaka_network::IrohSessio
     }
     streams.abort_all();
     while streams.join_next().await.is_some() {}
+}
+
+async fn serve_iroh_stream(node: SisterNode, mut stream: misaka_network::NetworkStream) {
+    if let Err(error) = stream.write_all(b"world").await {
+        tracing::debug!(
+            event = "iroh_stream_greeting_failed",
+            sister_id = node.identity.id.as_u64(),
+            error = %error,
+            "Iroh logical stream closed before service selection"
+        );
+        return;
+    }
+    if let Err(error) = stream.flush().await {
+        tracing::debug!(
+            event = "iroh_stream_greeting_flush_failed",
+            sister_id = node.identity.id.as_u64(),
+            error = %error,
+            "Iroh logical stream failed to flush service greeting"
+        );
+        return;
+    }
+    let mut prefix = [0u8; 4];
+    if let Err(error) = stream.read_exact(&mut prefix).await {
+        tracing::debug!(
+            event = "iroh_stream_prefix_failed",
+            sister_id = node.identity.id.as_u64(),
+            error = %error,
+            "Iroh logical stream closed before service dispatch"
+        );
+        return;
+    }
+    if prefix == *crate::control_channel::CONTROL_MAGIC {
+        if let Err(error) = crate::control_channel::serve(&node, stream).await {
+            tracing::warn!(
+                event = "iroh_control_channel_failed",
+                sister_id = node.identity.id.as_u64(),
+                error = %error,
+                "Iroh control channel failed"
+            );
+        }
+        return;
+    }
+    let stream = crate::control_channel::prepend(stream, prefix);
+    log_and_echo_stream_after_greeting(node, stream, SocketAddr::from(([0, 0, 0, 0], 0))).await;
 }
 
 async fn log_and_echo_stream(
@@ -471,6 +526,37 @@ async fn log_and_echo_stream(
     let path = stream.path_info();
     let object_store_root = session_node.peers.data_dir().join("objects");
     let result = echo_stream(stream, &object_store_root, session_node.config.probe_only).await;
+    log_stream_close(&session_node, &stats, connected_for, &path, addr, result);
+    drop(registration);
+}
+
+async fn log_and_echo_stream_after_greeting(
+    session_node: SisterNode,
+    stream: misaka_network::NetworkStream,
+    addr: SocketAddr,
+) {
+    let registration = session_node
+        .stream_registry
+        .register(&stream, (addr.port() != 0).then_some(addr));
+    let stats = stream.stats();
+    let connected_for = stream.connected_for();
+    let path = stream.path_info();
+    let object_store_root = session_node.peers.data_dir().join("objects");
+    let result =
+        echo_stream_after_greeting(stream, &object_store_root, session_node.config.probe_only)
+            .await;
+    log_stream_close(&session_node, &stats, connected_for, &path, addr, result);
+    drop(registration);
+}
+
+fn log_stream_close(
+    session_node: &SisterNode,
+    stats: &misaka_network::StreamStats,
+    connected_for: std::time::Duration,
+    path: &misaka_network::PathInfo,
+    addr: SocketAddr,
+    result: std::io::Result<()>,
+) {
     tracing::debug!(
         event = "stream_closed",
         sister_id = session_node.identity.id.as_u64(),
@@ -485,7 +571,6 @@ async fn log_and_echo_stream(
         error = ?result.as_ref().err(),
         "network stream closed"
     );
-    drop(registration);
 }
 
 async fn echo_stream(
@@ -494,6 +579,14 @@ async fn echo_stream(
     probe_only: bool,
 ) -> std::io::Result<()> {
     stream.write_all(b"world").await?;
+    echo_stream_after_greeting(stream, object_store_root, probe_only).await
+}
+
+async fn echo_stream_after_greeting(
+    mut stream: misaka_network::NetworkStream,
+    object_store_root: &Path,
+    probe_only: bool,
+) -> std::io::Result<()> {
     let mut preamble = [0u8; TRANSFER_MAGIC.len()];
     if stream.read_exact(&mut preamble).await.is_err() {
         return Ok(());
@@ -1287,7 +1380,14 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(runtime.listener.local_addr().unwrap().ip().is_loopback());
+        assert!(runtime
+            .listener
+            .as_ref()
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .ip()
+            .is_loopback());
         let stream_addr = runtime.stream_addr().unwrap();
         let shutdown = runtime.shutdown();
         let task = tokio::spawn(runtime.run());
@@ -1374,6 +1474,82 @@ mod tests {
         let mut echo = [0u8; 5];
         stream.read_exact(&mut echo).await.unwrap();
         assert_eq!(&echo, b"hello");
+
+        shutdown.cancel();
+        task.await.unwrap().unwrap();
+        client_backend.close().await;
+    }
+
+    #[tokio::test]
+    async fn iroh_runtime_routes_control_channel_without_tcp_listener() {
+        let network_id = misaka_core::NetworkId::generate();
+        let server_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .alpns(vec![misaka_network::IROH_ALPN.to_vec()])
+            .bind_addr("127.0.0.1:0")
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let client_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .alpns(vec![misaka_network::IROH_ALPN.to_vec()])
+            .bind_addr("127.0.0.1:0")
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let server_backend =
+            misaka_network::IrohBackend::new(server_endpoint, misaka_network::IROH_ALPN);
+        let client_backend =
+            misaka_network::IrohBackend::new(client_endpoint, misaka_network::IROH_ALPN);
+        let server_address = iroh::EndpointAddr::new(server_backend.endpoint().id())
+            .with_ip_addr(server_backend.endpoint().bound_sockets()[0]);
+        let runtime = SisterRuntime::new(
+            SisterIdentity::new(
+                1,
+                "iroh-control".into(),
+                "host".into(),
+                "test".into(),
+                "0.1".into(),
+                0,
+            ),
+            default_encryption_key(),
+            RuntimeConfig {
+                listen_port: 0,
+                stream_port: Some(0),
+                stream_backend: StreamBackend::Iroh(server_backend),
+                network_id,
+                discovery: DiscoveryMode::Off,
+                ..Default::default()
+            },
+            vec![],
+        )
+        .await
+        .unwrap();
+        assert!(runtime.listener.is_none());
+        let shutdown = runtime.shutdown();
+        let task = tokio::spawn(runtime.run());
+
+        let request = misaka_core::protocol::Envelope::new(
+            network_id,
+            misaka_core::protocol::MessageType::Ping,
+            2,
+            1,
+            vec![],
+        );
+        let response = crate::control_channel::send(
+            &client_backend,
+            misaka_network::NetworkEndpoint::Iroh(server_address),
+            network_id,
+            None,
+            &request,
+            true,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(response.msg_type, misaka_core::protocol::MessageType::Pong);
+        assert_eq!(response.from, 1);
+        assert_eq!(response.to, 2);
 
         shutdown.cancel();
         task.await.unwrap().unwrap();
