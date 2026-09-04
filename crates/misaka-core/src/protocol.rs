@@ -69,6 +69,7 @@ pub enum MessageType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Envelope {
     /// Namespace of the independent Misaka Network.
+    #[serde(default)]
     pub network_id: super::identity::NetworkId,
     pub protocol_version: u16,
     pub msg_type: MessageType,
@@ -100,16 +101,13 @@ impl Envelope {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HelloData {
     /// Namespace of the independent Misaka Network.
-    #[serde(default)]
     pub network_id: super::identity::NetworkId,
     pub identity: super::identity::SisterIdentity,
     /// 发送方自己声明的监听地址，用于建 peer 表 (不要用 TCP 源地址)
     pub listen_addr: String,
     /// Optional candidate address for the long-lived stream listener.
-    #[serde(default)]
     pub stream_addr: Option<String>,
     /// Optional DER certificate used to pin the secure stream peer.
-    #[serde(default)]
     pub stream_certificate: Option<Vec<u8>>,
 }
 
@@ -117,16 +115,13 @@ pub struct HelloData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateData {
     /// Namespace of the independent Misaka Network.
-    #[serde(default)]
     pub network_id: super::identity::NetworkId,
     pub identity: super::identity::SisterIdentity,
     /// 发送方自己声明的监听地址，用于建 peer 表 (不要用 TCP 源地址)
     pub listen_addr: String,
     /// Optional candidate address for the long-lived stream listener.
-    #[serde(default)]
     pub stream_addr: Option<String>,
     /// Optional DER certificate used to pin the secure stream peer.
-    #[serde(default)]
     pub stream_certificate: Option<Vec<u8>>,
     pub cpu_usage: f32,
     pub memory_total: u64,
@@ -186,6 +181,41 @@ mod network_id_tests {
         let decoded: StateData =
             bincode::deserialize(&bincode::serialize(&value).unwrap()).unwrap();
         assert_eq!(decoded.network_id, value.network_id);
+    }
+
+    #[test]
+    fn hello_rejects_missing_network_id() {
+        let value = HelloData {
+            network_id: NetworkId::generate(),
+            identity: identity(),
+            listen_addr: "127.0.0.1:31700".into(),
+            stream_addr: None,
+            stream_certificate: None,
+        };
+        let mut json = serde_json::to_value(value).unwrap();
+        json.as_object_mut().unwrap().remove("network_id");
+        assert!(serde_json::from_value::<HelloData>(json).is_err());
+    }
+
+    #[test]
+    fn state_rejects_missing_network_id() {
+        let value = StateData {
+            network_id: NetworkId::generate(),
+            identity: identity(),
+            listen_addr: "127.0.0.1:31700".into(),
+            stream_addr: None,
+            stream_certificate: None,
+            cpu_usage: 0.0,
+            memory_total: 1,
+            memory_used: 1,
+            running_jobs: 0,
+            queued_jobs: 0,
+            uptime_secs: 1,
+            capabilities: vec![],
+        };
+        let mut json = serde_json::to_value(value).unwrap();
+        json.as_object_mut().unwrap().remove("network_id");
+        assert!(serde_json::from_value::<StateData>(json).is_err());
     }
 }
 
