@@ -27,6 +27,7 @@ pub struct DiscoveredPeer {
 ///
 /// 返回持有 guard —— 把它保持存活即可持续广播；退出时可调用
 /// `remove_service_from_discovery` 优雅下线。
+#[allow(clippy::too_many_arguments)]
 pub fn advertise(
     nickname: &str,
     sister_id: u64,

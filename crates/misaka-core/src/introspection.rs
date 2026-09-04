@@ -8,11 +8,13 @@
 use serde::{Deserialize, Serialize};
 
 use crate::peer::PeerState;
-use crate::SisterIdentity;
+use crate::{NetworkId, SisterIdentity};
 
 #[cfg(test)]
 mod tests {
-    use super::NetworkStreamSummary;
+    use super::{IntrospectionSnapshot, NetworkStreamSummary, ResourceSnapshot};
+    use crate::identity::{Nickname, SisterId};
+    use crate::{NetworkId, SisterIdentity};
 
     #[test]
     fn network_stream_summary_roundtrips_json() {
@@ -24,6 +26,30 @@ mod tests {
         let encoded = serde_json::to_string(&summary).unwrap();
         let decoded: NetworkStreamSummary = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, summary);
+    }
+
+    #[test]
+    fn introspection_snapshot_exposes_network_id() {
+        let snapshot = IntrospectionSnapshot {
+            network_id: NetworkId::generate(),
+            identity: SisterIdentity {
+                id: SisterId(1),
+                nickname: Nickname("alpha".into()),
+                hostname: "host".into(),
+                platform: "test".into(),
+                version: "0.1".into(),
+                listen_port: 31700,
+            },
+            resources: ResourceSnapshot::default(),
+            peers: vec![],
+            jobs: vec![],
+            queue_depth: 0,
+            active_streams: vec![],
+            stream_summary: NetworkStreamSummary::default(),
+        };
+        let decoded: IntrospectionSnapshot =
+            serde_json::from_str(&serde_json::to_string(&snapshot).unwrap()).unwrap();
+        assert_eq!(decoded.network_id, snapshot.network_id);
     }
 }
 
@@ -116,6 +142,8 @@ pub struct NetworkStreamSummary {
 /// 完整 introspection snapshot —— Testament 的稳定观测面
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IntrospectionSnapshot {
+    #[serde(default)]
+    pub network_id: NetworkId,
     pub identity: SisterIdentity,
     pub resources: ResourceSnapshot,
     pub peers: Vec<PeerSnapshot>,

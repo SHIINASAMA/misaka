@@ -183,6 +183,7 @@ impl SisterNode {
         let active_streams = self.stream_registry.snapshot();
         let stream_summary = self.stream_registry.summary();
         IntrospectionSnapshot {
+            network_id: self.config.network_id,
             identity: self.identity.as_ref().clone(),
             resources,
             peers,
