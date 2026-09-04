@@ -7,10 +7,12 @@
 
 use misaka_core::{
     AuthenticatedClientHello, AuthenticatedServerHello, IrohEndpointId, MembershipCertificate,
-    NetworkAuthority, NetworkId, SisterKeyPair, TransportBinding, AUTH_SESSION_PROTOCOL_VERSION,
+    MembershipKind, NetworkAuthority, NetworkId, SisterKeyPair, TransportBinding,
+    AUTH_SESSION_PROTOCOL_VERSION,
 };
 use misaka_network::{NetworkError, NetworkStream, Result};
 use rand::random;
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -26,9 +28,9 @@ pub struct AuthenticatedSessionConfig {
     pub authority: NetworkAuthority,
     pub membership_certificate: MembershipCertificate,
     pub transport_binding: TransportBinding,
-    /// Revoked serials are supplied by the local revocation store until the
-    /// authenticated control channel can distribute updates.
-    pub revoked_membership_serials: Vec<u64>,
+    /// Local revocation state is read from this directory for every session
+    /// decision, so a post-start revoke takes effect without restarting.
+    pub revocation_directory: Option<PathBuf>,
 }
 
 impl AuthenticatedSessionConfig {
@@ -47,8 +49,13 @@ impl AuthenticatedSessionConfig {
             authority,
             membership_certificate,
             transport_binding,
-            revoked_membership_serials: Vec::new(),
+            revocation_directory: None,
         }
+    }
+
+    pub fn with_revocation_directory(mut self, directory: impl Into<PathBuf>) -> Self {
+        self.revocation_directory = Some(directory.into());
+        self
     }
 }
 
@@ -131,9 +138,11 @@ fn validate_local(local: &AuthenticatedSessionConfig) -> Result<()> {
         || !local.membership_certificate.verify(&local.authority)
         || !local.membership_certificate.is_valid_at(now_secs())
         || !local.transport_binding.verify()
-        || local
-            .revoked_membership_serials
-            .contains(&local.membership_certificate.serial)
+        || membership_is_revoked(
+            local,
+            MembershipKind::Sister,
+            local.membership_certificate.serial,
+        )?
     {
         return Err(rejected("local authentication material is inconsistent"));
     }
@@ -157,9 +166,11 @@ fn validate_client(
         || !client.membership_certificate.verify(&local.authority)
         || !client.membership_certificate.is_valid_at(now_secs())
         || !client.transport_binding.verify()
-        || local
-            .revoked_membership_serials
-            .contains(&client.membership_certificate.serial)
+        || membership_is_revoked(
+            local,
+            MembershipKind::Sister,
+            client.membership_certificate.serial,
+        )?
         || !endpoint_matches_binding(stream, client.transport_binding.iroh_endpoint_id)
     {
         return Err(rejected(
@@ -190,9 +201,11 @@ fn validate_server(
         || !server.membership_certificate.verify(&local.authority)
         || !server.membership_certificate.is_valid_at(now_secs())
         || !server.transport_binding.verify()
-        || local
-            .revoked_membership_serials
-            .contains(&server.membership_certificate.serial)
+        || membership_is_revoked(
+            local,
+            MembershipKind::Sister,
+            server.membership_certificate.serial,
+        )?
         || !endpoint_matches_binding(stream, server.transport_binding.iroh_endpoint_id)
     {
         return Err(rejected(
@@ -200,6 +213,24 @@ fn validate_server(
         ));
     }
     Ok(())
+}
+
+fn membership_is_revoked(
+    local: &AuthenticatedSessionConfig,
+    membership_kind: MembershipKind,
+    membership_serial: u64,
+) -> Result<bool> {
+    let Some(directory) = local.revocation_directory.as_deref() else {
+        return Ok(false);
+    };
+    crate::revocation_store::RevocationStore::is_revoked(
+        directory,
+        &local.authority,
+        local.network_id,
+        membership_kind,
+        membership_serial,
+    )
+    .map_err(|error| rejected(format!("cannot load local revocation state: {error}")))
 }
 
 fn endpoint_matches_binding(stream: &NetworkStream, binding: IrohEndpointId) -> bool {

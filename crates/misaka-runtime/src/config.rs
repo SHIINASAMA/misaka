@@ -65,6 +65,10 @@ pub struct RuntimeConfig {
     /// Optional authenticated Iroh session material. When present, Iroh
     /// streams must complete ClientHello/ServerHello before services run.
     pub authenticated_session: Option<AuthenticatedSessionConfig>,
+    /// Explicit compatibility switch for local development scenarios that do
+    /// not provision Human identity material. Production defaults to fail
+    /// closed for every side-effecting remote operation.
+    pub allow_unauthenticated_operations: bool,
     /// The local signed locator shared during Network Knowledge exchange.
     pub peer_record: Option<PeerRecord>,
     /// 告知 peer 的对外地址 (None = 用 listen_port 在回环/本机)
@@ -105,6 +109,7 @@ impl Default for RuntimeConfig {
             stream_security: StreamSecurity::InsecureLoopback,
             probe_only: false,
             authenticated_session: None,
+            allow_unauthenticated_operations: false,
             peer_record: None,
             advertise_host: None,
             // 数据目录在 CLI 层通过 MISAKA_CONFIG_DIR 决定；这里放默认值

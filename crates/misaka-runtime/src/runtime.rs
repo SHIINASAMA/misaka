@@ -14,7 +14,7 @@ use misaka_core::protocol::{
     TransferV2Ack, TransferV2Operation, TransferV2Request, TransferV2Resume, TunnelRequest,
     TRANSFER_MAGIC, TRANSFER_V1_CHUNK_SIZE, TRANSFER_V1_MAGIC, TRANSFER_V2_MAGIC, TUNNEL_MAGIC,
 };
-use misaka_core::{CommandAuthorization, Permission, SisterIdentity};
+use misaka_core::{CommandAuthorization, MembershipKind, Permission, SisterIdentity};
 use misaka_network::{NetworkBackend, NetworkEndpoint};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -1373,6 +1373,10 @@ async fn authorize_stream_operation(
     constraints: &[String],
     record_nonce: bool,
 ) -> std::io::Result<()> {
+    require_stream_authorization(
+        authorization,
+        node.map_or(true, |node| node.config.allow_unauthenticated_operations),
+    )?;
     let Some(authorization) = authorization else {
         return Ok(());
     };
@@ -1410,6 +1414,7 @@ async fn authorize_stream_operation(
         &node.config.data_dir,
         &authority,
         authorization.network_id,
+        MembershipKind::Human,
         authorization.membership.serial,
     )
     .map_err(|error| std::io::Error::new(std::io::ErrorKind::PermissionDenied, error))?
@@ -1431,6 +1436,19 @@ async fn authorize_stream_operation(
     Ok(())
 }
 
+fn require_stream_authorization(
+    authorization: Option<&CommandAuthorization>,
+    allow_unauthenticated_operations: bool,
+) -> std::io::Result<()> {
+    if authorization.is_none() && !allow_unauthenticated_operations {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "side-effecting stream operation requires Human Authorization",
+        ));
+    }
+    Ok(())
+}
+
 /// Default development encryption key shared by the current toy protocol.
 ///
 /// This remains deliberately simple for compatibility with the existing wire
@@ -1444,6 +1462,12 @@ pub fn default_encryption_key() -> [u8; 32] {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn missing_stream_authorization_is_rejected_without_explicit_development_mode() {
+        assert!(super::require_stream_authorization(None, false).is_err());
+        assert!(super::require_stream_authorization(None, true).is_ok());
+    }
+
     use super::{iroh_session_accept_loop, SisterRuntime};
     use crate::config::{DiscoveryMode, RuntimeConfig, StreamBackend, StreamSecurity};
     use crate::content_store::ContentStore;

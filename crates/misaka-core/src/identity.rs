@@ -389,11 +389,15 @@ impl Role {
     pub fn allows(self, permission: Permission) -> bool {
         match self {
             Self::Owner => true,
-            Self::Admin => !matches!(permission, Permission::ShellOpen),
+            Self::Admin => matches!(
+                permission,
+                Permission::NetworkInvite | Permission::NetworkRevoke | Permission::SisterInspect
+            ),
             Self::Operator => matches!(
                 permission,
                 Permission::SisterInspect
                     | Permission::JobSubmit
+                    | Permission::JobCancel
                     | Permission::FileSend
                     | Permission::TunnelOpen
                     | Permission::ShellOpen
@@ -761,10 +765,22 @@ impl MembershipCertificate {
     }
 }
 
+/// The membership namespace to which a revocation serial belongs.
+///
+/// Sister and Human certificates intentionally have independent serial
+/// spaces. The type is signed as part of each revocation record so a record
+/// cannot be reinterpreted in the other namespace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MembershipKind {
+    Sister,
+    Human,
+}
+
 /// Authority-signed revocation of a membership serial.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RevocationRecord {
     pub network_id: NetworkId,
+    pub membership_kind: MembershipKind,
     pub membership_serial: u64,
     pub revoked_at: u64,
     pub reason: String,
@@ -774,6 +790,7 @@ pub struct RevocationRecord {
 #[derive(Serialize)]
 struct RevocationRecordUnsigned<'a> {
     network_id: NetworkId,
+    membership_kind: MembershipKind,
     membership_serial: u64,
     revoked_at: u64,
     reason: &'a str,
@@ -783,12 +800,14 @@ impl RevocationRecord {
     pub fn issue(
         authority: &NetworkAuthority,
         authority_key: &AuthorityKeyPair,
+        membership_kind: MembershipKind,
         membership_serial: u64,
         revoked_at: u64,
         reason: String,
     ) -> Self {
         let mut record = Self {
             network_id: authority.network_id,
+            membership_kind,
             membership_serial,
             revoked_at,
             reason,
@@ -808,6 +827,7 @@ impl RevocationRecord {
     fn signing_bytes(&self) -> Vec<u8> {
         bincode::serialize(&RevocationRecordUnsigned {
             network_id: self.network_id,
+            membership_kind: self.membership_kind,
             membership_serial: self.membership_serial,
             revoked_at: self.revoked_at,
             reason: &self.reason,
@@ -1295,14 +1315,60 @@ mod tests {
         let record = RevocationRecord::issue(
             &authority,
             &authority_key,
+            MembershipKind::Sister,
             7,
             300,
             "operator request".into(),
         );
 
         assert!(record.verify(&authority));
+        assert_eq!(record.membership_kind, MembershipKind::Sister);
         assert_eq!(record.membership_serial, 7);
         assert!(!record.verify(&NetworkAuthority::generate(NetworkId::generate()).0));
+    }
+
+    #[test]
+    fn role_permissions_match_the_authorization_plan() {
+        let all = [
+            Permission::NetworkInvite,
+            Permission::NetworkRevoke,
+            Permission::SisterInspect,
+            Permission::JobSubmit,
+            Permission::JobCancel,
+            Permission::FileSend,
+            Permission::TunnelOpen,
+            Permission::ShellOpen,
+        ];
+        for permission in all {
+            assert!(Role::Owner.allows(permission));
+        }
+        for permission in [
+            Permission::NetworkInvite,
+            Permission::NetworkRevoke,
+            Permission::SisterInspect,
+        ] {
+            assert!(Role::Admin.allows(permission));
+        }
+        for permission in all {
+            if !matches!(
+                permission,
+                Permission::NetworkInvite | Permission::NetworkRevoke | Permission::SisterInspect
+            ) {
+                assert!(!Role::Admin.allows(permission));
+            }
+        }
+        for permission in [
+            Permission::SisterInspect,
+            Permission::JobSubmit,
+            Permission::JobCancel,
+            Permission::FileSend,
+            Permission::TunnelOpen,
+            Permission::ShellOpen,
+        ] {
+            assert!(Role::Operator.allows(permission));
+        }
+        assert!(!Role::Operator.allows(Permission::NetworkInvite));
+        assert!(!Role::Operator.allows(Permission::NetworkRevoke));
     }
 
     #[test]

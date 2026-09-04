@@ -11,8 +11,8 @@ use misaka_core::protocol::{
 };
 use misaka_core::{
     CommandAuthorization, HumanMembershipCertificate, IrohEndpointId, MembershipCertificate,
-    NetworkId, NetworkInvite, PeerRecord, Permission, Principal, Role, SisterKeyPair,
-    SisterPublicKey,
+    MembershipKind, NetworkId, NetworkInvite, PeerRecord, Permission, Principal, Role,
+    SisterKeyPair, SisterPublicKey,
 };
 use misaka_network::{NetworkBackend, NetworkEndpoint};
 use serde::{de::DeserializeOwned, Serialize};
@@ -77,6 +77,10 @@ enum Command {
         /// Start a stream listener for handshake/echo probes only.
         #[arg(long)]
         probe_only: bool,
+
+        /// Explicitly allow legacy no-human authorization for local tests.
+        #[arg(long)]
+        insecure_development: bool,
 
         /// Stream backend (direct-tcp | iroh).
         #[arg(long, default_value = "direct-tcp")]
@@ -358,6 +362,10 @@ enum NetworkCommand {
         #[arg(long)]
         membership_serial: u64,
 
+        /// Membership namespace to revoke (sister or human).
+        #[arg(long, default_value = "sister")]
+        membership_kind: String,
+
         /// Human-readable reason included in the signed record.
         #[arg(long, default_value = "operator request")]
         reason: String,
@@ -418,6 +426,7 @@ async fn async_main() -> Result<(), MisakaError> {
             stream_port,
             stream_secure,
             probe_only,
+            insecure_development,
             stream_backend,
             stream_trust_cert,
             peer,
@@ -587,6 +596,7 @@ async fn async_main() -> Result<(), MisakaError> {
                 stream_security,
                 probe_only,
                 authenticated_session,
+                allow_unauthenticated_operations: insecure_development,
                 peer_record,
                 data_dir,
                 heartbeat_interval: std::time::Duration::from_secs(heartbeat),
@@ -812,6 +822,7 @@ async fn async_main() -> Result<(), MisakaError> {
             }
             NetworkCommand::Revoke {
                 membership_serial,
+                membership_kind,
                 reason,
             } => {
                 let data_dir = IdentityStore::config_dir()
@@ -831,9 +842,12 @@ async fn async_main() -> Result<(), MisakaError> {
                         ));
                     }
                 }
+                let membership_kind =
+                    parse_membership_kind(&membership_kind).map_err(MisakaError::Other)?;
                 let record = misaka_core::RevocationRecord::issue(
                     &authority,
                     &authority_key,
+                    membership_kind,
                     membership_serial,
                     unix_now(),
                     reason,
@@ -848,6 +862,7 @@ async fn async_main() -> Result<(), MisakaError> {
                     "{}",
                     serde_json::json!({
                         "network_id": authority.network_id.to_string(),
+                        "membership_kind": format!("{:?}", record.membership_kind),
                         "membership_serial": record.membership_serial,
                         "revoked_at": record.revoked_at,
                         "reason": record.reason,
@@ -2717,6 +2732,17 @@ fn load_cli_authorization(
     {
         return Err("local human identity or membership is invalid".to_string());
     }
+    if misaka_runtime::revocation_store::RevocationStore::is_revoked(
+        &data_dir,
+        &authority,
+        network_id,
+        MembershipKind::Human,
+        membership.serial,
+    )
+    .map_err(|error| error.to_string())?
+    {
+        return Err("local Human membership has been revoked".to_string());
+    }
     Ok(Some(CommandAuthorization::issue(
         network_id,
         human,
@@ -2925,7 +2951,7 @@ fn load_authenticated_session(
                         .to_string(),
                 );
             }
-            let mut auth =
+            let auth =
                 misaka_runtime::authenticated_session::AuthenticatedSessionConfig::new(
                     network_id,
                     identity.id.as_u64(),
@@ -2933,21 +2959,16 @@ fn load_authenticated_session(
                     authority,
                     membership,
                     binding,
-                );
-            let revocations =
-                misaka_runtime::revocation_store::RevocationStore::load(data_dir)
-                    .map_err(|error| error.to_string())?;
-            for record in revocations {
-                if record.network_id == network_id {
-                    if !record.verify(&auth.authority) {
-                        return Err("local revocation record has an invalid signature".to_string());
-                    }
-                    auth.revoked_membership_serials.push(record.membership_serial);
-                }
-            }
-            if auth
-                .revoked_membership_serials
-                .contains(&auth.membership_certificate.serial)
+                )
+                .with_revocation_directory(data_dir.to_path_buf());
+            if misaka_runtime::revocation_store::RevocationStore::is_revoked(
+                data_dir,
+                &auth.authority,
+                network_id,
+                MembershipKind::Sister,
+                auth.membership_certificate.serial,
+            )
+            .map_err(|error| error.to_string())?
             {
                 return Err("local Sister membership has been revoked".to_string());
             }
@@ -2965,6 +2986,16 @@ fn unix_now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0)
+}
+
+fn parse_membership_kind(value: &str) -> Result<MembershipKind, String> {
+    match value {
+        "sister" => Ok(MembershipKind::Sister),
+        "human" => Ok(MembershipKind::Human),
+        other => Err(format!(
+            "invalid --membership-kind {other:?}; expected sister or human"
+        )),
+    }
 }
 
 async fn bind_iroh_client_backend(

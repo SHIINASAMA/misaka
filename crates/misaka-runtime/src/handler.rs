@@ -9,6 +9,29 @@ use misaka_core::protocol::*;
 use misaka_core::{Permission, Principal};
 use tokio::net::TcpStream;
 
+#[cfg(test)]
+mod tests {
+    use super::require_side_effect_authorization;
+
+    #[test]
+    fn missing_job_authorization_is_rejected_without_explicit_development_mode() {
+        assert!(require_side_effect_authorization(None, false).is_err());
+        assert!(require_side_effect_authorization(None, true).is_ok());
+    }
+}
+
+fn require_side_effect_authorization(
+    authorization: Option<&misaka_core::CommandAuthorization>,
+    allow_unauthenticated_operations: bool,
+) -> crate::Result<()> {
+    if authorization.is_none() && !allow_unauthenticated_operations {
+        return Err(crate::Error::Protocol(
+            "side-effecting operation requires Human Authorization".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) async fn dispatch(
     node: &SisterNode,
     env: Envelope,
@@ -152,6 +175,10 @@ pub(crate) async fn dispatch_envelope(
 
         MessageType::Job => {
             let job: JobData = bincode::deserialize(&env.data)?;
+            require_side_effect_authorization(
+                job.authorization.as_ref(),
+                node.config.allow_unauthenticated_operations,
+            )?;
             if let Some(authorization) = job.authorization.as_ref() {
                 let authority = crate::network_authority_store::NetworkAuthorityStore::load(
                     &node.config.data_dir,

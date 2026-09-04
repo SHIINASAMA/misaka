@@ -1,6 +1,6 @@
 //! Persistence for the signed revocation records distributed by a Network.
 
-use misaka_core::{NetworkAuthority, NetworkId, RevocationRecord};
+use misaka_core::{MembershipKind, NetworkAuthority, NetworkId, RevocationRecord};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -50,6 +50,7 @@ impl RevocationStore {
         let mut records = Self::load(directory)?;
         if !records.iter().any(|existing| {
             existing.network_id == record.network_id
+                && existing.membership_kind == record.membership_kind
                 && existing.membership_serial == record.membership_serial
         }) {
             records.push(record);
@@ -62,6 +63,7 @@ impl RevocationStore {
         directory: &Path,
         authority: &NetworkAuthority,
         network_id: NetworkId,
+        membership_kind: MembershipKind,
         membership_serial: u64,
     ) -> Result<bool, RevocationStoreError> {
         for record in Self::load(directory)? {
@@ -71,7 +73,9 @@ impl RevocationStore {
             if !record.verify(authority) {
                 return Err(RevocationStoreError::InvalidSignature);
             }
-            if record.membership_serial == membership_serial {
+            if record.membership_kind == membership_kind
+                && record.membership_serial == membership_serial
+            {
                 return Ok(true);
             }
         }
@@ -86,7 +90,7 @@ impl RevocationStore {
 #[cfg(test)]
 mod tests {
     use super::RevocationStore;
-    use misaka_core::{NetworkAuthority, NetworkId, RevocationRecord};
+    use misaka_core::{MembershipKind, NetworkAuthority, NetworkId, RevocationRecord};
 
     #[test]
     fn signed_revocation_is_persisted_and_detected() {
@@ -94,11 +98,72 @@ mod tests {
             std::env::temp_dir().join(format!("misaka-revocations-{}", uuid::Uuid::new_v4()));
         let network_id = NetworkId::generate();
         let (authority, key) = NetworkAuthority::generate(network_id);
-        let record = RevocationRecord::issue(&authority, &key, 9, 100, "retired".into());
+        let record = RevocationRecord::issue(
+            &authority,
+            &key,
+            MembershipKind::Sister,
+            9,
+            100,
+            "retired".into(),
+        );
 
         RevocationStore::append(&directory, &authority, record).unwrap();
-        assert!(RevocationStore::is_revoked(&directory, &authority, network_id, 9).unwrap());
-        assert!(!RevocationStore::is_revoked(&directory, &authority, network_id, 10).unwrap());
+        assert!(RevocationStore::is_revoked(
+            &directory,
+            &authority,
+            network_id,
+            MembershipKind::Sister,
+            9
+        )
+        .unwrap());
+        assert!(!RevocationStore::is_revoked(
+            &directory,
+            &authority,
+            network_id,
+            MembershipKind::Sister,
+            10
+        )
+        .unwrap());
+
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn sister_and_human_serials_are_independent() {
+        let directory =
+            std::env::temp_dir().join(format!("misaka-revocations-{}", uuid::Uuid::new_v4()));
+        let network_id = NetworkId::generate();
+        let (authority, key) = NetworkAuthority::generate(network_id);
+        RevocationStore::append(
+            &directory,
+            &authority,
+            RevocationRecord::issue(
+                &authority,
+                &key,
+                MembershipKind::Human,
+                1,
+                100,
+                "human retired".into(),
+            ),
+        )
+        .unwrap();
+
+        assert!(RevocationStore::is_revoked(
+            &directory,
+            &authority,
+            network_id,
+            MembershipKind::Human,
+            1
+        )
+        .unwrap());
+        assert!(!RevocationStore::is_revoked(
+            &directory,
+            &authority,
+            network_id,
+            MembershipKind::Sister,
+            1
+        )
+        .unwrap());
 
         let _ = std::fs::remove_dir_all(directory);
     }

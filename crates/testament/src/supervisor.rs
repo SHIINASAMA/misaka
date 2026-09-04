@@ -199,6 +199,7 @@ pub fn build_spawn(config: SpawnConfig<'_>) -> (SisterEntry, Command, RestartSpe
         peer_timeout.to_string(),
         "--introspect".into(),
         introspect_port.to_string(),
+        "--insecure-development".into(),
     ];
     if !peers.is_empty() {
         for p in peers {
@@ -305,6 +306,7 @@ pub fn command_for_entry(entry: &SisterEntry, fallback_binary: &Path) -> std::io
         peer_timeout.to_string(),
         "--introspect".to_string(),
         introspect_port.to_string(),
+        "--insecure-development".to_string(),
     ];
     if let Some(stream_port) = stream_port_from_entry(entry)? {
         args.splice(3..3, ["--stream-port".to_string(), stream_port.to_string()]);
