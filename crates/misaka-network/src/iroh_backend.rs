@@ -637,6 +637,7 @@ fn path_list_metrics(paths: &PathList<'_>) -> (&'static str, Option<u64>) {
     paths
         .iter()
         .find(|path| path.is_selected())
+        .or_else(|| paths.iter().next())
         .map(|path| {
             let route = if path.is_ip() {
                 "direct"

@@ -2476,7 +2476,7 @@ fn n13_iroh_active_path_observability(ctx: &mut Context) -> Result<(), ScenarioE
         ],
     )?;
     wait_for_stream_ready(&mut client, &ready_file, Duration::from_secs(12))?;
-    assert::eventually(
+    if let Err(error) = assert::eventually(
         b_introspect,
         "b reports an active Iroh stream",
         Duration::from_secs(8),
@@ -2485,7 +2485,19 @@ fn n13_iroh_active_path_observability(ctx: &mut Context) -> Result<(), ScenarioE
                 stream.backend == "iroh" && stream.route != "unknown" && stream.rtt_ms.is_some()
             })
         },
-    )?;
+    ) {
+        client.terminate();
+        let output = client
+            .wait_timeout(Duration::from_secs(2))
+            .map_err(|wait_error| {
+                ScenarioError::infra(format!("collect Iroh observability client: {wait_error}"))
+            })?;
+        return Err(ScenarioError::assertion(format!(
+            "{error}; client stdout: {}; client stderr: {}",
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
     let snapshot = observer::fetch(b_introspect, Duration::from_millis(500))
         .map_err(|error| ScenarioError::infra(format!("fetch active Iroh stream: {error}")))?;
     let active = snapshot

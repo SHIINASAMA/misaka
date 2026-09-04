@@ -1537,7 +1537,7 @@ async fn run_stream_test(
     } = options;
     let connect_started = tokio::time::Instant::now();
     let is_iroh_endpoint = matches!(&endpoint, NetworkEndpoint::Iroh(_));
-    let iroh_auth = if is_iroh_endpoint {
+    let mut iroh_auth = if is_iroh_endpoint {
         load_cli_authenticated_session(network_id)?
     } else {
         None
@@ -1579,11 +1579,10 @@ async fn run_stream_test(
                 .map_err(|error| error.to_string())?
             }
             NetworkEndpoint::Iroh(endpoint) => {
-                let backend = if iroh_auth.is_some() {
-                    bind_iroh_client_backend_for_local_config(iroh_options).await?
-                } else {
-                    bind_iroh_client_backend(iroh_options).await?
-                };
+                let backend = bind_iroh_client_backend(iroh_options).await?;
+                if let Some(auth) = iroh_auth.as_mut() {
+                    *auth = authenticated_session_for_backend(auth.clone(), &backend);
+                }
                 tokio::time::timeout(
                     Duration::from_secs(10),
                     backend.connect_for_network(NetworkEndpoint::Iroh(endpoint), network_id),
@@ -1709,15 +1708,25 @@ async fn run_stream_test(
             }
             let mut buffer = [0u8; STREAM_CHUNK_SIZE];
             loop {
-                let read = tokio::time::timeout(
-                    Duration::from_secs(10),
+                match tokio::time::timeout(
+                    Duration::from_secs(2),
                     tokio::io::AsyncReadExt::read(&mut stream, &mut buffer),
                 )
                 .await
-                .map_err(|_| "stream hold timed out".to_string())?
-                .map_err(|error| format!("stream hold read failed: {error}"))?;
-                if read == 0 {
-                    return Err("stream closed while hold mode was active".to_string());
+                {
+                    Ok(read) => {
+                        let read =
+                            read.map_err(|error| format!("stream hold read failed: {error}"))?;
+                        if read == 0 {
+                            return Err("stream closed while hold mode was active".to_string());
+                        }
+                    }
+                    Err(_) => {
+                        // Iroh connections have a finite QUIC idle timeout. A
+                        // bounded echo keeps this probe open without making
+                        // the test depend on a transport-specific timeout.
+                        exchange(&mut stream, b"ping").await?;
+                    }
                 }
             }
         }
@@ -2238,11 +2247,7 @@ impl TransferV2Transport {
                             .to_string(),
                     );
                 }
-                let backend = if load_cli_authenticated_session(local_network_id()?)?.is_some() {
-                    bind_iroh_client_backend_for_local_config(iroh_options.clone()).await?
-                } else {
-                    bind_iroh_client_backend(iroh_options.clone()).await?
-                };
+                let backend = bind_iroh_client_backend(iroh_options.clone()).await?;
                 Ok(Self::Iroh {
                     backend,
                     endpoint: endpoint_addr,
@@ -2289,6 +2294,7 @@ impl TransferV2Transport {
                 .map_err(|_| "Iroh transfer stream connect timed out".to_string())?
                 .map_err(|error| error.to_string())?;
                 if let Some(auth) = load_cli_authenticated_session(network_id)? {
+                    let auth = authenticated_session_for_backend(auth, backend);
                     misaka_runtime::authenticated_session::authenticate_client(
                         stream,
                         &auth,
@@ -2792,11 +2798,7 @@ async fn connect_peer_stream(
             return Err("Iroh streams use endpoint-authenticated encryption; do not provide a TLS certificate".to_string());
         }
         let auth = load_cli_authenticated_session(network_id)?;
-        let backend = if auth.is_some() {
-            bind_iroh_client_backend_for_local_config(iroh_options).await?
-        } else {
-            bind_iroh_client_backend(iroh_options).await?
-        };
+        let backend = bind_iroh_client_backend(iroh_options).await?;
         let stream = tokio::time::timeout(
             Duration::from_secs(10),
             backend.connect_for_network(endpoint, network_id),
@@ -2805,6 +2807,7 @@ async fn connect_peer_stream(
         .map_err(|_| "Iroh stream connect timed out".to_string())?
         .map_err(|error| error.to_string())?;
         if let Some(auth) = auth {
+            let auth = authenticated_session_for_backend(auth, &backend);
             misaka_runtime::authenticated_session::authenticate_client(stream, &auth, Some(peer_id))
                 .await
                 .map_err(|error| format!("Iroh stream authentication failed: {error}"))?
@@ -2971,16 +2974,6 @@ async fn bind_iroh_client_backend(
     bind_iroh_client_backend_with_secret_key(secret_key, iroh_options).await
 }
 
-async fn bind_iroh_client_backend_for_local_config(
-    iroh_options: IrohTransportOptions,
-) -> Result<misaka_network::IrohBackend, String> {
-    let data_dir = IdentityStore::config_dir().map_err(|error| error.to_string())?;
-    let secret_key =
-        misaka_runtime::iroh_identity_store::IrohIdentityStore::load_or_init(&data_dir)
-            .map_err(|error| error.to_string())?;
-    bind_iroh_client_backend_with_secret_key(secret_key, iroh_options).await
-}
-
 async fn bind_iroh_client_backend_with_secret_key(
     secret_key: iroh::SecretKey,
     iroh_options: IrohTransportOptions,
@@ -2997,6 +2990,24 @@ async fn bind_iroh_client_backend_with_secret_key(
         (None, true) => unreachable!("CLI requires --iroh-relay with --iroh-relay-only"),
     }
     .map_err(|error| error.to_string())
+}
+
+/// Rebind the persisted Sister authentication material to the ephemeral
+/// transport endpoint owned by this short-lived CLI process. A CLI command
+/// commonly runs beside the Sister daemon using the same config directory;
+/// reusing the daemon's Iroh secret key would create a duplicate endpoint ID.
+fn authenticated_session_for_backend(
+    mut auth: misaka_runtime::authenticated_session::AuthenticatedSessionConfig,
+    backend: &misaka_network::IrohBackend,
+) -> misaka_runtime::authenticated_session::AuthenticatedSessionConfig {
+    auth.transport_binding = misaka_core::TransportBinding::sign(
+        auth.network_id,
+        auth.sister_id,
+        IrohEndpointId::from_bytes(*backend.endpoint().id().as_bytes()),
+        auth.transport_binding.sequence,
+        &auth.sister_key,
+    );
+    auth
 }
 
 async fn hash_file_v0(file: &mut tokio::fs::File) -> Result<[u8; 32], String> {

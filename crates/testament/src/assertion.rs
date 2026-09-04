@@ -27,10 +27,11 @@ pub fn eventually(
                 timeout,
                 why,
                 last.map(|s| format!(
-                    "peers={} jobs={} queue={}",
+                    "peers={} jobs={} queue={} active_streams={:?}",
                     s.peers.len(),
                     s.jobs.len(),
-                    s.queue_depth
+                    s.queue_depth,
+                    s.active_streams
                 ))
                 .unwrap_or_else(|| "unreachable".into())
             ))
