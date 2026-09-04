@@ -1,0 +1,18 @@
+[package]
+name = "misaka-api"
+version.workspace = true
+edition.workspace = true
+description = "Misaka Network local Sister HTTP API"
+
+[dependencies]
+axum.workspace = true
+misaka-core = { path = "../misaka-core" }
+misaka-runtime = { path = "../misaka-runtime" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tower.workspace = true

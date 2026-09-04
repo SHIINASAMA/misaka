@@ -14,6 +14,7 @@ use crate::{NetworkId, SisterIdentity};
 mod tests {
     use super::{IntrospectionSnapshot, NetworkStreamSummary, ResourceSnapshot};
     use crate::identity::{Nickname, SisterId};
+    use crate::peer::PeerState;
     use crate::{NetworkId, SisterIdentity};
 
     #[test]
@@ -51,6 +52,33 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&snapshot).unwrap()).unwrap();
         assert_eq!(decoded.network_id, snapshot.network_id);
     }
+
+    #[test]
+    fn peer_snapshot_exposes_node_metadata() {
+        let peer = PeerState {
+            network_id: NetworkId::default(),
+            id: 7,
+            nickname: "worker".into(),
+            hostname: "host".into(),
+            platform: "linux x86_64".into(),
+            version: "0.1.0".into(),
+            stream_endpoints: vec![],
+            stream_certificate: None,
+            addr: "127.0.0.1:31700".into(),
+            cpu_usage: 0.0,
+            memory_total: 0,
+            memory_used: 0,
+            running_jobs: 0,
+            queued_jobs: 0,
+            uptime_secs: 0,
+            capabilities: vec![],
+        };
+
+        let snapshot = super::PeerSnapshot::from(&peer);
+        assert_eq!(snapshot.hostname, "host");
+        assert_eq!(snapshot.platform, "linux x86_64");
+        assert_eq!(snapshot.version, "0.1.0");
+    }
 }
 
 /// 资源快照 (来自本地 sysinfo 观测)
@@ -70,6 +98,12 @@ pub struct ResourceSnapshot {
 pub struct PeerSnapshot {
     pub id: u64,
     pub nickname: String,
+    #[serde(default)]
+    pub hostname: String,
+    #[serde(default)]
+    pub platform: String,
+    #[serde(default)]
+    pub version: String,
     pub addr: String,
     pub stream_endpoints: Vec<String>,
     pub cpu_usage: f32,
@@ -86,6 +120,9 @@ impl From<&PeerState> for PeerSnapshot {
         Self {
             id: p.id,
             nickname: p.nickname.clone(),
+            hostname: p.hostname.clone(),
+            platform: p.platform.clone(),
+            version: p.version.clone(),
             addr: p.addr.clone(),
             stream_endpoints: p.stream_endpoints.clone(),
             cpu_usage: p.cpu_usage,
