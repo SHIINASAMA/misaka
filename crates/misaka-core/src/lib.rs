@@ -16,8 +16,8 @@ pub mod protocol;
 pub use identity::{
     AuthorityKeyPair, AuthorityPublicKey, AuthoritySignature, IrohEndpointId,
     KeyPossessionChallenge, MembershipCertificate, NetworkAuthority, NetworkId, Nickname,
-    RevocationRecord, SisterId, SisterIdentity, SisterKeyPair, SisterPublicKey, SisterSignature,
-    TransportBinding,
+    PeerRecord, RevocationRecord, SisterId, SisterIdentity, SisterKeyPair, SisterPublicKey,
+    SisterSignature, TransportBinding,
 };
 pub use introspection::{
     ActiveStreamSnapshot, IntrospectionSnapshot, JobSnapshot, PeerSnapshot, ResourceSnapshot,

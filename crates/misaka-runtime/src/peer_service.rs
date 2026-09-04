@@ -7,15 +7,19 @@
 use crate::peer_registry::PeerRegistry;
 use crate::peer_store::PeerStore;
 use misaka_core::introspection::PeerSnapshot;
-use misaka_core::{NetworkId, PeerState, PeerStateTable, SisterIdentity};
+use misaka_core::{NetworkId, PeerRecord, PeerState, PeerStateTable, SisterIdentity};
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::RwLock;
 
 #[derive(Clone)]
 pub struct PeerService {
     registry: PeerRegistry,
     data_dir: PathBuf,
     network_id: NetworkId,
+    records: Arc<RwLock<HashMap<u64, PeerRecord>>>,
 }
 
 impl PeerService {
@@ -28,10 +32,13 @@ impl PeerService {
         data_dir: PathBuf,
         network_id: NetworkId,
     ) -> Self {
+        let records =
+            crate::peer_record_store::PeerRecordStore::load_from_dir(&data_dir, network_id);
         Self {
             registry,
             data_dir,
             network_id,
+            records: Arc::new(RwLock::new(records)),
         }
     }
 
@@ -74,6 +81,35 @@ impl PeerService {
             return;
         }
         self.registry.upsert(state).await;
+    }
+
+    pub async fn peer_record(&self, id: u64) -> Option<PeerRecord> {
+        self.records.read().await.get(&id).cloned()
+    }
+
+    pub async fn peer_records(&self) -> Vec<PeerRecord> {
+        let mut records: Vec<_> = self.records.read().await.values().cloned().collect();
+        records.sort_by_key(|record| record.sister_id.as_u64());
+        records
+    }
+
+    /// Accept only a valid, same-network record and retain the newest
+    /// transport sequence for a Sister.
+    pub async fn upsert_peer_record(&self, record: PeerRecord) -> bool {
+        if record.network_id != self.network_id || !record.verify() {
+            return false;
+        }
+        let id = record.sister_id.as_u64();
+        let mut records = self.records.write().await;
+        if records
+            .get(&id)
+            .is_some_and(|current| current.sequence > record.sequence)
+        {
+            return false;
+        }
+        records.insert(id, record);
+        let _ = crate::peer_record_store::PeerRecordStore::save_to_dir(&self.data_dir, &records);
+        true
     }
 
     pub async fn prune_offline(&self, timeout: Duration) -> Vec<u64> {

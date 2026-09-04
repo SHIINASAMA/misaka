@@ -25,6 +25,7 @@ pub mod network;
 pub mod network_authority_store;
 pub mod network_id_store;
 pub mod node;
+pub mod peer_record_store;
 pub mod peer_registry;
 pub mod peer_service;
 pub mod peer_store;

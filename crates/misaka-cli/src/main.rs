@@ -435,6 +435,26 @@ async fn async_main() -> Result<(), MisakaError> {
                 }
                 misaka_runtime::config::StreamBackend::DirectTcp => None,
             };
+            let peer_record = match &stream_backend {
+                misaka_runtime::config::StreamBackend::Iroh(backend) => {
+                    let binding = TransportBindingStore::load(&data_dir)
+                        .map_err(|error| MisakaError::Other(error.to_string()))?
+                        .ok_or_else(|| {
+                            MisakaError::Other(
+                                "Iroh backend requires a persisted transport binding".to_string(),
+                            )
+                        })?;
+                    Some(misaka_core::PeerRecord::issue(
+                        network_id,
+                        identity.id.as_u64(),
+                        NetworkEndpoint::Iroh(backend.endpoint_addr()).to_string(),
+                        binding,
+                        unix_now(),
+                        &sister_key,
+                    ))
+                }
+                misaka_runtime::config::StreamBackend::DirectTcp => None,
+            };
             if nickname.clone().is_some() {
                 tracing::info!(
                     event = "nickname_updated",
@@ -467,6 +487,7 @@ async fn async_main() -> Result<(), MisakaError> {
                 stream_security,
                 probe_only,
                 authenticated_session,
+                peer_record,
                 data_dir,
                 heartbeat_interval: std::time::Duration::from_secs(heartbeat),
                 peer_timeout: std::time::Duration::from_secs(peer_timeout),

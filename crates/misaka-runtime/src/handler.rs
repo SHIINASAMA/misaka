@@ -62,6 +62,7 @@ pub(crate) async fn dispatch_envelope(
                 hello.stream_certificate,
             )
             .await;
+            let _ = node.send_peer_records(env.from).await;
             let reply = Envelope::new(
                 node.config.network_id,
                 MessageType::Hello,
@@ -238,6 +239,16 @@ pub(crate) async fn dispatch_envelope(
                         ),
                     )
                     .await;
+            }
+        }
+
+        MessageType::PeerRecords => {
+            let records: PeerRecordsData = bincode::deserialize(&env.data)?;
+            if records.network_id != node.config.network_id {
+                return Ok(None);
+            }
+            for record in records.records {
+                node.remember_peer_record(record).await;
             }
         }
 

@@ -524,6 +524,82 @@ impl TransportBinding {
     }
 }
 
+/// A Sister-signed, transport-specific locator for another Sister.
+///
+/// The endpoint is kept as an opaque string in `misaka-core`; transport
+/// parsing belongs to `misaka-network`. The signed binding still ties the
+/// advertised endpoint identity to the Sister key and sequence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerRecord {
+    pub network_id: NetworkId,
+    pub sister_id: SisterId,
+    pub sister_public_key: SisterPublicKey,
+    pub endpoint_addr: String,
+    pub transport_binding: TransportBinding,
+    pub sequence: u64,
+    pub updated_at: u64,
+    pub sister_signature: SisterSignature,
+}
+
+#[derive(Serialize)]
+struct PeerRecordUnsigned<'a> {
+    network_id: NetworkId,
+    sister_id: &'a SisterId,
+    sister_public_key: SisterPublicKey,
+    endpoint_addr: &'a str,
+    transport_binding: &'a TransportBinding,
+    sequence: u64,
+    updated_at: u64,
+}
+
+impl PeerRecord {
+    pub fn issue(
+        network_id: NetworkId,
+        sister_id: u64,
+        endpoint_addr: String,
+        transport_binding: TransportBinding,
+        updated_at: u64,
+        key: &SisterKeyPair,
+    ) -> Self {
+        let mut record = Self {
+            network_id,
+            sister_id: SisterId(sister_id),
+            sister_public_key: key.public_key(),
+            endpoint_addr,
+            sequence: transport_binding.sequence,
+            transport_binding,
+            updated_at,
+            sister_signature: SisterSignature([0; SISTER_SIGNATURE_LEN]),
+        };
+        record.sister_signature = key.sign(&record.signing_bytes());
+        record
+    }
+
+    pub fn verify(&self) -> bool {
+        self.network_id == self.transport_binding.network_id
+            && self.sister_id == self.transport_binding.sister_id
+            && self.sister_public_key == self.transport_binding.sister_public_key
+            && self.sequence == self.transport_binding.sequence
+            && self.transport_binding.verify()
+            && self
+                .sister_public_key
+                .verify(&self.signing_bytes(), &self.sister_signature)
+    }
+
+    fn signing_bytes(&self) -> Vec<u8> {
+        bincode::serialize(&PeerRecordUnsigned {
+            network_id: self.network_id,
+            sister_id: &self.sister_id,
+            sister_public_key: self.sister_public_key,
+            endpoint_addr: &self.endpoint_addr,
+            transport_binding: &self.transport_binding,
+            sequence: self.sequence,
+            updated_at: self.updated_at,
+        })
+        .expect("peer record fields are serializable")
+    }
+}
+
 /// A nonce scoped to one Misaka Network for proving possession of a Sister
 /// private key during a future authenticated session handshake.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -690,6 +766,30 @@ mod tests {
         let mut tampered = binding.clone();
         tampered.sequence = 1;
         assert!(!tampered.verify());
+    }
+
+    #[test]
+    fn peer_record_is_signed_and_binds_transport_sequence() {
+        let network_id = NetworkId::generate();
+        let key = SisterKeyPair::generate();
+        let binding = TransportBinding::sign(
+            network_id,
+            42,
+            IrohEndpointId::from_bytes([9u8; 32]),
+            3,
+            &key,
+        );
+        let record =
+            PeerRecord::issue(network_id, 42, "iroh://endpoint".into(), binding, 100, &key);
+        assert!(record.verify());
+
+        let mut tampered = record.clone();
+        tampered.endpoint_addr = "iroh://different".into();
+        assert!(!tampered.verify());
+
+        let mut mismatched = record;
+        mismatched.sequence = 4;
+        assert!(!mismatched.verify());
     }
 
     #[test]

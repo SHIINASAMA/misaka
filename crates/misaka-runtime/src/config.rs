@@ -1,4 +1,4 @@
-use misaka_core::NetworkId;
+use misaka_core::{NetworkId, PeerRecord};
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -65,6 +65,8 @@ pub struct RuntimeConfig {
     /// Optional authenticated Iroh session material. When present, Iroh
     /// streams must complete ClientHello/ServerHello before services run.
     pub authenticated_session: Option<AuthenticatedSessionConfig>,
+    /// The local signed locator shared during Network Knowledge exchange.
+    pub peer_record: Option<PeerRecord>,
     /// 告知 peer 的对外地址 (None = 用 listen_port 在回环/本机)
     pub advertise_host: Option<IpAddr>,
     /// 数据目录 (persistent identity/peers)
@@ -103,6 +105,7 @@ impl Default for RuntimeConfig {
             stream_security: StreamSecurity::InsecureLoopback,
             probe_only: false,
             authenticated_session: None,
+            peer_record: None,
             advertise_host: None,
             // 数据目录在 CLI 层通过 MISAKA_CONFIG_DIR 决定；这里放默认值
             data_dir: PathBuf::from("."),

@@ -12,7 +12,7 @@ use crate::state::{LocalJob, LocalState};
 use crate::stream_registry::StreamRegistry;
 use misaka_core::introspection::{IntrospectionSnapshot, ResourceSnapshot};
 use misaka_core::protocol::*;
-use misaka_core::{NetworkId, PeerState, SisterIdentity};
+use misaka_core::{IrohEndpointId, NetworkId, PeerRecord, PeerState, SisterIdentity};
 use misaka_network::NetworkEndpoint;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -286,12 +286,25 @@ impl SisterNode {
         let StreamBackend::Iroh(backend) = &self.config.stream_backend else {
             return None;
         };
-        let peer = self.peers.get(peer_id).await?;
-        peer.stream_endpoints
-            .into_iter()
-            .filter_map(|endpoint| endpoint.parse::<NetworkEndpoint>().ok())
-            .find_map(|endpoint| match endpoint {
-                NetworkEndpoint::Iroh(_) => Some((backend, endpoint)),
+        if let Some(peer) = self.peers.get(peer_id).await {
+            if let Some(endpoint) = peer
+                .stream_endpoints
+                .into_iter()
+                .filter_map(|endpoint| endpoint.parse::<NetworkEndpoint>().ok())
+                .find_map(|endpoint| match endpoint {
+                    NetworkEndpoint::Iroh(_) => Some(endpoint),
+                    NetworkEndpoint::Tcp(_) => None,
+                })
+            {
+                return Some((backend, endpoint));
+            }
+        }
+        self.peers
+            .peer_record(peer_id)
+            .await
+            .and_then(|record| record.endpoint_addr.parse().ok())
+            .and_then(|endpoint| match endpoint {
+                NetworkEndpoint::Iroh(endpoint) => Some((backend, NetworkEndpoint::Iroh(endpoint))),
                 NetworkEndpoint::Tcp(_) => None,
             })
     }
@@ -420,6 +433,57 @@ impl SisterNode {
         Ok(())
     }
 
+    pub(crate) async fn remember_peer_record(&self, record: PeerRecord) {
+        if record.network_id != self.config.network_id || !record.verify() {
+            tracing::debug!(
+                peer_id = record.sister_id.as_u64(),
+                "ignoring invalid or foreign PeerRecord"
+            );
+            return;
+        }
+        let valid_endpoint = record
+            .endpoint_addr
+            .parse::<NetworkEndpoint>()
+            .ok()
+            .is_some_and(|endpoint| match endpoint {
+                NetworkEndpoint::Iroh(endpoint) => {
+                    IrohEndpointId::from_bytes(*endpoint.id.as_bytes())
+                        == record.transport_binding.iroh_endpoint_id
+                }
+                NetworkEndpoint::Tcp(_) => false,
+            });
+        if !valid_endpoint {
+            tracing::debug!(
+                peer_id = record.sister_id.as_u64(),
+                "ignoring PeerRecord whose endpoint disagrees with its TransportBinding"
+            );
+            return;
+        }
+        self.peers.upsert_peer_record(record).await;
+    }
+
+    pub(crate) async fn send_peer_records(&self, peer_id: u64) -> crate::Result<()> {
+        let mut records = self.peers.peer_records().await;
+        if let Some(local) = self.config.peer_record.clone() {
+            records.retain(|record| record.sister_id != local.sister_id);
+            records.push(local);
+        }
+        if records.is_empty() {
+            return Ok(());
+        }
+        let envelope = Envelope::new(
+            self.config.network_id,
+            MessageType::PeerRecords,
+            self.identity.id.as_u64(),
+            peer_id,
+            bincode::serialize(&PeerRecordsData {
+                network_id: self.config.network_id,
+                records,
+            })?,
+        );
+        self.send_fire_to_peer(peer_id, &envelope).await
+    }
+
     // ---------- 任务提交 (Phase 5 核心) ----------
 
     /// 提交一个任务。目标由调度器决定；若调度器选 None 则本地执行。
@@ -514,10 +578,14 @@ impl SisterNode {
 
         let rx = self.jobs.reserve_pending(&job_id);
 
-        let exec_addr = self.peers.addr_of(executor).await.ok_or_else(|| {
-            self.jobs.cancel_pending(&job_id);
-            crate::Error::Other(format!("no address for executor #{}", executor))
-        })?;
+        let exec_addr = if matches!(&self.config.stream_backend, StreamBackend::Iroh(_)) {
+            None
+        } else {
+            Some(self.peers.addr_of(executor).await.ok_or_else(|| {
+                self.jobs.cancel_pending(&job_id);
+                crate::Error::Other(format!("no address for executor #{}", executor))
+            })?)
+        };
 
         let env = Envelope::new(
             self.config.network_id,
@@ -529,7 +597,8 @@ impl SisterNode {
         let delivery = if matches!(&self.config.stream_backend, StreamBackend::Iroh(_)) {
             self.send_fire_to_peer(executor, &env).await
         } else {
-            self.send_fire(exec_addr, &env).await
+            self.send_fire(exec_addr.expect("Direct TCP executor address"), &env)
+                .await
         };
         if let Err(error) = delivery {
             self.jobs.cancel_pending(&job_id);

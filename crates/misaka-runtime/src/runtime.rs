@@ -1296,10 +1296,12 @@ pub fn default_encryption_key() -> [u8; 32] {
 
 #[cfg(test)]
 mod tests {
-    use super::SisterRuntime;
+    use super::{iroh_session_accept_loop, SisterRuntime};
     use crate::config::{DiscoveryMode, RuntimeConfig, StreamBackend, StreamSecurity};
     use crate::content_store::ContentStore;
+    use crate::node::SisterNode;
     use crate::runtime::default_encryption_key;
+    use crate::shutdown::Shutdown;
     use misaka_core::protocol::{
         transfer_content_digest, transfer_digest, TransferResult, TransferV1Ack, TransferV1Chunk,
         TransferV1Request, TransferV1Resume, TransferV2Ack, TransferV2Operation, TransferV2Request,
@@ -1554,6 +1556,157 @@ mod tests {
         shutdown.cancel();
         task.await.unwrap().unwrap();
         client_backend.close().await;
+    }
+
+    #[tokio::test]
+    async fn iroh_control_channel_exchanges_signed_peer_records() {
+        let network_id = misaka_core::NetworkId::generate();
+        let server_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .alpns(vec![misaka_network::IROH_ALPN.to_vec()])
+            .bind_addr("127.0.0.1:0")
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let client_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .alpns(vec![misaka_network::IROH_ALPN.to_vec()])
+            .bind_addr("127.0.0.1:0")
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let server_backend =
+            misaka_network::IrohBackend::new(server_endpoint, misaka_network::IROH_ALPN);
+        let client_backend =
+            misaka_network::IrohBackend::new(client_endpoint, misaka_network::IROH_ALPN);
+        let server_addr = server_backend.endpoint_addr();
+        let client_addr = client_backend.endpoint_addr();
+        let server_key = misaka_core::SisterKeyPair::generate();
+        let client_key = misaka_core::SisterKeyPair::generate();
+        let third_key = misaka_core::SisterKeyPair::generate();
+        let server_record = misaka_core::PeerRecord::issue(
+            network_id,
+            1,
+            misaka_network::NetworkEndpoint::Iroh(server_addr.clone()).to_string(),
+            misaka_core::TransportBinding::sign(
+                network_id,
+                1,
+                misaka_core::IrohEndpointId::from_bytes(*server_backend.endpoint().id().as_bytes()),
+                0,
+                &server_key,
+            ),
+            1,
+            &server_key,
+        );
+        let client_record = misaka_core::PeerRecord::issue(
+            network_id,
+            2,
+            misaka_network::NetworkEndpoint::Iroh(client_addr).to_string(),
+            misaka_core::TransportBinding::sign(
+                network_id,
+                2,
+                misaka_core::IrohEndpointId::from_bytes(*client_backend.endpoint().id().as_bytes()),
+                0,
+                &client_key,
+            ),
+            1,
+            &client_key,
+        );
+        let third_endpoint_id =
+            iroh::EndpointId::from_bytes(&third_key.public_key().to_bytes()).unwrap();
+        let third_addr = iroh::EndpointAddr::new(third_endpoint_id);
+        let third_record = misaka_core::PeerRecord::issue(
+            network_id,
+            3,
+            misaka_network::NetworkEndpoint::Iroh(third_addr).to_string(),
+            misaka_core::TransportBinding::sign(
+                network_id,
+                3,
+                misaka_core::IrohEndpointId::from_bytes(third_key.public_key().to_bytes()),
+                0,
+                &third_key,
+            ),
+            1,
+            &third_key,
+        );
+        let server_dir =
+            std::env::temp_dir().join(format!("misaka-record-server-{}", uuid::Uuid::new_v4()));
+        let client_dir =
+            std::env::temp_dir().join(format!("misaka-record-client-{}", uuid::Uuid::new_v4()));
+        let mut server_node = SisterNode::new(
+            SisterIdentity::new(
+                1,
+                "server".into(),
+                "host".into(),
+                "test".into(),
+                "0.1".into(),
+                0,
+            ),
+            default_encryption_key(),
+            RuntimeConfig {
+                data_dir: server_dir.clone(),
+                network_id,
+                stream_backend: StreamBackend::Iroh(server_backend.clone()),
+                peer_record: Some(server_record),
+                ..Default::default()
+            },
+        );
+        let mut client_node = SisterNode::new(
+            SisterIdentity::new(
+                2,
+                "client".into(),
+                "host".into(),
+                "test".into(),
+                "0.1".into(),
+                0,
+            ),
+            default_encryption_key(),
+            RuntimeConfig {
+                data_dir: client_dir.clone(),
+                network_id,
+                stream_backend: StreamBackend::Iroh(client_backend.clone()),
+                peer_record: Some(client_record),
+                ..Default::default()
+            },
+        );
+        server_node
+            .peers
+            .upsert_peer_record(third_record.clone())
+            .await;
+        let server_shutdown = Shutdown::new();
+        let client_shutdown = Shutdown::new();
+        server_node.set_shutdown_token(server_shutdown.token());
+        client_node.set_shutdown_token(client_shutdown.token());
+        let server_task = tokio::spawn(iroh_session_accept_loop(
+            server_node.clone(),
+            server_backend,
+        ));
+        let client_task = tokio::spawn(iroh_session_accept_loop(
+            client_node.clone(),
+            client_backend.clone(),
+        ));
+
+        let discovered = crate::discovery::DiscoveredPeer {
+            network_id,
+            id: 1,
+            nickname: "server".into(),
+            control_addr: "127.0.0.1:1".parse().unwrap(),
+            stream_endpoint: Some(misaka_network::NetworkEndpoint::Iroh(server_addr)),
+        };
+        client_node
+            .add_known_discovered_peer(&discovered)
+            .await
+            .unwrap();
+        let received = client_node.peers.peer_record(3).await;
+        assert!(received.is_some_and(|record| record.verify()));
+
+        server_shutdown.cancel();
+        client_shutdown.cancel();
+        server_task.await.unwrap();
+        client_task.await.unwrap();
+        client_backend.close().await;
+        let _ = std::fs::remove_dir_all(server_dir);
+        let _ = std::fs::remove_dir_all(client_dir);
     }
 
     #[tokio::test]

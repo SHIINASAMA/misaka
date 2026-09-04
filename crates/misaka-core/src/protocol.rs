@@ -66,6 +66,7 @@ pub enum MessageType {
     Ack = 0x07,         // 通用确认
     Ping = 0x08,        // 无副作用的 reachability probe
     Pong = 0x09,        // Ping response
+    PeerRecords = 0x0A, // Signed network knowledge exchange
 }
 
 /// 网络层封装的消息 (对等)
@@ -112,6 +113,13 @@ pub struct HelloData {
     pub stream_addr: Option<String>,
     /// Optional DER certificate used to pin the secure stream peer.
     pub stream_certificate: Option<Vec<u8>>,
+}
+
+/// Small, signed peer knowledge exchange carried by the control channel.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerRecordsData {
+    pub network_id: super::identity::NetworkId,
+    pub records: Vec<super::identity::PeerRecord>,
 }
 
 /// 状态 payload —— Sister 上报自身局部状态
