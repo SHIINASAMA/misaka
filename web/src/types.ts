@@ -1,6 +1,6 @@
 export interface Overview {
   network_id: string;
-  this_sister: number;
+  this_sister: string;
   this_nickname: string;
   online_sisters: number;
   known_sisters: number;
@@ -9,7 +9,7 @@ export interface Overview {
 }
 
 export interface Sister {
-  id: number;
+  id: string;
   nickname: string;
   hostname: string;
   platform: string;

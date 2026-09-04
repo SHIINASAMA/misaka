@@ -57,7 +57,7 @@ impl IntoResponse for ApiError {
 #[derive(Debug, Clone, Serialize)]
 pub struct OverviewResponse {
     pub network_id: String,
-    pub this_sister: u64,
+    pub this_sister: String,
     pub this_nickname: String,
     pub online_sisters: usize,
     pub known_sisters: usize,
@@ -67,7 +67,7 @@ pub struct OverviewResponse {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SisterResponse {
-    pub id: u64,
+    pub id: String,
     pub nickname: String,
     pub hostname: String,
     pub platform: String,
@@ -100,7 +100,7 @@ pub struct StreamResponse {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PingResponse {
-    pub sister_id: u64,
+    pub sister_id: String,
     pub status: &'static str,
 }
 
@@ -174,7 +174,7 @@ async fn overview(State(handle): State<SisterHandle>) -> Result<Json<OverviewRes
     let online_sisters = snapshot.peers.len() + 1;
     Ok(Json(OverviewResponse {
         network_id: snapshot.network_id.to_string(),
-        this_sister: snapshot.identity.id.as_u64(),
+        this_sister: snapshot.identity.id.as_u64().to_string(),
         this_nickname: snapshot.identity.nickname.as_str().to_string(),
         online_sisters,
         known_sisters: online_sisters,
@@ -197,7 +197,7 @@ async fn sister(
     let snapshot = handle.snapshot().await.map_err(ApiError::internal)?;
     all_sisters(&snapshot)
         .into_iter()
-        .find(|sister| sister.id == id)
+        .find(|sister| sister.id == id.to_string())
         .map(Json)
         .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, format!("Sister #{id} was not found")))
 }
@@ -220,7 +220,10 @@ async fn ping(
     Path(id): Path<u64>,
 ) -> Result<Json<PingResponse>, ApiError> {
     let snapshot = handle.snapshot().await.map_err(ApiError::internal)?;
-    if !all_sisters(&snapshot).iter().any(|sister| sister.id == id) {
+    if !all_sisters(&snapshot)
+        .iter()
+        .any(|sister| sister.id == id.to_string())
+    {
         return Err(ApiError::new(
             StatusCode::NOT_FOUND,
             format!("Sister #{id} was not found"),
@@ -228,7 +231,7 @@ async fn ping(
     }
     handle.ping(id).await.map_err(ApiError::internal)?;
     Ok(Json(PingResponse {
-        sister_id: id,
+        sister_id: id.to_string(),
         status: "reachable",
     }))
 }
@@ -236,7 +239,7 @@ async fn ping(
 fn all_sisters(snapshot: &IntrospectionSnapshot) -> Vec<SisterResponse> {
     let mut sisters = Vec::with_capacity(snapshot.peers.len() + 1);
     sisters.push(SisterResponse {
-        id: snapshot.identity.id.as_u64(),
+        id: snapshot.identity.id.as_u64().to_string(),
         nickname: snapshot.identity.nickname.as_str().to_string(),
         hostname: snapshot.identity.hostname.clone(),
         platform: snapshot.identity.platform.clone(),
@@ -253,14 +256,14 @@ fn all_sisters(snapshot: &IntrospectionSnapshot) -> Vec<SisterResponse> {
         capabilities: snapshot.resources.capabilities.clone(),
     });
     sisters.extend(snapshot.peers.iter().map(SisterResponse::from));
-    sisters.sort_by_key(|sister| sister.id);
+    sisters.sort_by(|left, right| left.id.cmp(&right.id));
     sisters
 }
 
 impl From<&PeerSnapshot> for SisterResponse {
     fn from(peer: &PeerSnapshot) -> Self {
         Self {
-            id: peer.id,
+            id: peer.id.to_string(),
             nickname: peer.nickname.clone(),
             hostname: peer.hostname.clone(),
             platform: peer.platform.clone(),

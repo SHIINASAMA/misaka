@@ -24,11 +24,11 @@ export async function requestJson<T>(path: string, init?: RequestInit): Promise<
 
 export const getOverview = () => requestJson<Overview>("/api/v1/overview");
 export const getSisters = () => requestJson<Sister[]>("/api/v1/sisters");
-export const getSister = (id: number) => requestJson<Sister>(`/api/v1/sisters/${id}`);
+export const getSister = (id: string) => requestJson<Sister>(`/api/v1/sisters/${id}`);
 export const getStreams = () => requestJson<NetworkStream[]>("/api/v1/streams");
 
-export const pingSister = (id: number) =>
-  requestJson<{ sister_id: number; status: string }>(`/api/v1/sisters/${id}/ping`, {
+export const pingSister = (id: string) =>
+  requestJson<{ sister_id: string; status: string }>(`/api/v1/sisters/${id}/ping`, {
     method: "POST",
   });
 
