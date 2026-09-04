@@ -39,7 +39,9 @@ select a backend yet and accept `SocketAddr` through `Into<NetworkEndpoint>`.
 `docs/iroh-backend-spike-v0.md`; the runtime and CLI select it only when
 `--stream-backend iroh` or an `iroh://` candidate is explicitly used. An
 optional `--iroh-relay <URL>` pins Iroh to a known relay for controlled
-measurements; without it, Iroh's default relay map is used.
+measurements; `--iroh-relay-only` additionally disables IP transports for a
+repeatable forced-relay/UDP-restricted condition. Without these flags, Iroh's
+default relay map and IP transports are used.
 
 `NetworkEndpoint` is deliberately separate from `SisterId`: the endpoint is a
 connection candidate, not an identity. It currently supports direct TCP and

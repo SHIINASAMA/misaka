@@ -17,6 +17,8 @@ stream contract.
 - [x] Document a 30-minute real-host invocation and the evidence required for
   the stability matrix.
 - [x] Add CLI parsing coverage for the bounded duration.
+- [x] Add an explicit `--iroh-relay-only` switch for repeatable forced-relay
+  measurements without introducing another backend.
 - [ ] Run the matrix on two real hosts across direct, UDP-restricted, and relay
   conditions.
 

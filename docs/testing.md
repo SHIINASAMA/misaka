@@ -172,7 +172,9 @@ tests: route/RTT refreshes and `path_switches` are visible through active
 introspection without requiring a nondeterministic path change in CI.
 The `misaka-network` unit suite additionally forces Iroh through a local native
 relay with IP transports disabled; this proves the Iroh relay path and is not
-an external NAT or cross-domain claim.
+an external NAT or cross-domain claim. For real-host measurements, pass
+`--iroh-relay <URL> --iroh-relay-only` to both endpoints to make the
+relay-only condition explicit and repeatable.
 
 ## CI gate
 

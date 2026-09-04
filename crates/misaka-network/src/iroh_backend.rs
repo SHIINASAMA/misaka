@@ -72,6 +72,25 @@ impl IrohBackend {
         Ok(Self::new(endpoint, IROH_ALPN))
     }
 
+    /// Bind an endpoint that can reach peers only through one explicitly selected relay.
+    ///
+    /// This is intended for controlled UDP-restricted measurements. It does not
+    /// change the authenticated Iroh transport or introduce a Misaka relay role.
+    pub async fn bind_with_secret_key_and_relay_only(
+        secret_key: iroh::SecretKey,
+        relay_url: iroh::RelayUrl,
+    ) -> Result<Self> {
+        let endpoint = Endpoint::builder(iroh::endpoint::presets::N0)
+            .secret_key(secret_key)
+            .alpns(vec![IROH_ALPN.to_vec()])
+            .relay_mode(iroh::RelayMode::Custom(iroh::RelayMap::from(relay_url)))
+            .clear_ip_transports()
+            .bind()
+            .await
+            .map_err(|error| NetworkError::Iroh(error.to_string()))?;
+        Ok(Self::new(endpoint, IROH_ALPN))
+    }
+
     /// Establish one long-lived Iroh connection without opening a logical
     /// stream yet. Call `IrohSession::open_stream` for each operation.
     pub async fn connect_session(&self, endpoint: NetworkEndpoint) -> Result<IrohSession> {

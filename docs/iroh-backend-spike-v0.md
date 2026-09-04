@@ -33,7 +33,8 @@ lifecycle and rotation requirements.
 
 ## Scope boundary
 
-- `DirectTcpBackend` remains the runtime and CLI default.
+- `DirectTcpBackend` remains the runtime and CLI default; Iroh is the only
+  additional backend in this roadmap slice.
 - `IrohBackend::bind()` uses Iroh's N0 preset for tests and ephemeral tools;
   `misaka start --stream-backend iroh` loads or creates the key in the active
   `MISAKA_CONFIG_DIR` and binds with that key. Tests use two loopback-bound
@@ -80,6 +81,11 @@ lifecycle and rotation requirements.
   `connect`, `cp`, `tunnel`, and `ssh`, so an experiment can pin both the
   Sister listener and its client-side transport to one known relay without
   changing the Sister protocol.
+- `--iroh-relay-only` requires `--iroh-relay` and disables Iroh IP transports
+  on that endpoint. It is a controlled UDP-restricted/forced-relay
+  measurement switch, not evidence of NAT traversal or public relay
+  reliability. Use it on both the Sister listener and the measurement client
+  when comparing a relay-only path.
 - `IrohBackend::connect_session`/`accept_session` expose an explicit
   long-lived QUIC connection; `IrohSession::open_stream` and
   `accept_stream` create multiple independently handshaken logical streams on

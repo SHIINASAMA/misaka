@@ -19,8 +19,9 @@ MISAKA_CONFIG_DIR=/path/to/sister-b-config \
   misaka start --port 31700 --stream-backend iroh --discovery manual \
   --peer <sister-a-control-ip>:31700 --introspect 31702
 
-# Optional: force both hosts to use one trusted Iroh relay.
-# Add --iroh-relay https://<relay-host> to each start command.
+# Optional: force both hosts to use one trusted Iroh relay and disable IP paths.
+# Add both flags to each start command for the UDP-restricted condition:
+#   --iroh-relay https://<relay-host> --iroh-relay-only
 ```
 
 After the control-plane Hello exchange, inspect the initiator's peer state:
@@ -39,6 +40,8 @@ MISAKA_CONFIG_DIR=/path/to/sister-a-config \
 
 # For a controlled relay measurement, append:
 #   --iroh-relay https://<relay-host>
+# For a forced relay-only measurement (no direct IP transports), append both:
+#   --iroh-relay https://<relay-host> --iroh-relay-only
 
 MISAKA_CONFIG_DIR=/path/to/sister-a-config \
   misaka stream-test --endpoint "$IROH_ENDPOINT" --mode large
