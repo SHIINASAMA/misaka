@@ -2,3 +2,5 @@
 .testament/
 .claude/
 .DS_Store
+web/node_modules/
+web/dist/
