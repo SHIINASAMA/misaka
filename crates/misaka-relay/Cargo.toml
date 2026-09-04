@@ -4,10 +4,6 @@ version.workspace = true
 edition.workspace = true
 description = "Minimal byte-forwarding relay for Misaka end-to-end streams"
 
-[[bin]]
-name = "misaka-relay"
-path = "src/main.rs"
-
 [dependencies]
 misaka-core = { path = "../misaka-core" }
 clap.workspace = true
