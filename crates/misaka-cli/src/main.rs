@@ -63,6 +63,10 @@ enum Command {
         #[arg(long)]
         stream_secure: bool,
 
+        /// Start a stream listener for handshake/echo probes only.
+        #[arg(long)]
+        probe_only: bool,
+
         /// Stream backend (direct-tcp | iroh).
         #[arg(long, default_value = "direct-tcp")]
         stream_backend: String,
@@ -102,6 +106,13 @@ enum Command {
         /// Read-only loopback introspection port (0 disables it).
         #[arg(long, default_value_t = 0)]
         introspect: u16,
+    },
+
+    /// Export the local Iroh endpoint address for cross-domain preflight.
+    Endpoint {
+        /// Emit one machine-readable endpoint record as JSON.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Experimental Network Stream v0 black-box client.
@@ -265,6 +276,7 @@ async fn async_main() -> Result<(), MisakaError> {
             port,
             stream_port,
             stream_secure,
+            probe_only,
             stream_backend,
             stream_trust_cert,
             peer,
@@ -359,6 +371,7 @@ async fn async_main() -> Result<(), MisakaError> {
                 stream_port: (stream_port != 0).then_some(stream_port),
                 stream_backend,
                 stream_security,
+                probe_only,
                 data_dir,
                 heartbeat_interval: std::time::Duration::from_secs(heartbeat),
                 peer_timeout: std::time::Duration::from_secs(peer_timeout),
@@ -429,6 +442,31 @@ async fn async_main() -> Result<(), MisakaError> {
             )
             .await
             .map_err(MisakaError::Other)?;
+        }
+
+        Command::Endpoint { json } => {
+            let data_dir = IdentityStore::config_dir()
+                .map_err(|error| MisakaError::Other(error.to_string()))?;
+            let network_id = NetworkIdStore::load_or_init(&data_dir, requested_network_id)
+                .map_err(|error| MisakaError::Other(error.to_string()))?;
+            let backend = bind_iroh_backend(&data_dir, iroh_options)
+                .await
+                .map_err(|error| MisakaError::Other(error.to_string()))?;
+            let endpoint = NetworkEndpoint::Iroh(backend.endpoint_addr()).to_string();
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "network_id": network_id.to_string(),
+                        "endpoint": endpoint,
+                        "endpoint_id": backend.endpoint().id().to_string(),
+                    })
+                );
+            } else {
+                println!("Network ID: {network_id}");
+                println!("Iroh endpoint: {endpoint}");
+            }
+            backend.close().await;
         }
 
         Command::Connect { sister } => {
@@ -978,8 +1016,8 @@ async fn run_stream_test(
             metrics
         }
         "large" => {
-            final_path = stream.path_info();
-            let metrics = large_stream(stream).await?;
+            let (metrics, path_after) = large_stream(stream).await?;
+            final_path = path_after;
             if !json {
                 println!(
                     "Large stream: bytes={} elapsed_ms={} throughput_mib_s={:.2}",
@@ -2101,8 +2139,12 @@ async fn stability(
     })
 }
 
-async fn large_stream(stream: misaka_network::NetworkStream) -> Result<StreamProbeMetrics, String> {
+async fn large_stream(
+    stream: misaka_network::NetworkStream,
+) -> Result<(StreamProbeMetrics, misaka_network::PathInfo), String> {
     let started = std::time::Instant::now();
+    let initial_path = stream.path_info();
+    let path_provider = stream.path_info_provider();
     let (mut reader, mut writer) = tokio::io::split(stream);
     let writer_task = tokio::spawn(async move {
         let mut buffer = [0u8; STREAM_CHUNK_SIZE];
@@ -2155,12 +2197,17 @@ async fn large_stream(stream: misaka_network::NetworkStream) -> Result<StreamPro
     let elapsed = started.elapsed();
     let throughput_mib_s =
         received as f64 / elapsed.as_secs_f64().max(f64::EPSILON) / (1024.0 * 1024.0);
-    Ok(StreamProbeMetrics {
-        bytes: Some(received),
-        elapsed_ms: Some(elapsed.as_millis()),
-        throughput_mib_s: Some(throughput_mib_s),
-        ..StreamProbeMetrics::default()
-    })
+    Ok((
+        StreamProbeMetrics {
+            bytes: Some(received),
+            elapsed_ms: Some(elapsed.as_millis()),
+            throughput_mib_s: Some(throughput_mib_s),
+            ..StreamProbeMetrics::default()
+        },
+        path_provider
+            .map(|provider| provider())
+            .unwrap_or(initial_path),
+    ))
 }
 
 async fn read_exact_timeout(
@@ -2313,6 +2360,35 @@ mod stream_tests {
         assert!(matches!(
             cli.command,
             Command::StreamTest { json: true, .. }
+        ));
+    }
+
+    #[test]
+    fn endpoint_command_accepts_json_output_and_network_id() {
+        let cli = Cli::try_parse_from([
+            "misaka",
+            "--network-id",
+            "01234567-89ab-cdef-0123-456789abcdef",
+            "endpoint",
+            "--json",
+        ])
+        .unwrap();
+        assert_eq!(
+            cli.network_id.as_deref(),
+            Some("01234567-89ab-cdef-0123-456789abcdef")
+        );
+        assert!(matches!(cli.command, Command::Endpoint { json: true }));
+    }
+
+    #[test]
+    fn start_accepts_probe_only_mode() {
+        let cli = Cli::try_parse_from(["misaka", "start", "--probe-only"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Start {
+                probe_only: true,
+                ..
+            }
         ));
     }
 

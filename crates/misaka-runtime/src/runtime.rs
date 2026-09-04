@@ -445,7 +445,7 @@ async fn log_and_echo_stream(
     let connected_for = stream.connected_for();
     let path = stream.path_info();
     let object_store_root = session_node.peers.data_dir().join("objects");
-    let result = echo_stream(stream, &object_store_root).await;
+    let result = echo_stream(stream, &object_store_root, session_node.config.probe_only).await;
     tracing::debug!(
         event = "stream_closed",
         sister_id = session_node.identity.id.as_u64(),
@@ -466,6 +466,7 @@ async fn log_and_echo_stream(
 async fn echo_stream(
     mut stream: misaka_network::NetworkStream,
     object_store_root: &Path,
+    probe_only: bool,
 ) -> std::io::Result<()> {
     stream.write_all(b"world").await?;
     let mut preamble = [0u8; TRANSFER_MAGIC.len()];
@@ -473,15 +474,39 @@ async fn echo_stream(
         return Ok(());
     }
     if preamble == *TRANSFER_MAGIC {
+        if probe_only {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "probe-only listener rejects file transfer",
+            ));
+        }
         return receive_transfer(stream).await;
     }
     if preamble == *TRANSFER_V1_MAGIC {
+        if probe_only {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "probe-only listener rejects file transfer",
+            ));
+        }
         return receive_transfer_v1(stream).await;
     }
     if preamble == *TRANSFER_V2_MAGIC {
+        if probe_only {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "probe-only listener rejects file transfer",
+            ));
+        }
         return receive_transfer_v2_with_store(stream, Some(object_store_root.to_owned())).await;
     }
     if preamble == *TUNNEL_MAGIC {
+        if probe_only {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "probe-only listener rejects tunnel",
+            ));
+        }
         return receive_tunnel(stream).await;
     }
     stream.write_all(&preamble).await?;
@@ -1209,6 +1234,54 @@ mod tests {
         let mut echo = [0u8; 5];
         stream.read_exact(&mut echo).await.unwrap();
         assert_eq!(&echo, b"hello");
+
+        shutdown.cancel();
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn probe_only_listener_rejects_transfer_preambles() {
+        let runtime = SisterRuntime::new(
+            SisterIdentity::new(
+                2,
+                "probe".into(),
+                "host".into(),
+                "test".into(),
+                "0.1".into(),
+                0,
+            ),
+            default_encryption_key(),
+            RuntimeConfig {
+                listen_port: 0,
+                stream_port: Some(0),
+                probe_only: true,
+                discovery: DiscoveryMode::Off,
+                ..Default::default()
+            },
+            vec![],
+        )
+        .await
+        .unwrap();
+        let stream_addr = runtime.stream_addr().unwrap();
+        let shutdown = runtime.shutdown();
+        let task = tokio::spawn(runtime.run());
+
+        let mut stream = misaka_network::connect(stream_addr).await.unwrap();
+        let mut greeting = [0u8; 5];
+        stream.read_exact(&mut greeting).await.unwrap();
+        stream
+            .write_all(misaka_core::protocol::TRANSFER_MAGIC)
+            .await
+            .unwrap();
+        let mut response = [0u8; 1];
+        let read = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            stream.read(&mut response),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(read, 0);
 
         shutdown.cancel();
         task.await.unwrap().unwrap();
