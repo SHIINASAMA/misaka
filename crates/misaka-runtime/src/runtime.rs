@@ -6,6 +6,7 @@
 
 use crate::config::{RuntimeConfig, StreamBackend};
 use crate::content_store::ContentStore;
+use crate::handle::SisterHandle;
 use crate::node::SisterNode;
 use crate::shutdown::Shutdown;
 use misaka_core::protocol::{
@@ -155,6 +156,11 @@ impl SisterRuntime {
     /// Clone the cancellation handle used to request a graceful stop.
     pub fn shutdown(&self) -> Shutdown {
         self.shutdown.clone()
+    }
+
+    /// Return a cloneable application view before `run` consumes the runtime.
+    pub fn handle(&self) -> SisterHandle {
+        SisterHandle::new(self.node.clone())
     }
 
     /// Return the loopback address for the optional experimental stream listener.

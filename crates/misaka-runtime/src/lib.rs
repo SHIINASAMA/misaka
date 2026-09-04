@@ -17,6 +17,7 @@ pub mod error;
 pub mod executor;
 pub mod handler;
 pub mod human_identity_store;
+pub mod handle;
 pub mod identity_store;
 pub mod introspection;
 pub mod iroh_endpoint_store;
@@ -45,6 +46,7 @@ pub mod tls_identity_store;
 pub mod transport_binding_store;
 
 pub use error::MisakaError as Error;
+pub use handle::SisterHandle;
 pub use shutdown::{Shutdown, ShutdownToken};
 
 pub type Result<T> = std::result::Result<T, Error>;
