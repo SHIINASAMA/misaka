@@ -9,6 +9,7 @@ use misaka_core::protocol::{
     TunnelRequest, TRANSFER_MAGIC, TRANSFER_V1_CHUNK_SIZE, TRANSFER_V1_MAGIC, TRANSFER_V2_MAGIC,
     TUNNEL_MAGIC,
 };
+use misaka_core::IrohEndpointId;
 use misaka_network::{NetworkBackend, NetworkEndpoint};
 use serde::{de::DeserializeOwned, Serialize};
 use sha2::{Digest, Sha256};
@@ -20,6 +21,8 @@ use misaka_runtime::node::SisterNode;
 use misaka_runtime::peer_store::PeerStore;
 use misaka_runtime::resources::{ResourceProvider, SysinfoResourceProvider};
 use misaka_runtime::runtime::{default_encryption_key, SisterRuntime};
+use misaka_runtime::sister_key_store::SisterKeyStore;
+use misaka_runtime::transport_binding_store::TransportBindingStore;
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -342,6 +345,8 @@ async fn async_main() -> Result<(), MisakaError> {
                 .map_err(|e| MisakaError::Other(e.to_string()))?;
             let identity = IdentityStore::load_or_init(nickname.clone(), port)
                 .map_err(|e| MisakaError::Other(e.to_string()))?;
+            let sister_key = SisterKeyStore::load_or_init(&data_dir)
+                .map_err(|e| MisakaError::Other(e.to_string()))?;
             let stream_security = if stream_secure {
                 let stream_identity =
                     misaka_runtime::tls_identity_store::TlsIdentityStore::load_or_init(
@@ -400,6 +405,21 @@ async fn async_main() -> Result<(), MisakaError> {
                         data_dir.clone(),
                         endpoint,
                     );
+                    let binding = TransportBindingStore::load_or_update(
+                        &data_dir,
+                        network_id,
+                        identity.id.as_u64(),
+                        IrohEndpointId::from_bytes(*backend.endpoint().id().as_bytes()),
+                        &sister_key,
+                    )
+                    .map_err(|error| MisakaError::Other(error.to_string()))?;
+                    tracing::info!(
+                        event = "transport_binding",
+                        sister_public_key = %binding.sister_public_key,
+                        iroh_endpoint_id = %binding.iroh_endpoint_id,
+                        sequence = binding.sequence,
+                        "Iroh endpoint bound to Sister identity"
+                    );
                     misaka_runtime::config::StreamBackend::Iroh(backend)
                 }
                 other => {
@@ -423,6 +443,7 @@ async fn async_main() -> Result<(), MisakaError> {
                 hostname = %identity.hostname,
                 platform = %identity.platform,
                 version = %identity.version,
+                sister_public_key = %sister_key.public_key(),
                 "Sister identity loaded"
             );
 
@@ -537,6 +558,9 @@ async fn async_main() -> Result<(), MisakaError> {
             let identity = IdentityStore::load()
                 .map_err(|error| MisakaError::Other(error.to_string()))?
                 .ok_or_else(|| MisakaError::Other("no local Sister identity".to_string()))?;
+            let sister_public_key = SisterKeyStore::public_key(&data_dir)
+                .map_err(|error| MisakaError::Other(error.to_string()))?
+                .ok_or_else(|| MisakaError::Other("no local Sister identity key".to_string()))?;
             let endpoint_addr = misaka_runtime::iroh_endpoint_store::IrohEndpointStore::load(
                 &data_dir,
             )
@@ -547,6 +571,24 @@ async fn async_main() -> Result<(), MisakaError> {
                         .to_string(),
                 )
             })?;
+            let binding = TransportBindingStore::load(&data_dir)
+                .map_err(|error| MisakaError::Other(error.to_string()))?
+                .ok_or_else(|| {
+                    MisakaError::Other(
+                        "no persisted Iroh transport binding; start the Sister with --stream-backend iroh first"
+                            .to_string(),
+                    )
+                })?;
+            if !binding.verify()
+                || binding.network_id != network_id
+                || binding.sister_id != identity.id
+                || binding.sister_public_key != sister_public_key
+            {
+                return Err(MisakaError::Other(
+                    "persisted Iroh transport binding does not match local Sister identity"
+                        .to_string(),
+                ));
+            }
             let endpoint = NetworkEndpoint::Iroh(endpoint_addr).to_string();
             if json {
                 println!(
@@ -554,15 +596,19 @@ async fn async_main() -> Result<(), MisakaError> {
                     serde_json::json!({
                         "network_id": network_id.to_string(),
                         "sister_id": identity.id.as_u64(),
+                        "sister_public_key": sister_public_key.to_string(),
                         "backend": "iroh",
                         "endpoint": endpoint,
+                        "transport_binding_sequence": binding.sequence,
                     })
                 );
             } else {
                 println!("Network ID: {network_id}");
                 println!("Sister: #{}", identity.id.as_u64());
+                println!("Sister public key: {sister_public_key}");
                 println!("Backend: iroh");
                 println!("Iroh endpoint: {endpoint}");
+                println!("Transport binding sequence: {}", binding.sequence);
             }
         }
 

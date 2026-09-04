@@ -29,10 +29,12 @@ pub mod resources;
 pub mod runtime;
 pub mod scheduler;
 pub mod shutdown;
+pub mod sister_key_store;
 pub mod state;
 pub mod stealing;
 pub(crate) mod stream_registry;
 pub mod tls_identity_store;
+pub mod transport_binding_store;
 
 pub use error::MisakaError as Error;
 pub use shutdown::{Shutdown, ShutdownToken};

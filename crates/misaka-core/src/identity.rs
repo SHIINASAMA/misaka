@@ -1,3 +1,5 @@
+use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
+use rand::rngs::OsRng;
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize, Serializer};
 
 /// Stable namespace identifier for one independent Misaka Network.
@@ -70,6 +72,236 @@ impl std::fmt::Display for SisterId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "#{}", self.0)
     }
+}
+
+const SISTER_PUBLIC_KEY_LEN: usize = 32;
+const SISTER_SIGNATURE_LEN: usize = 64;
+
+/// The stable cryptographic identity of one Sister.
+///
+/// The key is intentionally separate from `SisterId`: the numeric ID is a
+/// display/routing handle, while this public key is used for authentication
+/// and signatures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SisterPublicKey([u8; SISTER_PUBLIC_KEY_LEN]);
+
+impl SisterPublicKey {
+    pub fn from_bytes(bytes: [u8; SISTER_PUBLIC_KEY_LEN]) -> Self {
+        Self(bytes)
+    }
+
+    pub fn to_bytes(self) -> [u8; SISTER_PUBLIC_KEY_LEN] {
+        self.0
+    }
+
+    pub fn as_bytes(&self) -> &[u8; SISTER_PUBLIC_KEY_LEN] {
+        &self.0
+    }
+
+    pub fn verify(&self, message: &[u8], signature: &SisterSignature) -> bool {
+        let Ok(key) = VerifyingKey::from_bytes(&self.0) else {
+            return false;
+        };
+        key.verify(message, &signature.as_dalek()).is_ok()
+    }
+
+    pub fn verify_challenge(
+        &self,
+        challenge: &KeyPossessionChallenge,
+        signature: &SisterSignature,
+    ) -> bool {
+        self.verify(&challenge.signing_bytes(), signature)
+    }
+}
+
+impl std::fmt::Display for SisterPublicKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write_hex(&self.0, formatter)
+    }
+}
+
+/// An Ed25519 signature carried by a Misaka contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SisterSignature([u8; SISTER_SIGNATURE_LEN]);
+
+impl SisterSignature {
+    pub fn from_bytes(bytes: [u8; SISTER_SIGNATURE_LEN]) -> Self {
+        Self(bytes)
+    }
+
+    pub fn to_bytes(self) -> [u8; SISTER_SIGNATURE_LEN] {
+        self.0
+    }
+
+    fn as_dalek(&self) -> ed25519_dalek::Signature {
+        ed25519_dalek::Signature::from_bytes(&self.0)
+    }
+}
+
+impl Serialize for SisterSignature {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_bytes(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for SisterSignature {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let bytes = Vec::<u8>::deserialize(deserializer)?;
+        let bytes: [u8; SISTER_SIGNATURE_LEN] = bytes.try_into().map_err(|bytes: Vec<u8>| {
+            D::Error::custom(format!(
+                "invalid Sister signature length: expected {SISTER_SIGNATURE_LEN}, got {}",
+                bytes.len()
+            ))
+        })?;
+        Ok(Self(bytes))
+    }
+}
+
+/// The private key for a Sister. It is not serializable and its `Debug`
+/// representation never includes key material.
+#[derive(Clone)]
+pub struct SisterKeyPair(SigningKey);
+
+impl std::fmt::Debug for SisterKeyPair {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SisterKeyPair(REDACTED)")
+    }
+}
+
+impl SisterKeyPair {
+    pub fn generate() -> Self {
+        Self(SigningKey::generate(&mut OsRng))
+    }
+
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(SigningKey::from_bytes(&bytes))
+    }
+
+    pub fn to_bytes(&self) -> [u8; 32] {
+        self.0.to_bytes()
+    }
+
+    pub fn public_key(&self) -> SisterPublicKey {
+        SisterPublicKey(self.0.verifying_key().to_bytes())
+    }
+
+    pub fn sign(&self, message: &[u8]) -> SisterSignature {
+        SisterSignature(self.0.sign(message).to_bytes())
+    }
+
+    pub fn sign_challenge(&self, challenge: &KeyPossessionChallenge) -> SisterSignature {
+        self.sign(&challenge.signing_bytes())
+    }
+}
+
+/// An Iroh endpoint identity represented without making `misaka-core` depend
+/// on the Iroh transport crate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct IrohEndpointId([u8; 32]);
+
+impl IrohEndpointId {
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    pub fn to_bytes(self) -> [u8; 32] {
+        self.0
+    }
+}
+
+impl std::fmt::Display for IrohEndpointId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write_hex(&self.0, formatter)
+    }
+}
+
+/// A signed assertion that an Iroh endpoint belongs to a Sister identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransportBinding {
+    pub network_id: NetworkId,
+    pub sister_id: SisterId,
+    pub sister_public_key: SisterPublicKey,
+    pub iroh_endpoint_id: IrohEndpointId,
+    pub sequence: u64,
+    pub signature_by_sister_key: SisterSignature,
+}
+
+#[derive(Serialize)]
+struct TransportBindingUnsigned<'a> {
+    network_id: NetworkId,
+    sister_id: &'a SisterId,
+    sister_public_key: SisterPublicKey,
+    iroh_endpoint_id: IrohEndpointId,
+    sequence: u64,
+}
+
+impl TransportBinding {
+    pub fn sign(
+        network_id: NetworkId,
+        sister_id: u64,
+        iroh_endpoint_id: IrohEndpointId,
+        sequence: u64,
+        key: &SisterKeyPair,
+    ) -> Self {
+        let sister_public_key = key.public_key();
+        let mut binding = Self {
+            network_id,
+            sister_id: SisterId(sister_id),
+            sister_public_key,
+            iroh_endpoint_id,
+            sequence,
+            signature_by_sister_key: SisterSignature([0; SISTER_SIGNATURE_LEN]),
+        };
+        binding.signature_by_sister_key = key.sign(&binding.signing_bytes());
+        binding
+    }
+
+    pub fn verify(&self) -> bool {
+        self.sister_public_key
+            .verify(&self.signing_bytes(), &self.signature_by_sister_key)
+    }
+
+    fn signing_bytes(&self) -> Vec<u8> {
+        bincode::serialize(&TransportBindingUnsigned {
+            network_id: self.network_id,
+            sister_id: &self.sister_id,
+            sister_public_key: self.sister_public_key,
+            iroh_endpoint_id: self.iroh_endpoint_id,
+            sequence: self.sequence,
+        })
+        .expect("transport binding fields are serializable")
+    }
+}
+
+/// A nonce scoped to one Misaka Network for proving possession of a Sister
+/// private key during a future authenticated session handshake.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyPossessionChallenge {
+    pub network_id: NetworkId,
+    pub nonce: [u8; 32],
+}
+
+impl KeyPossessionChallenge {
+    pub fn new(network_id: NetworkId, nonce: [u8; 32]) -> Self {
+        Self { network_id, nonce }
+    }
+
+    fn signing_bytes(&self) -> Vec<u8> {
+        bincode::serialize(self).expect("challenge fields are serializable")
+    }
+}
+
+fn write_hex(bytes: &[u8], formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    for byte in bytes {
+        write!(formatter, "{byte:02x}")?;
+    }
+    Ok(())
 }
 
 /// 用户可修改的显示名，与稳定 ID 分离
@@ -177,5 +409,55 @@ mod tests {
             31700,
         );
         assert_eq!(id.display_name(), "#10032 \"Railgun\"");
+    }
+
+    #[test]
+    fn sister_key_signatures_verify_and_reject_tampering() {
+        let key = SisterKeyPair::generate();
+        let message = b"misaka sister challenge";
+        let signature = key.sign(message);
+
+        assert!(key.public_key().verify(message, &signature));
+        assert!(!key.public_key().verify(b"tampered", &signature));
+        assert_eq!(key.public_key().to_bytes().len(), 32);
+        assert_eq!(signature.to_bytes().len(), 64);
+    }
+
+    #[test]
+    fn sister_key_roundtrips_from_persisted_secret_bytes() {
+        let first = SisterKeyPair::generate();
+        let second = SisterKeyPair::from_bytes(first.to_bytes());
+
+        assert_eq!(first.public_key(), second.public_key());
+        assert_eq!(first.to_bytes(), second.to_bytes());
+    }
+
+    #[test]
+    fn transport_binding_signs_canonical_identity_data() {
+        let network_id = NetworkId::generate();
+        let key = SisterKeyPair::generate();
+        let endpoint_id = IrohEndpointId::from_bytes([9u8; 32]);
+        let binding = TransportBinding::sign(network_id, 42, endpoint_id, 0, &key);
+
+        assert_eq!(binding.sister_public_key, key.public_key());
+        assert!(binding.verify());
+
+        let mut tampered = binding.clone();
+        tampered.sequence = 1;
+        assert!(!tampered.verify());
+    }
+
+    #[test]
+    fn key_possession_challenge_is_bound_to_network_and_nonce() {
+        let network_id = NetworkId::generate();
+        let key = SisterKeyPair::generate();
+        let challenge = KeyPossessionChallenge::new(network_id, [3u8; 32]);
+        let signature = key.sign_challenge(&challenge);
+
+        assert!(key.public_key().verify_challenge(&challenge, &signature));
+        assert!(!key.public_key().verify_challenge(
+            &KeyPossessionChallenge::new(network_id, [4u8; 32]),
+            &signature,
+        ));
     }
 }

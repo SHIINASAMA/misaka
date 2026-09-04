@@ -11,3 +11,5 @@ bincode.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 sha2.workspace = true
+ed25519-dalek.workspace = true
+rand.workspace = true
