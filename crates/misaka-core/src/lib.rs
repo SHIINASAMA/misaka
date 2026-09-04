@@ -14,8 +14,10 @@ pub mod peer;
 pub mod protocol;
 
 pub use identity::{
-    IrohEndpointId, KeyPossessionChallenge, NetworkId, Nickname, SisterId, SisterIdentity,
-    SisterKeyPair, SisterPublicKey, SisterSignature, TransportBinding,
+    AuthorityKeyPair, AuthorityPublicKey, AuthoritySignature, IrohEndpointId,
+    KeyPossessionChallenge, MembershipCertificate, NetworkAuthority, NetworkId, Nickname,
+    RevocationRecord, SisterId, SisterIdentity, SisterKeyPair, SisterPublicKey, SisterSignature,
+    TransportBinding,
 };
 pub use introspection::{
     ActiveStreamSnapshot, IntrospectionSnapshot, JobSnapshot, PeerSnapshot, ResourceSnapshot,

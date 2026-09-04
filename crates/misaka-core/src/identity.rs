@@ -200,6 +200,251 @@ impl SisterKeyPair {
     }
 }
 
+/// Public key of the Network Authority. This is deliberately a separate type
+/// from `SisterPublicKey`: authority governance is not a Sister runtime role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AuthorityPublicKey([u8; SISTER_PUBLIC_KEY_LEN]);
+
+impl AuthorityPublicKey {
+    pub fn from_bytes(bytes: [u8; SISTER_PUBLIC_KEY_LEN]) -> Self {
+        Self(bytes)
+    }
+
+    pub fn to_bytes(self) -> [u8; SISTER_PUBLIC_KEY_LEN] {
+        self.0
+    }
+
+    pub fn verify(&self, message: &[u8], signature: &AuthoritySignature) -> bool {
+        let Ok(key) = VerifyingKey::from_bytes(&self.0) else {
+            return false;
+        };
+        key.verify(message, &signature.as_dalek()).is_ok()
+    }
+}
+
+impl std::fmt::Display for AuthorityPublicKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write_hex(&self.0, formatter)
+    }
+}
+
+/// An Ed25519 signature made by a Network Authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthoritySignature([u8; SISTER_SIGNATURE_LEN]);
+
+impl AuthoritySignature {
+    fn as_dalek(&self) -> ed25519_dalek::Signature {
+        ed25519_dalek::Signature::from_bytes(&self.0)
+    }
+}
+
+impl Serialize for AuthoritySignature {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_bytes(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for AuthoritySignature {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let bytes = Vec::<u8>::deserialize(deserializer)?;
+        let bytes: [u8; SISTER_SIGNATURE_LEN] = bytes.try_into().map_err(|bytes: Vec<u8>| {
+            D::Error::custom(format!(
+                "invalid authority signature length: expected {SISTER_SIGNATURE_LEN}, got {}",
+                bytes.len()
+            ))
+        })?;
+        Ok(Self(bytes))
+    }
+}
+
+/// The private governance key for one Network. It is never part of a Sister
+/// runtime protocol message.
+#[derive(Clone)]
+pub struct AuthorityKeyPair(SigningKey);
+
+impl std::fmt::Debug for AuthorityKeyPair {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("AuthorityKeyPair(REDACTED)")
+    }
+}
+
+impl AuthorityKeyPair {
+    pub fn generate() -> Self {
+        Self(SigningKey::generate(&mut OsRng))
+    }
+
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(SigningKey::from_bytes(&bytes))
+    }
+
+    pub fn to_bytes(&self) -> [u8; 32] {
+        self.0.to_bytes()
+    }
+
+    pub fn public_key(&self) -> AuthorityPublicKey {
+        AuthorityPublicKey(self.0.verifying_key().to_bytes())
+    }
+
+    fn sign(&self, message: &[u8]) -> AuthoritySignature {
+        AuthoritySignature(self.0.sign(message).to_bytes())
+    }
+}
+
+/// Stable public descriptor of a Network's trust root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkAuthority {
+    pub network_id: NetworkId,
+    pub authority_public_key: AuthorityPublicKey,
+}
+
+impl NetworkAuthority {
+    pub fn generate(network_id: NetworkId) -> (Self, AuthorityKeyPair) {
+        let key = AuthorityKeyPair::generate();
+        (
+            Self {
+                network_id,
+                authority_public_key: key.public_key(),
+            },
+            key,
+        )
+    }
+}
+
+/// Authority-signed proof that one Sister is a member of a Network.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MembershipCertificate {
+    pub network_id: NetworkId,
+    pub sister_public_key: SisterPublicKey,
+    pub sister_id: SisterId,
+    pub issued_at: u64,
+    pub expires_at: Option<u64>,
+    pub serial: u64,
+    pub authority_signature: AuthoritySignature,
+}
+
+#[derive(Serialize)]
+struct MembershipCertificateUnsigned<'a> {
+    network_id: NetworkId,
+    sister_public_key: SisterPublicKey,
+    sister_id: &'a SisterId,
+    issued_at: u64,
+    expires_at: Option<u64>,
+    serial: u64,
+}
+
+impl MembershipCertificate {
+    #[allow(clippy::too_many_arguments)]
+    pub fn issue(
+        authority: &NetworkAuthority,
+        authority_key: &AuthorityKeyPair,
+        sister_public_key: SisterPublicKey,
+        sister_id: u64,
+        issued_at: u64,
+        expires_at: Option<u64>,
+        serial: u64,
+    ) -> Self {
+        let mut certificate = Self {
+            network_id: authority.network_id,
+            sister_public_key,
+            sister_id: SisterId(sister_id),
+            issued_at,
+            expires_at,
+            serial,
+            authority_signature: AuthoritySignature([0; SISTER_SIGNATURE_LEN]),
+        };
+        certificate.authority_signature = authority_key.sign(&certificate.signing_bytes());
+        certificate
+    }
+
+    pub fn verify(&self, authority: &NetworkAuthority) -> bool {
+        self.network_id == authority.network_id
+            && authority
+                .authority_public_key
+                .verify(&self.signing_bytes(), &self.authority_signature)
+    }
+
+    pub fn is_valid_at(&self, timestamp: u64) -> bool {
+        self.issued_at <= timestamp
+            && self
+                .expires_at
+                .map(|expires_at| timestamp <= expires_at)
+                .unwrap_or(true)
+    }
+
+    fn signing_bytes(&self) -> Vec<u8> {
+        bincode::serialize(&MembershipCertificateUnsigned {
+            network_id: self.network_id,
+            sister_public_key: self.sister_public_key,
+            sister_id: &self.sister_id,
+            issued_at: self.issued_at,
+            expires_at: self.expires_at,
+            serial: self.serial,
+        })
+        .expect("membership certificate fields are serializable")
+    }
+}
+
+/// Authority-signed revocation of a membership serial.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RevocationRecord {
+    pub network_id: NetworkId,
+    pub membership_serial: u64,
+    pub revoked_at: u64,
+    pub reason: String,
+    pub authority_signature: AuthoritySignature,
+}
+
+#[derive(Serialize)]
+struct RevocationRecordUnsigned<'a> {
+    network_id: NetworkId,
+    membership_serial: u64,
+    revoked_at: u64,
+    reason: &'a str,
+}
+
+impl RevocationRecord {
+    pub fn issue(
+        authority: &NetworkAuthority,
+        authority_key: &AuthorityKeyPair,
+        membership_serial: u64,
+        revoked_at: u64,
+        reason: String,
+    ) -> Self {
+        let mut record = Self {
+            network_id: authority.network_id,
+            membership_serial,
+            revoked_at,
+            reason,
+            authority_signature: AuthoritySignature([0; SISTER_SIGNATURE_LEN]),
+        };
+        record.authority_signature = authority_key.sign(&record.signing_bytes());
+        record
+    }
+
+    pub fn verify(&self, authority: &NetworkAuthority) -> bool {
+        self.network_id == authority.network_id
+            && authority
+                .authority_public_key
+                .verify(&self.signing_bytes(), &self.authority_signature)
+    }
+
+    fn signing_bytes(&self) -> Vec<u8> {
+        bincode::serialize(&RevocationRecordUnsigned {
+            network_id: self.network_id,
+            membership_serial: self.membership_serial,
+            revoked_at: self.revoked_at,
+            reason: &self.reason,
+        })
+        .expect("revocation record fields are serializable")
+    }
+}
+
 /// An Iroh endpoint identity represented without making `misaka-core` depend
 /// on the Iroh transport crate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -459,5 +704,47 @@ mod tests {
             &KeyPossessionChallenge::new(network_id, [4u8; 32]),
             &signature,
         ));
+    }
+
+    #[test]
+    fn membership_certificate_verifies_only_for_its_authority_and_time_window() {
+        let network_id = NetworkId::generate();
+        let (authority, authority_key) = NetworkAuthority::generate(network_id);
+        let sister_key = SisterKeyPair::generate();
+        let certificate = MembershipCertificate::issue(
+            &authority,
+            &authority_key,
+            sister_key.public_key(),
+            42,
+            100,
+            Some(200),
+            7,
+        );
+
+        assert!(certificate.verify(&authority));
+        assert!(certificate.is_valid_at(100));
+        assert!(certificate.is_valid_at(200));
+        assert!(!certificate.is_valid_at(99));
+        assert!(!certificate.is_valid_at(201));
+
+        let (other_authority, _) = NetworkAuthority::generate(NetworkId::generate());
+        assert!(!certificate.verify(&other_authority));
+    }
+
+    #[test]
+    fn revocation_record_is_signed_and_matches_membership_serial() {
+        let network_id = NetworkId::generate();
+        let (authority, authority_key) = NetworkAuthority::generate(network_id);
+        let record = RevocationRecord::issue(
+            &authority,
+            &authority_key,
+            7,
+            300,
+            "operator request".into(),
+        );
+
+        assert!(record.verify(&authority));
+        assert_eq!(record.membership_serial, 7);
+        assert!(!record.verify(&NetworkAuthority::generate(NetworkId::generate()).0));
     }
 }
