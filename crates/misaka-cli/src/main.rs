@@ -10,7 +10,8 @@ use misaka_core::protocol::{
     TUNNEL_MAGIC,
 };
 use misaka_core::{
-    IrohEndpointId, MembershipCertificate, NetworkId, NetworkInvite, PeerRecord, SisterKeyPair,
+    CommandAuthorization, HumanMembershipCertificate, IrohEndpointId, MembershipCertificate,
+    NetworkId, NetworkInvite, PeerRecord, Permission, Principal, Role, SisterKeyPair,
     SisterPublicKey,
 };
 use misaka_network::{NetworkBackend, NetworkEndpoint};
@@ -18,6 +19,7 @@ use serde::{de::DeserializeOwned, Serialize};
 use sha2::{Digest, Sha256};
 
 use misaka_runtime::error::MisakaError;
+use misaka_runtime::human_identity_store::HumanIdentityStore;
 use misaka_runtime::identity_store::IdentityStore;
 use misaka_runtime::membership_store::MembershipStore;
 use misaka_runtime::network_authority_store::NetworkAuthorityStore;
@@ -142,6 +144,12 @@ enum Command {
     Network {
         #[command(subcommand)]
         command: NetworkCommand,
+    },
+
+    /// Manage the local human operator identity.
+    Human {
+        #[command(subcommand)]
+        command: HumanCommand,
     },
 
     /// Export the local Iroh endpoint address for cross-domain preflight.
@@ -328,6 +336,19 @@ enum NetworkCommand {
         /// Invite JSON file produced by `misaka network invite`.
         invite: PathBuf,
     },
+}
+
+#[derive(Subcommand)]
+enum HumanCommand {
+    /// Create the local human key and an owner role grant.
+    Init {
+        /// Display name stored in the public human descriptor.
+        #[arg(long)]
+        name: Option<String>,
+    },
+
+    /// Show the local human descriptor and role grant.
+    Status,
 }
 
 fn main() -> Result<(), MisakaError> {
@@ -742,6 +763,95 @@ async fn async_main() -> Result<(), MisakaError> {
             }
         },
 
+        Command::Human { command } => match command {
+            HumanCommand::Init { name } => {
+                let data_dir = IdentityStore::config_dir()
+                    .map_err(|error| MisakaError::Other(error.to_string()))?;
+                let (authority, authority_key) = NetworkAuthorityStore::load_with_key(&data_dir)
+                    .map_err(|error| MisakaError::Other(error.to_string()))?
+                    .ok_or_else(|| {
+                        MisakaError::Other(
+                            "human init requires `misaka network init` on the Network owner"
+                                .to_string(),
+                        )
+                    })?;
+                if let Some(requested) = requested_network_id {
+                    if requested != authority.network_id {
+                        return Err(MisakaError::Other(
+                            "--network-id does not match the local Network authority".to_string(),
+                        ));
+                    }
+                }
+                let (human, human_key) =
+                    HumanIdentityStore::load_or_init(&data_dir, name.as_deref())
+                        .map_err(|error| MisakaError::Other(error.to_string()))?;
+                let now = unix_now();
+                let membership = if let Some(existing) =
+                    HumanIdentityStore::load_membership(&data_dir)
+                        .map_err(|error| MisakaError::Other(error.to_string()))?
+                {
+                    if existing.network_id != authority.network_id
+                        || existing.human != human
+                        || !existing.verify(&authority, now)
+                    {
+                        return Err(MisakaError::Other(
+                            "existing human membership does not match the local identity or authority"
+                                .to_string(),
+                        ));
+                    }
+                    existing
+                } else {
+                    let membership = HumanMembershipCertificate::issue(
+                        &authority,
+                        &authority_key,
+                        human.clone(),
+                        Role::Owner,
+                        now,
+                        None,
+                        1,
+                    );
+                    HumanIdentityStore::save_membership(&data_dir, &membership)
+                        .map_err(|error| MisakaError::Other(error.to_string()))?;
+                    membership
+                };
+                if human_key.public_key() != human.public_key {
+                    return Err(MisakaError::Other(
+                        "human identity private key does not match its descriptor".to_string(),
+                    ));
+                }
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "human_id": human.id.to_string(),
+                        "display_name": human.display_name,
+                        "public_key": human.public_key.to_string(),
+                        "role": format!("{:?}", membership.role),
+                        "network_id": authority.network_id.to_string(),
+                    })
+                );
+            }
+            HumanCommand::Status => {
+                let data_dir = IdentityStore::config_dir()
+                    .map_err(|error| MisakaError::Other(error.to_string()))?;
+                let human = HumanIdentityStore::load(&data_dir)
+                    .map_err(|error| MisakaError::Other(error.to_string()))?
+                    .ok_or_else(|| {
+                        MisakaError::Other("no human identity; run `misaka human init`".to_string())
+                    })?;
+                let membership = HumanIdentityStore::load_membership(&data_dir)
+                    .map_err(|error| MisakaError::Other(error.to_string()))?;
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "human_id": human.id.to_string(),
+                        "display_name": human.display_name,
+                        "public_key": human.public_key.to_string(),
+                        "role": membership.as_ref().map(|value| format!("{:?}", value.role)),
+                    })
+                );
+            }
+        },
+
         Command::StreamTest {
             addr,
             endpoint,
@@ -1016,6 +1126,12 @@ async fn async_main() -> Result<(), MisakaError> {
                 ..Default::default()
             };
             let node = SisterNode::new(identity, default_encryption_key(), config);
+            let authorization = if local {
+                None
+            } else {
+                load_cli_command_authorization(network_id, sister, &command)
+                    .map_err(MisakaError::Other)?
+            };
 
             if local {
                 println!("[Misaka] run --local: {}", command);
@@ -1024,11 +1140,13 @@ async fn async_main() -> Result<(), MisakaError> {
                 print_result(&result);
             } else if let Some(sid) = sister {
                 println!("[Misaka] run --sister #{}: {}", sid, command);
-                let result = node.submit_to_sister(sid, &command).await?;
+                let result = node
+                    .submit_to_sister_authorized(sid, &command, authorization)
+                    .await?;
                 print_result(&result);
             } else {
                 println!("[Misaka] run (network): {}", command);
-                let result = node.submit_job(&command).await?;
+                let result = node.submit_job_authorized(&command, authorization).await?;
                 print_result(&result);
             }
         }
@@ -2415,6 +2533,51 @@ fn join_network_invite(
     Ok(())
 }
 
+fn load_cli_command_authorization(
+    network_id: NetworkId,
+    target: Option<u64>,
+    command: &str,
+) -> Result<Option<CommandAuthorization>, String> {
+    let data_dir = IdentityStore::config_dir().map_err(|error| error.to_string())?;
+    let human = HumanIdentityStore::load(&data_dir).map_err(|error| error.to_string())?;
+    let human_key = HumanIdentityStore::load_key(&data_dir).map_err(|error| error.to_string())?;
+    let membership =
+        HumanIdentityStore::load_membership(&data_dir).map_err(|error| error.to_string())?;
+    if human.is_none() && human_key.is_none() && membership.is_none() {
+        return Ok(None);
+    }
+    let (Some(human), Some(human_key), Some(membership)) = (human, human_key, membership) else {
+        return Err(
+            "human authorization requires human-identity.json, human-identity-key, and human-membership.bin"
+                .to_string(),
+        );
+    };
+    let authority = NetworkAuthorityStore::load(&data_dir)
+        .map_err(|error| error.to_string())?
+        .ok_or("human authorization requires network.json")?;
+    let now = unix_now();
+    if authority.network_id != network_id
+        || membership.human != human
+        || !membership.verify(&authority, now)
+        || human_key.public_key() != human.public_key
+    {
+        return Err("local human identity or membership is invalid".to_string());
+    }
+    Ok(Some(CommandAuthorization::issue(
+        network_id,
+        human,
+        membership.clone(),
+        membership.role,
+        Permission::JobSubmit,
+        target.map(|id| Principal::Sister(misaka_core::SisterId(id))),
+        vec![format!("command={command}")],
+        now,
+        now.saturating_add(300),
+        uuid::Uuid::new_v4().into_bytes(),
+        &human_key,
+    )))
+}
+
 async fn proxy_tunnel(
     mut local: tokio::net::TcpStream,
     endpoint: NetworkEndpoint,
@@ -2912,7 +3075,8 @@ fn check_online(addr: Option<SocketAddr>) -> bool {
 #[cfg(test)]
 mod stream_tests {
     use super::{
-        deterministic_hash, fill_deterministic, Cli, Command, NetworkCommand, StreamProbeReport,
+        deterministic_hash, fill_deterministic, Cli, Command, HumanCommand, NetworkCommand,
+        StreamProbeReport,
     };
     use clap::Parser;
     use std::net::SocketAddr;
@@ -3085,6 +3249,24 @@ mod stream_tests {
             join.command,
             Command::Network {
                 command: NetworkCommand::Join { .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn human_commands_accept_init_and_status() {
+        let init = Cli::try_parse_from(["misaka", "human", "init", "--name", "kaoru"]).unwrap();
+        assert!(matches!(
+            init.command,
+            Command::Human {
+                command: HumanCommand::Init { .. }
+            }
+        ));
+        let status = Cli::try_parse_from(["misaka", "human", "status"]).unwrap();
+        assert!(matches!(
+            status.command,
+            Command::Human {
+                command: HumanCommand::Status
             }
         ));
     }

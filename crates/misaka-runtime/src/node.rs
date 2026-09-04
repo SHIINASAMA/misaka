@@ -12,7 +12,9 @@ use crate::state::{LocalJob, LocalState};
 use crate::stream_registry::StreamRegistry;
 use misaka_core::introspection::{IntrospectionSnapshot, ResourceSnapshot};
 use misaka_core::protocol::*;
-use misaka_core::{IrohEndpointId, NetworkId, PeerRecord, PeerState, SisterIdentity};
+use misaka_core::{
+    CommandAuthorization, IrohEndpointId, NetworkId, PeerRecord, PeerState, SisterIdentity,
+};
 use misaka_network::NetworkEndpoint;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -489,6 +491,14 @@ impl SisterNode {
     /// 提交一个任务。目标由调度器决定；若调度器选 None 则本地执行。
     /// 返回执行结果。
     pub async fn submit_job(&self, command: &str) -> crate::Result<JobResultData> {
+        self.submit_job_authorized(command, None).await
+    }
+
+    pub async fn submit_job_authorized(
+        &self,
+        command: &str,
+        authorization: Option<CommandAuthorization>,
+    ) -> crate::Result<JobResultData> {
         // 选目标
         let peer_data = self.peers.all().await;
         let local = { self.local_state.read().await.clone() };
@@ -508,7 +518,8 @@ impl SisterNode {
                 "job submitted to peer"
             );
         }
-        self.submit_to_sister(executor, command).await
+        self.submit_to_sister_authorized(executor, command, authorization)
+            .await
     }
 
     /// 请求一个空闲 peer 拿走我们排队中的任务 (Work Stealing)。
@@ -547,6 +558,18 @@ impl SisterNode {
         executor: u64,
         command: &str,
     ) -> crate::Result<JobResultData> {
+        self.submit_to_sister_authorized(executor, command, None)
+            .await
+    }
+
+    /// Submit a job while preserving a human authorization through remote
+    /// forwarding and work stealing.
+    pub async fn submit_to_sister_authorized(
+        &self,
+        executor: u64,
+        command: &str,
+        authorization: Option<CommandAuthorization>,
+    ) -> crate::Result<JobResultData> {
         let my_listen = if executor == self.identity.id.as_u64() {
             self.listen_addr
         } else if matches!(&self.config.stream_backend, StreamBackend::Iroh(_)) {
@@ -569,6 +592,7 @@ impl SisterNode {
             command: command.to_string(),
             arguments: vec![],
             created_at: now_secs(),
+            authorization,
         };
 
         if executor == creator {

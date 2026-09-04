@@ -5,6 +5,7 @@
 //! Sister's behavior; no master/slave roles exist.
 
 pub mod authenticated_session;
+pub mod authorization_nonce_store;
 pub mod commands;
 pub mod config;
 pub mod connection;
@@ -15,6 +16,7 @@ pub mod discovery;
 pub mod error;
 pub mod executor;
 pub mod handler;
+pub mod human_identity_store;
 pub mod identity_store;
 pub mod introspection;
 pub mod iroh_endpoint_store;

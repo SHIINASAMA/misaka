@@ -1,5 +1,5 @@
 use crate::resources::detect_capabilities;
-use misaka_core::{JobStatus, ResourceSnapshot};
+use misaka_core::{CommandAuthorization, JobStatus, ResourceSnapshot};
 use serde::{Deserialize, Serialize};
 
 /// 本地资源状态，由资源 provider 提供系统指标。
@@ -58,6 +58,8 @@ pub struct LocalJob {
     pub creator: u64,
     /// 执行完成后把结果回送的地址 (远端委派时使用)
     pub creator_addr: Option<String>,
+    /// Human authorization carried with the job through scheduling/stealing.
+    pub authorization: Option<CommandAuthorization>,
 }
 
 impl LocalJob {
@@ -71,6 +73,7 @@ impl LocalJob {
             result_output: None,
             creator: 0, // 默认本地 (caller 显式设置)
             creator_addr: None,
+            authorization: None,
         }
     }
 }

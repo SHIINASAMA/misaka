@@ -200,6 +200,303 @@ impl SisterKeyPair {
     }
 }
 
+/// Stable identity for a human operator. It is intentionally separate from a
+/// Sister identity: a person may authorize several Sisters, while a Sister
+/// remains the decentralized runtime actor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HumanId(uuid::Uuid);
+
+impl HumanId {
+    pub fn generate() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+
+    pub fn parse(value: &str) -> Result<Self, uuid::Error> {
+        uuid::Uuid::parse_str(value).map(Self)
+    }
+}
+
+impl std::fmt::Display for HumanId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl Serialize for HumanId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for HumanId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(&value).map_err(D::Error::custom)
+    }
+}
+
+const HUMAN_PUBLIC_KEY_LEN: usize = 32;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct HumanPublicKey([u8; HUMAN_PUBLIC_KEY_LEN]);
+
+impl HumanPublicKey {
+    pub fn from_bytes(bytes: [u8; HUMAN_PUBLIC_KEY_LEN]) -> Self {
+        Self(bytes)
+    }
+
+    pub fn to_bytes(self) -> [u8; HUMAN_PUBLIC_KEY_LEN] {
+        self.0
+    }
+
+    pub fn verify(&self, message: &[u8], signature: &HumanSignature) -> bool {
+        let Ok(key) = VerifyingKey::from_bytes(&self.0) else {
+            return false;
+        };
+        key.verify(message, &signature.as_dalek()).is_ok()
+    }
+}
+
+impl std::fmt::Display for HumanPublicKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write_hex(&self.0, formatter)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HumanSignature([u8; SISTER_SIGNATURE_LEN]);
+
+impl HumanSignature {
+    pub fn from_bytes(bytes: [u8; SISTER_SIGNATURE_LEN]) -> Self {
+        Self(bytes)
+    }
+
+    pub fn to_bytes(self) -> [u8; SISTER_SIGNATURE_LEN] {
+        self.0
+    }
+
+    fn as_dalek(&self) -> ed25519_dalek::Signature {
+        ed25519_dalek::Signature::from_bytes(&self.0)
+    }
+}
+
+impl Serialize for HumanSignature {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_bytes(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for HumanSignature {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let bytes = Vec::<u8>::deserialize(deserializer)?;
+        let bytes: [u8; SISTER_SIGNATURE_LEN] = bytes.try_into().map_err(|bytes: Vec<u8>| {
+            D::Error::custom(format!(
+                "invalid human signature length: expected {SISTER_SIGNATURE_LEN}, got {}",
+                bytes.len()
+            ))
+        })?;
+        Ok(Self(bytes))
+    }
+}
+
+#[derive(Clone)]
+pub struct HumanKeyPair(SigningKey);
+
+impl std::fmt::Debug for HumanKeyPair {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("HumanKeyPair(REDACTED)")
+    }
+}
+
+impl HumanKeyPair {
+    pub fn generate() -> Self {
+        Self(SigningKey::generate(&mut OsRng))
+    }
+
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(SigningKey::from_bytes(&bytes))
+    }
+
+    pub fn to_bytes(&self) -> [u8; 32] {
+        self.0.to_bytes()
+    }
+
+    pub fn public_key(&self) -> HumanPublicKey {
+        HumanPublicKey(self.0.verifying_key().to_bytes())
+    }
+
+    pub fn sign(&self, message: &[u8]) -> HumanSignature {
+        HumanSignature(self.0.sign(message).to_bytes())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HumanIdentity {
+    pub id: HumanId,
+    pub display_name: String,
+    pub public_key: HumanPublicKey,
+}
+
+impl HumanIdentity {
+    pub fn new(id: HumanId, display_name: String, public_key: HumanPublicKey) -> Self {
+        Self {
+            id,
+            display_name,
+            public_key,
+        }
+    }
+}
+
+/// A protocol principal. A human authorizes commands; a Sister executes them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Principal {
+    Human(HumanId),
+    Sister(SisterId),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Role {
+    Owner,
+    Admin,
+    Operator,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Permission {
+    NetworkInvite,
+    NetworkRevoke,
+    SisterInspect,
+    JobSubmit,
+    JobCancel,
+    FileSend,
+    TunnelOpen,
+    ShellOpen,
+}
+
+impl Role {
+    pub fn allows(self, permission: Permission) -> bool {
+        match self {
+            Self::Owner => true,
+            Self::Admin => !matches!(permission, Permission::ShellOpen),
+            Self::Operator => matches!(
+                permission,
+                Permission::SisterInspect
+                    | Permission::JobSubmit
+                    | Permission::FileSend
+                    | Permission::TunnelOpen
+                    | Permission::ShellOpen
+            ),
+        }
+    }
+}
+
+/// Human-signed authorization for one side-effecting command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandAuthorization {
+    pub network_id: NetworkId,
+    pub issuer: HumanIdentity,
+    pub membership: HumanMembershipCertificate,
+    pub role: Role,
+    pub permission: Permission,
+    pub target: Option<Principal>,
+    pub constraints: Vec<String>,
+    pub issued_at: u64,
+    pub expires_at: u64,
+    pub nonce: [u8; 16],
+    pub signature: HumanSignature,
+}
+
+#[derive(Serialize)]
+struct CommandAuthorizationUnsigned<'a> {
+    network_id: NetworkId,
+    issuer: &'a HumanIdentity,
+    membership: &'a HumanMembershipCertificate,
+    role: Role,
+    permission: Permission,
+    target: &'a Option<Principal>,
+    constraints: &'a [String],
+    issued_at: u64,
+    expires_at: u64,
+    nonce: [u8; 16],
+}
+
+impl CommandAuthorization {
+    #[allow(clippy::too_many_arguments)]
+    pub fn issue(
+        network_id: NetworkId,
+        issuer: HumanIdentity,
+        membership: HumanMembershipCertificate,
+        role: Role,
+        permission: Permission,
+        target: Option<Principal>,
+        constraints: Vec<String>,
+        issued_at: u64,
+        expires_at: u64,
+        nonce: [u8; 16],
+        key: &HumanKeyPair,
+    ) -> Self {
+        let mut authorization = Self {
+            network_id,
+            issuer,
+            membership,
+            role,
+            permission,
+            target,
+            constraints,
+            issued_at,
+            expires_at,
+            nonce,
+            signature: HumanSignature([0; SISTER_SIGNATURE_LEN]),
+        };
+        authorization.signature = key.sign(&authorization.signing_bytes());
+        authorization
+    }
+
+    pub fn verify(&self, authority: &NetworkAuthority, now: u64) -> bool {
+        self.network_id == authority.network_id
+            && self.issued_at <= self.expires_at
+            && self.issued_at <= now
+            && now <= self.expires_at
+            && self.role.allows(self.permission)
+            && self.membership.network_id == self.network_id
+            && self.membership.role == self.role
+            && self.membership.human == self.issuer
+            && self.membership.verify(authority, now)
+            && self
+                .issuer
+                .public_key
+                .verify(&self.signing_bytes(), &self.signature)
+    }
+
+    fn signing_bytes(&self) -> Vec<u8> {
+        bincode::serialize(&CommandAuthorizationUnsigned {
+            network_id: self.network_id,
+            issuer: &self.issuer,
+            membership: &self.membership,
+            role: self.role,
+            permission: self.permission,
+            target: &self.target,
+            constraints: &self.constraints,
+            issued_at: self.issued_at,
+            expires_at: self.expires_at,
+            nonce: self.nonce,
+        })
+        .expect("command authorization fields are serializable")
+    }
+}
+
 /// Public key of the Network Authority. This is deliberately a separate type
 /// from `SisterPublicKey`: authority governance is not a Sister runtime role.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -313,6 +610,80 @@ impl NetworkAuthority {
             },
             key,
         )
+    }
+}
+
+/// Authority-signed role grant for a human principal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HumanMembershipCertificate {
+    pub network_id: NetworkId,
+    pub human: HumanIdentity,
+    pub role: Role,
+    pub issued_at: u64,
+    pub expires_at: Option<u64>,
+    pub serial: u64,
+    pub authority_signature: AuthoritySignature,
+}
+
+#[derive(Serialize)]
+struct HumanMembershipCertificateUnsigned<'a> {
+    network_id: NetworkId,
+    human: &'a HumanIdentity,
+    role: Role,
+    issued_at: u64,
+    expires_at: Option<u64>,
+    serial: u64,
+}
+
+impl HumanMembershipCertificate {
+    pub fn issue(
+        authority: &NetworkAuthority,
+        authority_key: &AuthorityKeyPair,
+        human: HumanIdentity,
+        role: Role,
+        issued_at: u64,
+        expires_at: Option<u64>,
+        serial: u64,
+    ) -> Self {
+        let mut certificate = Self {
+            network_id: authority.network_id,
+            human,
+            role,
+            issued_at,
+            expires_at,
+            serial,
+            authority_signature: AuthoritySignature([0; SISTER_SIGNATURE_LEN]),
+        };
+        certificate.authority_signature = authority_key.sign(&certificate.signing_bytes());
+        certificate
+    }
+
+    pub fn verify(&self, authority: &NetworkAuthority, now: u64) -> bool {
+        self.network_id == authority.network_id
+            && self
+                .expires_at
+                .map(|expires| self.issued_at <= expires)
+                .unwrap_or(true)
+            && self.issued_at <= now
+            && self
+                .expires_at
+                .map(|expires| now <= expires)
+                .unwrap_or(true)
+            && authority
+                .authority_public_key
+                .verify(&self.signing_bytes(), &self.authority_signature)
+    }
+
+    fn signing_bytes(&self) -> Vec<u8> {
+        bincode::serialize(&HumanMembershipCertificateUnsigned {
+            network_id: self.network_id,
+            human: &self.human,
+            role: self.role,
+            issued_at: self.issued_at,
+            expires_at: self.expires_at,
+            serial: self.serial,
+        })
+        .expect("human membership certificate fields are serializable")
     }
 }
 
@@ -985,5 +1356,59 @@ mod tests {
         let mut wrong_network = invite;
         wrong_network.network_id = NetworkId::generate();
         assert!(!wrong_network.verify(100));
+    }
+
+    #[test]
+    fn human_authorization_is_signed_time_bounded_and_role_scoped() {
+        let network_id = NetworkId::generate();
+        let (authority, authority_key) = NetworkAuthority::generate(network_id);
+        let key = HumanKeyPair::generate();
+        let identity = HumanIdentity::new(HumanId::generate(), "kaoru".into(), key.public_key());
+        let membership = HumanMembershipCertificate::issue(
+            &authority,
+            &authority_key,
+            identity.clone(),
+            Role::Operator,
+            100,
+            Some(200),
+            1,
+        );
+        let authorization = CommandAuthorization::issue(
+            network_id,
+            identity,
+            membership.clone(),
+            Role::Operator,
+            Permission::JobSubmit,
+            Some(Principal::Sister(SisterId(42))),
+            vec!["command=uname -a".into()],
+            100,
+            200,
+            [7u8; 16],
+            &key,
+        );
+
+        assert!(authorization.verify(&authority, 100));
+        assert!(authorization.verify(&authority, 200));
+        assert!(!authorization.verify(&authority, 99));
+        assert!(!authorization.verify(&authority, 201));
+
+        let mut tampered = authorization.clone();
+        tampered.constraints[0] = "command=rm -rf".into();
+        assert!(!tampered.verify(&authority, 100));
+
+        let denied = CommandAuthorization::issue(
+            network_id,
+            authorization.issuer.clone(),
+            membership,
+            Role::Operator,
+            Permission::NetworkRevoke,
+            None,
+            vec![],
+            100,
+            200,
+            [8u8; 16],
+            &key,
+        );
+        assert!(!denied.verify(&authority, 100));
     }
 }

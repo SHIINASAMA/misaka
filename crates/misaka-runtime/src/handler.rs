@@ -6,6 +6,7 @@
 
 use crate::node::{now_secs, SisterNode};
 use misaka_core::protocol::*;
+use misaka_core::{Permission, Principal};
 use tokio::net::TcpStream;
 
 pub(crate) async fn dispatch(
@@ -126,6 +127,53 @@ pub(crate) async fn dispatch_envelope(
 
         MessageType::Job => {
             let job: JobData = bincode::deserialize(&env.data)?;
+            if let Some(authorization) = job.authorization.as_ref() {
+                let authority = crate::network_authority_store::NetworkAuthorityStore::load(
+                    &node.config.data_dir,
+                )
+                .map_err(|error| crate::Error::Protocol(error.to_string()))?
+                .ok_or_else(|| {
+                    crate::Error::Protocol(
+                        "human-authorized job requires a local Network authority descriptor"
+                            .to_string(),
+                    )
+                })?;
+                let target_ok = match authorization.target.as_ref() {
+                    None => true,
+                    Some(Principal::Sister(id)) => {
+                        id.as_u64()
+                            == if job.executor == 0 {
+                                node.identity.id.as_u64()
+                            } else {
+                                job.executor
+                            }
+                    }
+                    Some(Principal::Human(_)) => false,
+                };
+                let command = job.full_command();
+                let constraints_ok = authorization.constraints.iter().all(|constraint| {
+                    constraint
+                        .strip_prefix("command=")
+                        .is_some_and(|expected| expected == command)
+                });
+                if authorization.permission != Permission::JobSubmit
+                    || !authorization.verify(&authority, now_secs())
+                    || !target_ok
+                    || !constraints_ok
+                {
+                    return Err(crate::Error::Protocol(
+                        "human job authorization is invalid for this Sister".to_string(),
+                    ));
+                }
+                if job.executor == 0 || job.executor == node.identity.id.as_u64() {
+                    crate::authorization_nonce_store::AuthorizationNonceStore::record(
+                        &node.config.data_dir,
+                        authorization,
+                        now_secs(),
+                    )
+                    .map_err(|error| crate::Error::Protocol(error.to_string()))?;
+                }
+            }
             // 若指定了 executor 且不是本机 → 转发
             if job.executor != 0
                 && job.executor != node.identity.id.as_u64()
@@ -157,6 +205,7 @@ pub(crate) async fn dispatch_envelope(
             let mut local_job = crate::state::LocalJob::new(job_id.clone(), full_cmd.clone());
             local_job.creator = job.creator;
             local_job.creator_addr = Some(job.creator_addr.clone());
+            local_job.authorization = job.authorization;
             node.jobs.enqueue(local_job).await;
             tracing::info!(
                 event = "job_queued",
@@ -201,6 +250,7 @@ pub(crate) async fn dispatch_envelope(
                         command: job.command.clone(),
                         arguments: vec![],
                         created_at: now_secs(),
+                        authorization: job.authorization.clone(),
                     };
                     let envelope = Envelope::new(
                         node.config.network_id,

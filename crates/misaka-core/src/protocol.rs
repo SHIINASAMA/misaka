@@ -453,6 +453,10 @@ pub struct JobData {
     pub command: String,
     pub arguments: Vec<String>,
     pub created_at: u64,
+    /// Optional human authorization. `None` is retained only for the legacy
+    /// local/test compatibility mode; authenticated deployments should set it.
+    #[serde(default)]
+    pub authorization: Option<super::identity::CommandAuthorization>,
 }
 
 impl JobData {
@@ -604,6 +608,7 @@ mod tests {
             command: "echo".into(),
             arguments: vec!["a".into(), "b".into()],
             created_at: 0,
+            authorization: None,
         };
         assert_eq!(j.full_command(), "echo a b");
     }
