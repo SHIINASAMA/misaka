@@ -437,6 +437,33 @@ impl Context {
         Ok(())
     }
 
+    /// Start an Iroh probe-only Sister with no control-plane peers or
+    /// discovery. The endpoint is exchanged through the public CLI only.
+    pub fn start_iroh_probe_only(&mut self, alias: &str) -> Result<(), ScenarioError> {
+        let ports = allocate_ports()?;
+        let (mut entry, mut command, mut restart) = build_spawn(SpawnConfig {
+            layout: &self.layout,
+            alias,
+            nickname: alias,
+            listen_port: ports.0,
+            stream_port: ports.1,
+            introspect_port: ports.2,
+            binary: &self.binary,
+            peers: &[],
+            discovery: "off",
+            heartbeat: self.heartbeat,
+            peer_timeout: self.peer_timeout,
+        });
+        entry.stream_backend = "iroh".to_string();
+        command
+            .arg("--stream-backend")
+            .arg("iroh")
+            .arg("--probe-only");
+        restart.append_args(["--stream-backend", "iroh", "--probe-only"]);
+        self.spawn_only(alias, entry, command, restart)?;
+        self.wait_until_ready(alias)
+    }
+
     pub fn introspect(&self, alias: &str) -> Result<IntrospectionSnapshot, ScenarioError> {
         let addr = self
             .entries
@@ -761,6 +788,10 @@ pub fn network_scenarios() -> Vec<ScenarioDef> {
         ScenarioDef {
             name: "N16_connect_by_sister_id",
             run: Box::new(n16_connect_by_sister_id),
+        },
+        ScenarioDef {
+            name: "N17_iroh_endpoint_bootstrap_without_control_plane",
+            run: Box::new(n17_iroh_endpoint_bootstrap_without_control_plane),
         },
         ScenarioDef {
             name: "N18_stream_summary_observability",
@@ -2457,10 +2488,10 @@ fn n14_iroh_restart_new_stream(ctx: &mut Context) -> Result<(), ScenarioError> {
         ],
     )?;
     wait_for_stream_ready(&mut old_client, &ready_file, Duration::from_secs(12))?;
-    let status = ctx.kill_sister("b")?;
-    if status.success() {
+    let status = ctx.terminate_sister("b")?;
+    if !status.success() {
         return Err(ScenarioError::assertion(
-            "Iroh Sister unexpectedly exited successfully after kill",
+            "Iroh Sister did not terminate cleanly",
         ));
     }
     let output = old_client
@@ -2577,6 +2608,51 @@ fn n16_connect_by_sister_id(ctx: &mut Context) -> Result<(), ScenarioError> {
     )?;
     assert::assert_contains(&output, "backend=iroh", "connect backend")?;
     assert::assert_contains(&output, "route=direct", "connect route")?;
+    Ok(())
+}
+
+/// N17: export the live Iroh endpoint and connect without control-plane
+/// bootstrap, mDNS, or a persisted remote peer entry.
+fn n17_iroh_endpoint_bootstrap_without_control_plane(
+    ctx: &mut Context,
+) -> Result<(), ScenarioError> {
+    ctx.start_iroh_probe_only("b")?;
+    ctx.start_iroh_probe_only("a")?;
+    let b_snapshot = ctx.introspect("b")?;
+    assert::assert_eq(
+        b_snapshot.peers.len(),
+        0,
+        "endpoint-only Sister has no control-plane peers",
+    )?;
+    let record = ctx.run_cli("b", &["endpoint", "--json"])?;
+    let record: serde_json::Value = serde_json::from_str(record.trim())
+        .map_err(|error| ScenarioError::assertion(format!("decode endpoint record: {error}")))?;
+    assert::assert_eq(
+        record.get("network_id").and_then(serde_json::Value::as_str),
+        Some("00000000-0000-0000-0000-000000000001"),
+        "endpoint network id",
+    )?;
+    assert::assert_eq(
+        record.get("backend").and_then(serde_json::Value::as_str),
+        Some("iroh"),
+        "endpoint backend",
+    )?;
+    let endpoint = record
+        .get("endpoint")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| ScenarioError::assertion("endpoint record has no endpoint"))?;
+    let output = ctx.run_cli(
+        "a",
+        &[
+            "stream-test",
+            "--endpoint",
+            endpoint,
+            "--mode",
+            "bidirectional",
+            "--json",
+        ],
+    )?;
+    assert::assert_contains(&output, "\"backend\":\"iroh\"", "endpoint-only probe")?;
     Ok(())
 }
 

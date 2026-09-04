@@ -224,6 +224,9 @@ impl SisterRuntime {
                 "runtime shutdown drain timed out"
             );
         }
+        if let StreamBackend::Iroh(backend) = &node.config.stream_backend {
+            backend.close().await;
+        }
         if let Some(error) = runtime_error {
             return Err(error);
         }

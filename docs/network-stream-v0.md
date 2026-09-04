@@ -137,9 +137,12 @@ cross-domain or NAT measurements. The runtime unit suite verifies that
 `ConnectionManager` reuses one Iroh session for two explicit logical streams
 and establishes a fresh Iroh session after the old session is closed.
 
-The public `misaka endpoint --json` command exports a local Iroh endpoint
-without control-plane bootstrap. Outbound Iroh CLI probes use ephemeral
-transport identities, while Sister listeners retain their persisted identity.
+The public `misaka endpoint --json` command exports the live local Iroh
+endpoint without control-plane bootstrap. The running Sister records its
+bound `EndpointAddr`, so the command does not bind a second endpoint with the
+same identity. Outbound Iroh CLI probes use ephemeral transport identities,
+while Sister listeners retain their persisted identity. Testament N17 verifies
+endpoint-first connection with discovery disabled and no control-plane peer.
 `--probe-only` allows raw handshake/echo/large measurements but rejects
 Transfer and Tunnel preambles. NetworkId is persisted per config directory
 and included in Hello/State, mDNS, peer persistence, and Direct TCP/Iroh

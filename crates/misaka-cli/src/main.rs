@@ -347,11 +347,15 @@ async fn async_main() -> Result<(), MisakaError> {
                                 .to_string(),
                         ));
                     }
-                    misaka_runtime::config::StreamBackend::Iroh(
-                        bind_iroh_backend(&data_dir, iroh_options.clone())
-                            .await
-                            .map_err(|error| MisakaError::Other(error.to_string()))?,
+                    let backend = bind_iroh_backend(&data_dir, iroh_options.clone())
+                        .await
+                        .map_err(|error| MisakaError::Other(error.to_string()))?;
+                    misaka_runtime::iroh_endpoint_store::IrohEndpointStore::save(
+                        &data_dir,
+                        &backend.endpoint_addr(),
                     )
+                    .map_err(|error| MisakaError::Other(error.to_string()))?;
+                    misaka_runtime::config::StreamBackend::Iroh(backend)
                 }
                 other => {
                     return Err(MisakaError::Other(format!(
@@ -479,24 +483,36 @@ async fn async_main() -> Result<(), MisakaError> {
                 .map_err(|error| MisakaError::Other(error.to_string()))?;
             let network_id = NetworkIdStore::load_or_init(&data_dir, requested_network_id)
                 .map_err(|error| MisakaError::Other(error.to_string()))?;
-            let backend = bind_iroh_backend(&data_dir, iroh_options)
-                .await
-                .map_err(|error| MisakaError::Other(error.to_string()))?;
-            let endpoint = NetworkEndpoint::Iroh(backend.endpoint_addr()).to_string();
+            let identity = IdentityStore::load()
+                .map_err(|error| MisakaError::Other(error.to_string()))?
+                .ok_or_else(|| MisakaError::Other("no local Sister identity".to_string()))?;
+            let endpoint_addr = misaka_runtime::iroh_endpoint_store::IrohEndpointStore::load(
+                &data_dir,
+            )
+            .map_err(|error| MisakaError::Other(error.to_string()))?
+            .ok_or_else(|| {
+                MisakaError::Other(
+                    "no persisted Iroh listener endpoint; start the Sister with --stream-backend iroh first"
+                        .to_string(),
+                )
+            })?;
+            let endpoint = NetworkEndpoint::Iroh(endpoint_addr).to_string();
             if json {
                 println!(
                     "{}",
                     serde_json::json!({
                         "network_id": network_id.to_string(),
+                        "sister_id": identity.id.as_u64(),
+                        "backend": "iroh",
                         "endpoint": endpoint,
-                        "endpoint_id": backend.endpoint().id().to_string(),
                     })
                 );
             } else {
                 println!("Network ID: {network_id}");
+                println!("Sister: #{}", identity.id.as_u64());
+                println!("Backend: iroh");
                 println!("Iroh endpoint: {endpoint}");
             }
-            backend.close().await;
         }
 
         Command::Relay { bind } => {

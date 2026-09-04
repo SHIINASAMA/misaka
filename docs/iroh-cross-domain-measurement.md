@@ -45,6 +45,11 @@ The endpoint record can now be passed directly to the ephemeral probe client:
 MISAKA_CONFIG_DIR=/path/to/sister-a-config misaka ps --json
 ```
 
+The endpoint JSON contains `network_id`, `sister_id`, `backend`, and the live
+`endpoint` value. Keep the complete `iroh://...` string when copying it
+between hosts; the record is public transport metadata and is not an
+authentication credential.
+
 The target Sister's `stream` value is an `iroh://` endpoint candidate. Pass it
 to the transport-neutral stream probe:
 
