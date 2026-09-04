@@ -153,7 +153,10 @@ for it with a deadline before killing the remote Sister; they do not use a
 fixed sleep to guess when the stream is established. N13 keeps an Iroh stream
 open and verifies selected path metadata through loopback introspection and
 the public `misaka ps --json --introspect` command, then verifies registry
-cleanup after the client exits.
+cleanup after the client exits. Because Iroh may initially use a relay and
+later select a direct path, the scenario polls until the route is known and
+RTT is available, and compares the public view with the same observed
+path-switch count instead of assuming a fixed route or zero switches.
 N19 seeds a durable v2 completed-chunk bitmap, then verifies the public
 `misaka cp --resume --parallel 4` path over real Iroh Sisters and exact final
 bytes with no leftover partial state. N20 performs two identical public

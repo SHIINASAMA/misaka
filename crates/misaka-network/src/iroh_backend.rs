@@ -10,7 +10,7 @@ use crate::{
     HANDSHAKE_TIMEOUT, IROH_ALPN, MAGIC, PROTOCOL_VERSION,
 };
 use futures_util::StreamExt;
-use iroh::endpoint::{Connection, IncomingAddr, RecvStream, SendStream};
+use iroh::endpoint::{Connection, IncomingAddr, PathList, RecvStream, SendStream};
 use iroh::{Endpoint, EndpointAddr};
 use misaka_core::NetworkId;
 use std::io;
@@ -18,7 +18,6 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 use std::task::{Context, Poll};
-use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 
 /// A backend backed by one Iroh endpoint.
@@ -118,6 +117,7 @@ impl IrohBackend {
             self.endpoint.clone(),
             connection,
             network_id,
+            None,
         ))
     }
 
@@ -129,6 +129,7 @@ impl IrohBackend {
 
     pub async fn accept_session_for_network(&self, network_id: NetworkId) -> Result<IrohSession> {
         let incoming = self.endpoint.accept().await.ok_or(NetworkError::Closed)?;
+        let incoming_addr = incoming.remote_addr();
         let accepting = incoming
             .accept()
             .map_err(|error| NetworkError::Iroh(error.to_string()))?;
@@ -140,6 +141,7 @@ impl IrohBackend {
             self.endpoint.clone(),
             connection,
             network_id,
+            Some(incoming_addr),
         ))
     }
 
@@ -175,11 +177,19 @@ impl std::fmt::Debug for IrohSession {
 }
 
 impl IrohSession {
-    fn new(endpoint: Endpoint, connection: Connection, network_id: NetworkId) -> Self {
-        let path_telemetry = IrohPathTelemetry::new(
-            connection.clone(),
-            connection_path_info(&endpoint, &connection),
-        );
+    fn new(
+        endpoint: Endpoint,
+        connection: Connection,
+        network_id: NetworkId,
+        incoming_addr: Option<IncomingAddr>,
+    ) -> Self {
+        let mut path = connection_path_info(&endpoint, &connection);
+        if path.route == "unknown" {
+            if let Some(incoming_addr) = incoming_addr.as_ref() {
+                path.route = incoming_route(incoming_addr).to_string();
+            }
+        }
+        let path_telemetry = IrohPathTelemetry::new(connection.clone(), path);
         Self {
             endpoint,
             connection,
@@ -419,7 +429,11 @@ impl NetworkListenerDriver for IrohListener {
                     &connection,
                     IrohPathTelemetry::new(
                         connection.clone(),
-                        connection_path_info(&self.endpoint, &connection),
+                        connection_path_info_with_incoming(
+                            &self.endpoint,
+                            &connection,
+                            &remote_addr,
+                        ),
                     ),
                 ),
                 peer_addr,
@@ -486,82 +500,94 @@ fn network_stream_with_telemetry(
 
 #[derive(Clone)]
 struct IrohPathTelemetry {
+    connection: Connection,
     state: Arc<RwLock<PathInfo>>,
     _selected_path: Arc<RwLock<Option<String>>>,
 }
 
 impl IrohPathTelemetry {
     fn new(connection: Connection, initial: PathInfo) -> Self {
+        let observer_connection = connection.clone();
         let state = Arc::new(RwLock::new(initial));
         let selected_path = Arc::new(RwLock::new(selected_path_key(&connection)));
         let observer_state = Arc::downgrade(&state);
         let observer_selected_path = Arc::downgrade(&selected_path);
         tokio::spawn(async move {
-            let mut events = connection.path_events();
-            let mut stop_check = tokio::time::interval(Duration::from_secs(1));
-            loop {
-                tokio::select! {
-                    event = events.next() => {
-                        let Some(event) = event else { break };
-                        let event_path_key = match event {
-                            iroh::endpoint::PathEvent::Selected { id, .. } => {
-                                Some(format!("{id:?}"))
-                            }
-                            iroh::endpoint::PathEvent::Lagged { .. } => selected_path_key(&connection),
-                            _ => None,
-                        };
-                        if event_path_key.is_some() {
-                            let Some(observer_state) = observer_state.upgrade() else { break };
-                            let Some(observer_selected_path) = observer_selected_path.upgrade() else { break };
-                            let (route, rtt_ms) = selected_path_metrics(&connection);
-                            let mut path = observer_state
-                                .write()
-                                .expect("Iroh path telemetry lock poisoned");
-                            let mut selected_path = observer_selected_path
-                                .write()
-                                .expect("Iroh selected path telemetry lock poisoned");
-                            let changed = event_path_key
-                                .as_ref()
-                                .is_some_and(|key| selected_path.as_ref() != Some(key));
-                            if changed {
-                                path.path_switches = path.path_switches.saturating_add(1);
-                                tracing::info!(
-                                    event = "iroh_path_switched",
-                                    peer_id = %connection.remote_id(),
-                                    from_route = %path.route,
-                                    to_route = %route,
-                                    path_switches = path.path_switches,
-                                    "Iroh selected path changed"
-                                );
-                            }
-                            *selected_path = event_path_key;
-                            path.route = route.to_string();
-                            path.rtt_ms = rtt_ms;
-                        }
-                    }
-                    _ = stop_check.tick() => {
-                        if observer_state.upgrade().is_none() { break; }
-                    }
+            let mut paths = observer_connection.paths_stream();
+            while let Some(paths) = paths.next().await {
+                let Some(observer_state) = observer_state.upgrade() else {
+                    break;
+                };
+                let Some(observer_selected_path) = observer_selected_path.upgrade() else {
+                    break;
+                };
+                let event_path_key = path_list_selected_key(&paths);
+                if event_path_key.is_none() {
+                    continue;
                 }
+                let (route, rtt_ms) = path_list_metrics(&paths);
+                let mut path = observer_state
+                    .write()
+                    .expect("Iroh path telemetry lock poisoned");
+                let mut selected_path = observer_selected_path
+                    .write()
+                    .expect("Iroh selected path telemetry lock poisoned");
+                let changed = selected_path.is_some()
+                    && event_path_key
+                        .as_ref()
+                        .is_some_and(|key| selected_path.as_ref() != Some(key));
+                if changed {
+                    path.path_switches = path.path_switches.saturating_add(1);
+                    tracing::info!(
+                        event = "iroh_path_switched",
+                        peer_id = %observer_connection.remote_id(),
+                        from_route = %path.route,
+                        to_route = %route,
+                        path_switches = path.path_switches,
+                        "Iroh selected path changed"
+                    );
+                }
+                *selected_path = event_path_key;
+                path.route = route.to_string();
+                path.rtt_ms = rtt_ms;
             }
         });
         Self {
+            connection,
             state,
             _selected_path: selected_path,
         }
     }
 
     fn snapshot(&self) -> PathInfo {
-        self.state
+        let mut path = self
+            .state
             .read()
             .expect("Iroh path telemetry lock poisoned")
-            .clone()
+            .clone();
+        // A stream can be registered immediately after the QUIC handshake,
+        // before the first path-selection event reaches the watcher. Refresh
+        // the current route synchronously so observers do not retain an
+        // initial `unknown` value forever.
+        let (route, rtt_ms) = selected_path_metrics(&self.connection);
+        if route != "unknown" {
+            path.route = route.to_string();
+            path.rtt_ms = rtt_ms;
+        }
+        path
     }
 }
 
 fn selected_path_key(connection: &Connection) -> Option<String> {
     connection
         .paths()
+        .iter()
+        .find(|path| path.is_selected())
+        .map(|path| format!("{:?}", path.id()))
+}
+
+fn path_list_selected_key(paths: &PathList<'_>) -> Option<String> {
+    paths
         .iter()
         .find(|path| path.is_selected())
         .map(|path| format!("{:?}", path.id()))
@@ -582,9 +608,33 @@ fn connection_path_info(endpoint: &Endpoint, connection: &Connection) -> PathInf
     .with_rtt_ms(rtt_ms)
 }
 
+fn connection_path_info_with_incoming(
+    endpoint: &Endpoint,
+    connection: &Connection,
+    incoming_addr: &IncomingAddr,
+) -> PathInfo {
+    let mut path = connection_path_info(endpoint, connection);
+    if path.route == "unknown" {
+        path.route = incoming_route(incoming_addr).to_string();
+    }
+    path
+}
+
+fn incoming_route(incoming_addr: &IncomingAddr) -> &'static str {
+    match incoming_addr {
+        IncomingAddr::Ip(_) => "direct",
+        IncomingAddr::Relay { .. } => "relay",
+        IncomingAddr::Custom(_) => "custom",
+        _ => "unknown",
+    }
+}
+
 fn selected_path_metrics(connection: &Connection) -> (&'static str, Option<u64>) {
-    connection
-        .paths()
+    path_list_metrics(&connection.paths())
+}
+
+fn path_list_metrics(paths: &PathList<'_>) -> (&'static str, Option<u64>) {
+    paths
         .iter()
         .find(|path| path.is_selected())
         .map(|path| {

@@ -39,6 +39,11 @@ impl RestartSpec {
     pub fn append_args<const N: usize>(&mut self, args: [&str; N]) {
         self.args.extend(args.into_iter().map(str::to_string));
     }
+
+    /// Append one dynamically discovered launch argument.
+    pub fn append_arg(&mut self, arg: impl Into<String>) {
+        self.args.push(arg.into());
+    }
 }
 
 /// Parameters for constructing one isolated Sister process.

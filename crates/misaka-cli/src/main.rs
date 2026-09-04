@@ -90,6 +90,11 @@ enum Command {
         #[arg(long)]
         peer: Vec<String>,
 
+        /// Iroh endpoint used to bootstrap the authenticated control plane;
+        /// may be repeated when the local backend is Iroh.
+        #[arg(long)]
+        iroh_peer: Vec<String>,
+
         /// Set the local nickname.
         #[arg(long)]
         nickname: Option<String>,
@@ -379,6 +384,7 @@ enum HumanCommand {
 }
 
 fn main() -> Result<(), MisakaError> {
+    misaka_network::tls::install_crypto_provider();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .thread_stack_size(8 * 1024 * 1024)
         .enable_all()
@@ -415,6 +421,7 @@ async fn async_main() -> Result<(), MisakaError> {
             stream_backend,
             stream_trust_cert,
             peer,
+            iroh_peer,
             nickname,
             discovery,
             heartbeat,
@@ -602,6 +609,17 @@ async fn async_main() -> Result<(), MisakaError> {
                     .collect(),
             )
             .await?;
+            if !iroh_peer.is_empty() {
+                for raw_endpoint in &iroh_peer {
+                    let endpoint = raw_endpoint.parse::<NetworkEndpoint>().map_err(|error| {
+                        MisakaError::Other(format!("invalid --iroh-peer endpoint: {error}"))
+                    })?;
+                    runtime
+                        .add_known_iroh_peer(endpoint)
+                        .await
+                        .map_err(|error| MisakaError::Other(error.to_string()))?;
+                }
+            }
             let relay_service = if relay {
                 let options = misaka_relay::RelayOptions {
                     bind: relay_bind,
@@ -1519,6 +1537,11 @@ async fn run_stream_test(
     } = options;
     let connect_started = tokio::time::Instant::now();
     let is_iroh_endpoint = matches!(&endpoint, NetworkEndpoint::Iroh(_));
+    let iroh_auth = if is_iroh_endpoint {
+        load_cli_authenticated_session(network_id)?
+    } else {
+        None
+    };
     let mut stream = if secure {
         let NetworkEndpoint::Tcp(addr) = endpoint else {
             return Err("--secure only supports a TCP endpoint".to_string());
@@ -1556,7 +1579,11 @@ async fn run_stream_test(
                 .map_err(|error| error.to_string())?
             }
             NetworkEndpoint::Iroh(endpoint) => {
-                let backend = bind_iroh_client_backend(iroh_options).await?;
+                let backend = if iroh_auth.is_some() {
+                    bind_iroh_client_backend_for_local_config(iroh_options).await?
+                } else {
+                    bind_iroh_client_backend(iroh_options).await?
+                };
                 tokio::time::timeout(
                     Duration::from_secs(10),
                     backend.connect_for_network(NetworkEndpoint::Iroh(endpoint), network_id),
@@ -1569,7 +1596,7 @@ async fn run_stream_test(
     };
 
     if is_iroh_endpoint {
-        if let Some(auth) = load_cli_authenticated_session(network_id)? {
+        if let Some(auth) = iroh_auth {
             stream =
                 misaka_runtime::authenticated_session::authenticate_client(stream, &auth, None)
                     .await
@@ -2211,7 +2238,11 @@ impl TransferV2Transport {
                             .to_string(),
                     );
                 }
-                let backend = bind_iroh_client_backend(iroh_options.clone()).await?;
+                let backend = if load_cli_authenticated_session(local_network_id()?)?.is_some() {
+                    bind_iroh_client_backend_for_local_config(iroh_options.clone()).await?
+                } else {
+                    bind_iroh_client_backend(iroh_options.clone()).await?
+                };
                 Ok(Self::Iroh {
                     backend,
                     endpoint: endpoint_addr,
@@ -2760,7 +2791,12 @@ async fn connect_peer_stream(
         if peer_certificate.is_some() {
             return Err("Iroh streams use endpoint-authenticated encryption; do not provide a TLS certificate".to_string());
         }
-        let backend = bind_iroh_client_backend(iroh_options).await?;
+        let auth = load_cli_authenticated_session(network_id)?;
+        let backend = if auth.is_some() {
+            bind_iroh_client_backend_for_local_config(iroh_options).await?
+        } else {
+            bind_iroh_client_backend(iroh_options).await?
+        };
         let stream = tokio::time::timeout(
             Duration::from_secs(10),
             backend.connect_for_network(endpoint, network_id),
@@ -2768,7 +2804,7 @@ async fn connect_peer_stream(
         .await
         .map_err(|_| "Iroh stream connect timed out".to_string())?
         .map_err(|error| error.to_string())?;
-        if let Some(auth) = load_cli_authenticated_session(network_id)? {
+        if let Some(auth) = auth {
             misaka_runtime::authenticated_session::authenticate_client(stream, &auth, Some(peer_id))
                 .await
                 .map_err(|error| format!("Iroh stream authentication failed: {error}"))?
@@ -2932,6 +2968,23 @@ async fn bind_iroh_client_backend(
     iroh_options: IrohTransportOptions,
 ) -> Result<misaka_network::IrohBackend, String> {
     let secret_key = iroh::SecretKey::generate();
+    bind_iroh_client_backend_with_secret_key(secret_key, iroh_options).await
+}
+
+async fn bind_iroh_client_backend_for_local_config(
+    iroh_options: IrohTransportOptions,
+) -> Result<misaka_network::IrohBackend, String> {
+    let data_dir = IdentityStore::config_dir().map_err(|error| error.to_string())?;
+    let secret_key =
+        misaka_runtime::iroh_identity_store::IrohIdentityStore::load_or_init(&data_dir)
+            .map_err(|error| error.to_string())?;
+    bind_iroh_client_backend_with_secret_key(secret_key, iroh_options).await
+}
+
+async fn bind_iroh_client_backend_with_secret_key(
+    secret_key: iroh::SecretKey,
+    iroh_options: IrohTransportOptions,
+) -> Result<misaka_network::IrohBackend, String> {
     match (iroh_options.relay, iroh_options.relay_only) {
         (Some(relay_url), true) => {
             misaka_network::IrohBackend::bind_with_secret_key_and_relay_only(secret_key, relay_url)

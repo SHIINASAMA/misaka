@@ -10,6 +10,14 @@ use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
+/// Install the rustls provider used by all Misaka binaries before any TLS or
+/// Iroh configuration is constructed. rustls has both `ring` and `aws-lc-rs`
+/// enabled through the workspace dependency graph, so automatic selection is
+/// intentionally unavailable.
+pub fn install_crypto_provider() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+}
+
 /// A certificate and private key used for mutual TLS.
 ///
 /// The certificate is intentionally kept as DER bytes so callers can persist

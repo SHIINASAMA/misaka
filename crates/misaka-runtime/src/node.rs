@@ -232,6 +232,34 @@ impl SisterNode {
         self.transport.send_to(addr, env).await
     }
 
+    /// Bootstrap the Iroh control plane from one explicit endpoint. The peer
+    /// identity is learned from the authenticated Hello response; no legacy
+    /// TCP control listener is required.
+    pub async fn add_known_iroh_peer(&self, endpoint: NetworkEndpoint) -> crate::Result<()> {
+        let NetworkEndpoint::Iroh(endpoint) = endpoint else {
+            return Err(crate::Error::Other(
+                "Iroh bootstrap requires an iroh:// endpoint".to_string(),
+            ));
+        };
+        let StreamBackend::Iroh(backend) = &self.config.stream_backend else {
+            return Err(crate::Error::Other(
+                "Iroh bootstrap requires the Iroh stream backend".to_string(),
+            ));
+        };
+        let reply = crate::control_channel::send(
+            backend,
+            NetworkEndpoint::Iroh(endpoint),
+            self.config.network_id,
+            self.config.authenticated_session.as_ref(),
+            &self.hello_envelope()?,
+            true,
+        )
+        .await
+        .map_err(|error| crate::Error::Network(error.to_string()))?
+        .ok_or_else(|| crate::Error::Network("Iroh Hello returned no response".to_string()))?;
+        self.record_hello_reply(reply).await
+    }
+
     /// 单向发送 (不等待响应)
     pub async fn send_fire(&self, addr: SocketAddr, env: &Envelope) -> crate::Result<()> {
         self.transport.send_fire(addr, env).await

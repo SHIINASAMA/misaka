@@ -63,7 +63,32 @@ pub(crate) async fn dispatch_envelope(
                 hello.stream_certificate,
             )
             .await;
-            let _ = node.send_peer_records(env.from).await;
+            // Return the Hello response before pushing the optional peer
+            // record batch. Iroh bootstrap callers cannot start their own
+            // accept loop until this response completes, so waiting here
+            // would deadlock when the batch is sent back over Iroh.
+            let peer_node = node.clone();
+            let peer_id = env.from;
+            tokio::spawn(async move {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    peer_node.send_peer_records(peer_id),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        tracing::debug!(peer_id, %error, "deferred peer record push failed");
+                    }
+                    Err(_) => {
+                        tracing::debug!(
+                            peer_id,
+                            error = "peer record push timed out",
+                            "deferred peer record push failed"
+                        );
+                    }
+                }
+            });
             let reply = Envelope::new(
                 node.config.network_id,
                 MessageType::Hello,

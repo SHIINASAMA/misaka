@@ -7,7 +7,9 @@ use crate::observer;
 use crate::run_manager::{alloc_port, misaka_binary};
 use crate::supervisor::{build_spawn, CliProcess, SisterProcess, SpawnConfig};
 use crate::types::{Artifacts, Manifest, Report, RunLayout, ScenarioError, SisterEntry};
-use misaka_core::identity::SisterIdentity;
+use misaka_core::identity::{
+    MembershipCertificate, NetworkAuthority, NetworkId, SisterIdentity, SisterKeyPair,
+};
 use misaka_core::introspection::IntrospectionSnapshot;
 use std::collections::HashMap;
 use std::fs::OpenOptions;
@@ -36,6 +38,9 @@ pub struct Context {
     pub sisters: HashMap<String, SisterProcess>,
     pub entries: HashMap<String, SisterEntry>,
     pub manifest: Manifest,
+    /// Authority material used only to provision isolated Iroh test peers.
+    /// Testament never sends the private key to a running Sister.
+    iroh_authority: Option<(NetworkAuthority, misaka_core::AuthorityKeyPair)>,
 }
 
 impl Context {
@@ -54,6 +59,7 @@ impl Context {
             sisters: HashMap::new(),
             entries: HashMap::new(),
             manifest,
+            iroh_authority: None,
         }
     }
 
@@ -391,7 +397,6 @@ impl Context {
     pub fn start_iroh_pair(&mut self) -> Result<(), ScenarioError> {
         let a_ports = allocate_ports()?;
         let b_ports = allocate_ports()?;
-        let a_addr: SocketAddr = format!("127.0.0.1:{}", a_ports.0).parse().unwrap();
 
         let (mut a_entry, mut a_command, mut a_restart) = build_spawn(SpawnConfig {
             layout: &self.layout,
@@ -414,25 +419,55 @@ impl Context {
             stream_port: b_ports.1,
             introspect_port: b_ports.2,
             binary: &self.binary,
-            peers: &[a_addr],
+            peers: &[],
             discovery: "manual",
             heartbeat: self.heartbeat,
             peer_timeout: self.peer_timeout,
         });
         a_entry.stream_backend = "iroh".to_string();
         b_entry.stream_backend = "iroh".to_string();
+        let (authority, authority_key) = self.ensure_iroh_authority();
+        provision_iroh_membership(
+            &a_entry.config_dir,
+            10001,
+            "alpha",
+            a_ports.0,
+            &authority,
+            &authority_key,
+        )?;
+        provision_iroh_membership(
+            &b_entry.config_dir,
+            10002,
+            "beta",
+            b_ports.0,
+            &authority,
+            &authority_key,
+        )?;
         a_command.arg("--stream-backend").arg("iroh");
         b_command.arg("--stream-backend").arg("iroh");
         a_restart.append_args(["--stream-backend", "iroh"]);
         b_restart.append_args(["--stream-backend", "iroh"]);
 
         self.spawn_only("a", a_entry, a_command, a_restart)?;
+        if let Err(error) = self.wait_until_ready("a") {
+            self.teardown();
+            return Err(error);
+        }
+        let endpoint = self
+            .run_cli("a", &["endpoint", "--json"])?
+            .parse::<serde_json::Value>()
+            .map_err(|error| ScenarioError::assertion(format!("decode Iroh endpoint: {error}")))?
+            .get("endpoint")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| ScenarioError::assertion("Iroh endpoint export has no endpoint"))?
+            .to_string();
+        b_command.arg("--iroh-peer").arg(&endpoint);
+        b_restart.append_arg("--iroh-peer");
+        b_restart.append_arg(endpoint);
         self.spawn_only("b", b_entry, b_command, b_restart)?;
-        for alias in ["a", "b"] {
-            if let Err(error) = self.wait_until_ready(alias) {
-                self.teardown();
-                return Err(error);
-            }
+        if let Err(error) = self.wait_until_ready("b") {
+            self.teardown();
+            return Err(error);
         }
         Ok(())
     }
@@ -454,6 +489,20 @@ impl Context {
             heartbeat: self.heartbeat,
             peer_timeout: self.peer_timeout,
         });
+        let (authority, authority_key) = self.ensure_iroh_authority();
+        let (id, nickname) = match alias {
+            "a" => (10001, "a"),
+            "b" => (10002, "b"),
+            _ => (10000 + self.entries.len() as u64, alias),
+        };
+        provision_iroh_membership(
+            &entry.config_dir,
+            id,
+            nickname,
+            ports.0,
+            &authority,
+            &authority_key,
+        )?;
         entry.stream_backend = "iroh".to_string();
         command
             .arg("--stream-backend")
@@ -462,6 +511,17 @@ impl Context {
         restart.append_args(["--stream-backend", "iroh", "--probe-only"]);
         self.spawn_only(alias, entry, command, restart)?;
         self.wait_until_ready(alias)
+    }
+
+    fn ensure_iroh_authority(&mut self) -> (NetworkAuthority, misaka_core::AuthorityKeyPair) {
+        if let Some((authority, key)) = &self.iroh_authority {
+            return (*authority, key.clone());
+        }
+        let network_id = NetworkId::parse("00000000-0000-0000-0000-000000000001")
+            .expect("Testament network id is a valid UUID");
+        let (authority, key) = NetworkAuthority::generate(network_id);
+        self.iroh_authority = Some((authority, key.clone()));
+        (authority, key)
     }
 
     pub fn introspect(&self, alias: &str) -> Result<IntrospectionSnapshot, ScenarioError> {
@@ -1063,6 +1123,76 @@ fn provision_tls_identity(
     std::fs::write(identity_path, json)
         .map_err(|e| ScenarioError::infra(format!("write identity: {e}")))?;
     Ok(certificate_path)
+}
+
+fn provision_iroh_membership(
+    config_dir: &str,
+    id: u64,
+    nickname: &str,
+    listen_port: u16,
+    authority: &NetworkAuthority,
+    authority_key: &misaka_core::AuthorityKeyPair,
+) -> Result<(), ScenarioError> {
+    let directory = Path::new(config_dir);
+    std::fs::create_dir_all(directory)
+        .map_err(|e| ScenarioError::infra(format!("create Iroh config directory: {e}")))?;
+    let sister_key = SisterKeyPair::generate();
+    std::fs::write(directory.join("sister-identity-key"), sister_key.to_bytes())
+        .map_err(|e| ScenarioError::infra(format!("write Sister identity key: {e}")))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            directory.join("sister-identity-key"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .map_err(|e| ScenarioError::infra(format!("protect Sister identity key: {e}")))?;
+    }
+
+    let identity = SisterIdentity::new(
+        id,
+        nickname.to_string(),
+        "testament-iroh-host".to_string(),
+        "testament".to_string(),
+        env!("CARGO_PKG_VERSION").to_string(),
+        listen_port,
+    );
+    std::fs::write(
+        directory.join("identity.json"),
+        serde_json::to_vec_pretty(&identity)
+            .map_err(|e| ScenarioError::infra(format!("serialize Iroh identity: {e}")))?,
+    )
+    .map_err(|e| ScenarioError::infra(format!("write Iroh identity: {e}")))?;
+    std::fs::write(
+        directory.join("network.json"),
+        serde_json::to_vec_pretty(authority)
+            .map_err(|e| ScenarioError::infra(format!("serialize Iroh authority: {e}")))?,
+    )
+    .map_err(|e| ScenarioError::infra(format!("write Iroh authority: {e}")))?;
+
+    let membership = MembershipCertificate::issue(
+        authority,
+        authority_key,
+        sister_key.public_key(),
+        id,
+        unix_now(),
+        None,
+        id,
+    );
+    std::fs::write(
+        directory.join("membership.bin"),
+        bincode::serialize(&membership)
+            .map_err(|e| ScenarioError::infra(format!("serialize Iroh membership: {e}")))?,
+    )
+    .map_err(|e| ScenarioError::infra(format!("write Iroh membership: {e}")))?;
+    Ok(())
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 fn t01_standalone(ctx: &mut Context) -> Result<(), ScenarioError> {
@@ -2351,10 +2481,9 @@ fn n13_iroh_active_path_observability(ctx: &mut Context) -> Result<(), ScenarioE
         "b reports an active Iroh stream",
         Duration::from_secs(8),
         |snapshot| {
-            snapshot
-                .active_streams
-                .iter()
-                .any(|stream| stream.backend == "iroh")
+            snapshot.active_streams.iter().any(|stream| {
+                stream.backend == "iroh" && stream.route != "unknown" && stream.rtt_ms.is_some()
+            })
         },
     )?;
     let snapshot = observer::fetch(b_introspect, Duration::from_millis(500))
@@ -2364,18 +2493,17 @@ fn n13_iroh_active_path_observability(ctx: &mut Context) -> Result<(), ScenarioE
         .iter()
         .find(|stream| stream.backend == "iroh")
         .ok_or_else(|| ScenarioError::assertion("active Iroh stream disappeared unexpectedly"))?;
-    assert::assert_eq(
-        active.route.clone(),
-        "direct".to_string(),
-        "active Iroh route on loopback",
-    )?;
+    if !matches!(active.route.as_str(), "direct" | "relay" | "custom") {
+        return Err(ScenarioError::assertion(format!(
+            "active Iroh route is not a recognized transport path: {active:?}"
+        )));
+    }
     if active.local_endpoint.is_none()
         || !active
             .remote_endpoint
             .as_deref()
             .is_some_and(|endpoint| endpoint.starts_with("iroh://"))
         || active.rtt_ms.is_none()
-        || active.path_switches != 0
         || active.rx_bytes == 0
     {
         return Err(ScenarioError::assertion(format!(
@@ -2398,18 +2526,16 @@ fn n13_iroh_active_path_observability(ctx: &mut Context) -> Result<(), ScenarioE
         .ok_or_else(|| ScenarioError::assertion("misaka ps did not report active Iroh stream"))?;
     assert::assert_eq(
         ps_active.get("route").and_then(serde_json::Value::as_str),
-        Some("direct"),
+        Some(active.route.as_str()),
         "misaka ps active Iroh route",
     )?;
-    if ps_active
-        .get("path_switches")
-        .and_then(serde_json::Value::as_u64)
-        != Some(0)
-    {
-        return Err(ScenarioError::assertion(
-            "misaka ps did not report initial Iroh path switch count",
-        ));
-    }
+    assert::assert_eq(
+        ps_active
+            .get("path_switches")
+            .and_then(serde_json::Value::as_u64),
+        Some(active.path_switches),
+        "misaka ps Iroh path switch count",
+    )?;
 
     client.terminate();
     let _ = client

@@ -171,6 +171,12 @@ impl SisterRuntime {
         }
     }
 
+    /// Bootstrap an Iroh-only control connection from an explicit endpoint.
+    /// This is intended for enrollment and deterministic external tests.
+    pub async fn add_known_iroh_peer(&self, endpoint: NetworkEndpoint) -> crate::Result<()> {
+        self.node.add_known_iroh_peer(endpoint).await
+    }
+
     /// Start discovery, state exchange, execution, cleanup, and work stealing.
     /// Returns after the shared shutdown handle is cancelled.
     pub async fn run(self) -> crate::Result<()> {
@@ -1839,7 +1845,16 @@ mod tests {
             .add_known_discovered_peer(&discovered)
             .await
             .unwrap();
-        let received = client_node.peers.peer_record(3).await;
+        let received = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if let Some(record) = client_node.peers.peer_record(3).await {
+                    break Some(record);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or(None);
         assert!(received.is_some_and(|record| record.verify()));
 
         server_shutdown.cancel();

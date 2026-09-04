@@ -6,6 +6,7 @@ description = "Misaka Network external experiment harness - never part of the ne
 
 [dependencies]
 misaka-core = { path = "../misaka-core" }
+bincode.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
