@@ -1,0 +1,47 @@
+:root {
+  color-scheme: dark;
+  background: #0b1020;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; background: #0b1020; }
+button, a { -webkit-tap-highlight-color: transparent; }
+
+.app-shell {
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at 85% -10%, rgba(103, 232, 249, 0.12), transparent 32rem),
+    radial-gradient(circle at 5% 95%, rgba(139, 92, 246, 0.09), transparent 28rem),
+    #0b1020;
+}
+
+.app-shell::before {
+  content: "";
+  pointer-events: none;
+  position: fixed;
+  inset: 0;
+  opacity: 0.22;
+  background-image: linear-gradient(rgba(255,255,255,.025) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.025) 1px, transparent 1px);
+  background-size: 42px 42px;
+  mask-image: linear-gradient(to bottom, black, transparent 80%);
+}
+
+.page-content { position: relative; max-width: 1440px; margin: 0 auto; }
+.eyebrow { color: #67e8f9; letter-spacing: .14em; text-transform: uppercase; font-size: .68rem; font-weight: 700; }
+.mono { font-family: var(--mantine-font-family-monospace); }
+.muted { color: #8490aa; }
+.focus-ring:focus-visible { outline: 2px solid #67e8f9; outline-offset: 3px; }
+
+.pulse-rail { position: relative; display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+.pulse-rail::before { content: ""; position: absolute; top: 25px; left: 6%; right: 6%; height: 1px; background: linear-gradient(90deg, transparent, rgba(103,232,249,.6), rgba(139,92,246,.6), transparent); }
+.pulse-node { position: relative; z-index: 1; text-align: center; }
+.pulse-dot { width: 12px; height: 12px; margin: 7px auto 10px; border-radius: 50%; border: 3px solid #131b2e; background: #a7f3d0; box-shadow: 0 0 0 4px rgba(167,243,208,.12), 0 0 18px rgba(103,232,249,.5); }
+.pulse-dot.offline { background: #667085; box-shadow: 0 0 0 4px rgba(102,112,133,.12); }
+
+@media (prefers-reduced-motion: no-preference) {
+  .pulse-dot { animation: breathe 3.2s ease-in-out infinite; }
+}
+@keyframes breathe { 50% { transform: scale(1.16); box-shadow: 0 0 0 7px rgba(167,243,208,.08), 0 0 24px rgba(103,232,249,.65); } }
+@media (max-width: 700px) { .pulse-rail::before { display: none; } .pulse-rail { grid-template-columns: repeat(2, 1fr); } }
