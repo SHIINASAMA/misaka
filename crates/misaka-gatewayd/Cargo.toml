@@ -1,0 +1,18 @@
+[package]
+name = "misaka-gatewayd"
+version.workspace = true
+edition.workspace = true
+description = "Native reference Misaka Gateway: signed PeerRecord discovery service (Cloudflare Workers parity host)"
+
+[dependencies]
+axum.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+rand.workspace = true
+tracing.workspace = true
+misaka-core = { path = "../misaka-core" }
+
+[dev-dependencies]
+tower.workspace = true

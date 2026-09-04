@@ -7,11 +7,18 @@
 //! `serde` is acceptable because these types are exchanged between packages
 //! and exposed through machine-readable introspection.
 
+pub mod gateway;
 pub mod identity;
 pub mod introspection;
 pub mod job;
 pub mod peer;
 pub mod protocol;
+
+pub use gateway::{
+    announce_body_bytes, peers_body_bytes, record_matches_membership, verify_request,
+    GatewayAnnounceRequest, GatewayAuth, GatewayAuthError, GatewayInfo, GatewayPeersRequest,
+    GatewayPeersResponse, GATEWAY_PROTOCOL_VERSION,
+};
 
 pub use identity::{
     AuthorityKeyPair, AuthorityPublicKey, AuthoritySignature, CommandAuthorization, HumanId,

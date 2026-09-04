@@ -2109,6 +2109,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "misaka-gatewayd"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "misaka-core",
+ "rand 0.8.8",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tower",
+ "tracing",
+]
+
+[[package]]
 name = "misaka-network"
 version = "0.1.0"
 dependencies = [
