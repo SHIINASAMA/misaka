@@ -13,7 +13,7 @@ pub mod job;
 pub mod peer;
 pub mod protocol;
 
-pub use identity::{Nickname, SisterId, SisterIdentity};
+pub use identity::{NetworkId, Nickname, SisterId, SisterIdentity};
 pub use introspection::{
     ActiveStreamSnapshot, IntrospectionSnapshot, JobSnapshot, PeerSnapshot, ResourceSnapshot,
 };

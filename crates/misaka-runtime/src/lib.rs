@@ -18,6 +18,7 @@ pub mod introspection;
 pub mod iroh_identity_store;
 pub mod job_manager;
 pub mod network;
+pub mod network_id_store;
 pub mod node;
 pub mod peer_registry;
 pub mod peer_service;
