@@ -2099,6 +2099,8 @@ async fn run_copy_v2(
     let digest = hash_file_v1(&mut file).await?;
     let chunk_size = u64::from(TRANSFER_V1_CHUNK_SIZE);
     let chunk_count = size.div_ceil(chunk_size);
+    let network_id = local_network_id()?;
+    let transfer_constraints = vec![format!("destination={}", remote_path.display())];
     let base_request = TransferV2Request {
         operation: TransferV2Operation::Prepare,
         destination: remote_path.display().to_string(),
@@ -2111,10 +2113,10 @@ async fn run_copy_v2(
         len: 0,
         chunk_digest: [0; 32],
         authorization: load_cli_authorization(
-            local_network_id()?,
+            network_id,
             None,
             Permission::FileSend,
-            vec![format!("destination={}", remote_path.display())],
+            transfer_constraints.clone(),
         )?,
     };
     let transport = TransferV2Transport::new(
@@ -2148,7 +2150,16 @@ async fn run_copy_v2(
     for index in (0..chunk_count).filter(|index| !completed.contains(index)) {
         let source = source.to_owned();
         let transport = transport.clone();
-        let request = base_request.clone();
+        let request = TransferV2Request {
+            operation: TransferV2Operation::Chunk,
+            authorization: load_cli_authorization(
+                network_id,
+                None,
+                Permission::FileSend,
+                transfer_constraints.clone(),
+            )?,
+            ..base_request.clone()
+        };
         workers.spawn(
             async move { send_transfer_v2_chunk(&source, &transport, request, index).await },
         );
@@ -2185,6 +2196,12 @@ async fn run_copy_v2(
         &transport,
         TransferV2Request {
             operation: TransferV2Operation::Finalize,
+            authorization: load_cli_authorization(
+                network_id,
+                None,
+                Permission::FileSend,
+                transfer_constraints,
+            )?,
             ..base_request
         },
     )

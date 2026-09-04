@@ -299,8 +299,8 @@ fn now_secs() -> u64 {
 mod tests {
     use super::{authenticate_client, authenticate_server, AuthenticatedSessionConfig};
     use misaka_core::{
-        IrohEndpointId, MembershipCertificate, NetworkAuthority, NetworkId, SisterKeyPair,
-        TransportBinding,
+        IrohEndpointId, MembershipCertificate, MembershipKind, NetworkAuthority, NetworkId,
+        RevocationRecord, SisterKeyPair, TransportBinding,
     };
     use misaka_network::{IrohBackend, NetworkEndpoint};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -401,5 +401,51 @@ mod tests {
         assert_eq!(&response, b"ok");
         server_task.await.unwrap();
         client_backend.close().await;
+    }
+
+    #[test]
+    fn authenticated_session_reloads_sister_revocation_state() {
+        let directory =
+            std::env::temp_dir().join(format!("misaka-auth-revocation-{}", uuid::Uuid::new_v4()));
+        let network_id = NetworkId::generate();
+        let (authority, authority_key) = NetworkAuthority::generate(network_id);
+        let sister_key = SisterKeyPair::generate();
+        let auth = config(
+            network_id,
+            authority,
+            &authority_key,
+            7,
+            sister_key,
+            IrohEndpointId::from_bytes([7u8; 32]),
+        )
+        .with_revocation_directory(directory.clone());
+
+        assert!(!super::membership_is_revoked(
+            &auth,
+            MembershipKind::Sister,
+            auth.membership_certificate.serial,
+        )
+        .unwrap());
+        crate::revocation_store::RevocationStore::append(
+            &directory,
+            &authority,
+            RevocationRecord::issue(
+                &authority,
+                &authority_key,
+                MembershipKind::Sister,
+                auth.membership_certificate.serial,
+                super::now_secs(),
+                "retired".into(),
+            ),
+        )
+        .unwrap();
+        assert!(super::membership_is_revoked(
+            &auth,
+            MembershipKind::Sister,
+            auth.membership_certificate.serial,
+        )
+        .unwrap());
+
+        let _ = std::fs::remove_dir_all(directory);
     }
 }

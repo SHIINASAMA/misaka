@@ -6,7 +6,7 @@
 
 use crate::node::{now_secs, SisterNode};
 use misaka_core::protocol::*;
-use misaka_core::{Permission, Principal};
+use misaka_core::{MembershipKind, Permission, Principal};
 use tokio::net::TcpStream;
 
 #[cfg(test)]
@@ -215,6 +215,19 @@ pub(crate) async fn dispatch_envelope(
                 {
                     return Err(crate::Error::Protocol(
                         "human job authorization is invalid for this Sister".to_string(),
+                    ));
+                }
+                if crate::revocation_store::RevocationStore::is_revoked(
+                    &node.config.data_dir,
+                    &authority,
+                    authorization.network_id,
+                    MembershipKind::Human,
+                    authorization.membership.serial,
+                )
+                .map_err(|error| crate::Error::Protocol(error.to_string()))?
+                {
+                    return Err(crate::Error::Protocol(
+                        "human job authorization membership has been revoked".to_string(),
                     ));
                 }
                 if job.executor == 0 || job.executor == node.identity.id.as_u64() {

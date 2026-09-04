@@ -10,7 +10,7 @@ MembershipCertificate
   authority-signed admission for one Sister identity
 
 RevocationRecord
-  authority-signed invalidation of a membership serial
+  authority-signed invalidation of a typed membership serial
 ```
 
 ## Network authority
@@ -49,10 +49,13 @@ session checks; a matching NetworkId alone is not membership.
 ## Revocation skeleton
 
 Revocations are stored in `revocations.json` as signed records containing the
-NetworkId, membership serial, timestamp and reason. The store rejects records
-not signed by the configured authority and provides serial lookup. Distribution
-over the authenticated Control Channel is deferred until the session/control
-plane phases; no CRL server is introduced here.
+NetworkId, membership kind (`Sister` or `Human`), membership serial, timestamp
+and reason. The kind is part of the signed canonical record and every lookup,
+so equal Sister and Human serials cannot collide. The store rejects records not
+signed by the configured authority and runtime authentication reloads the local
+store at each session/authorization decision. Distribution over the
+authenticated Control Channel is deferred until the session/control-plane
+phases; no CRL server is introduced here.
 
 Phase C supplies the trust and persistence primitives. It does not yet admit
 network traffic: ClientHello/ServerHello, possession proof and service gating

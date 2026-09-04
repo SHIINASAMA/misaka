@@ -29,9 +29,10 @@ the authority signature, role permission, time window, target, and persists
 the nonce before queueing the job. Work stealing preserves the authorization
 unchanged.
 
-Nodes without human material continue to accept the existing compatibility
-mode used by the current local Testament scenarios. This mode is transitional
-and does not claim human authorization.
+Production nodes reject a side-effecting remote operation when its Human
+Authorization is missing. Local compatibility scenarios must opt in explicitly
+with `misaka start --insecure-development`; absence of human files never
+silently enables this mode.
 
 ## Stream authorization
 
@@ -53,5 +54,6 @@ requests; only Prepare consumes the nonce because those requests are one
 logical transfer. Tunnel and SSH issue a fresh authorization for every local
 connection, so multiple forwarded connections do not reuse a nonce.
 
-The no-human-material compatibility path remains available for the existing
-local Testament scenarios. It is not an authenticated deployment mode.
+The no-human-material compatibility path remains available only through the
+explicit `--insecure-development` startup flag used by local Testament
+scenarios. It is not an authenticated deployment mode.
