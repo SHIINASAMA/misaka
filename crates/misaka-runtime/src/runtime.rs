@@ -1375,7 +1375,7 @@ async fn authorize_stream_operation(
 ) -> std::io::Result<()> {
     require_stream_authorization(
         authorization,
-        node.map_or(true, |node| node.config.allow_unauthenticated_operations),
+        node.is_none_or(|node| node.config.allow_unauthenticated_operations),
     )?;
     let Some(authorization) = authorization else {
         return Ok(());

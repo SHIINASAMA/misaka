@@ -9,17 +9,6 @@ use misaka_core::protocol::*;
 use misaka_core::{MembershipKind, Permission, Principal};
 use tokio::net::TcpStream;
 
-#[cfg(test)]
-mod tests {
-    use super::require_side_effect_authorization;
-
-    #[test]
-    fn missing_job_authorization_is_rejected_without_explicit_development_mode() {
-        assert!(require_side_effect_authorization(None, false).is_err());
-        assert!(require_side_effect_authorization(None, true).is_ok());
-    }
-}
-
 fn require_side_effect_authorization(
     authorization: Option<&misaka_core::CommandAuthorization>,
     allow_unauthenticated_operations: bool,
@@ -371,4 +360,15 @@ pub(crate) async fn dispatch_envelope(
         _ => {}
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::require_side_effect_authorization;
+
+    #[test]
+    fn missing_job_authorization_is_rejected_without_explicit_development_mode() {
+        assert!(require_side_effect_authorization(None, false).is_err());
+        assert!(require_side_effect_authorization(None, true).is_ok());
+    }
 }
