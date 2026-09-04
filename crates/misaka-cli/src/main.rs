@@ -142,6 +142,10 @@ enum Command {
         /// JSON array of admitted Iroh EndpointIds for the integrated relay.
         #[arg(long)]
         relay_access_allowlist: Option<PathBuf>,
+
+        /// JSON array of temporary enrollment EndpointIds for the integrated relay.
+        #[arg(long)]
+        relay_bootstrap_allowlist: Option<PathBuf>,
     },
 
     /// Form a Network or install membership from a signed invite.
@@ -185,6 +189,10 @@ enum Command {
         /// JSON array of admitted Iroh EndpointIds; changes apply to new connections.
         #[arg(long)]
         access_allowlist: Option<PathBuf>,
+
+        /// JSON array of temporary enrollment EndpointIds; remove after join.
+        #[arg(long)]
+        bootstrap_allowlist: Option<PathBuf>,
     },
 
     /// Experimental Network Stream v0 black-box client.
@@ -339,6 +347,17 @@ enum NetworkCommand {
         expires_in_secs: u64,
     },
 
+    /// Revoke a membership serial with the local Network authority.
+    Revoke {
+        /// Membership certificate serial to revoke.
+        #[arg(long)]
+        membership_serial: u64,
+
+        /// Human-readable reason included in the signed record.
+        #[arg(long, default_value = "operator request")]
+        reason: String,
+    },
+
     /// Install a signed invite without installing the authority private key.
     Join {
         /// Invite JSON file produced by `misaka network invite`.
@@ -409,6 +428,7 @@ async fn async_main() -> Result<(), MisakaError> {
             relay_tls_cert,
             relay_tls_key,
             relay_access_allowlist,
+            relay_bootstrap_allowlist,
         } => {
             init_tracing(&log_format);
             // 加载或生成身份 (持久化)
@@ -589,6 +609,7 @@ async fn async_main() -> Result<(), MisakaError> {
                     tls_cert: relay_tls_cert,
                     tls_key: relay_tls_key,
                     access_allowlist: relay_access_allowlist,
+                    bootstrap_allowlist: relay_bootstrap_allowlist,
                 };
                 Some(
                     misaka_relay::RelayService::bind_with_options(options)
@@ -770,6 +791,50 @@ async fn async_main() -> Result<(), MisakaError> {
             }
             NetworkCommand::Join { invite } => {
                 join_network_invite(&invite, requested_network_id).map_err(MisakaError::Other)?;
+            }
+            NetworkCommand::Revoke {
+                membership_serial,
+                reason,
+            } => {
+                let data_dir = IdentityStore::config_dir()
+                    .map_err(|error| MisakaError::Other(error.to_string()))?;
+                let (authority, authority_key) = NetworkAuthorityStore::load_with_key(&data_dir)
+                    .map_err(|error| MisakaError::Other(error.to_string()))?
+                    .ok_or_else(|| {
+                        MisakaError::Other(
+                            "network revoke requires the local Network authority private key"
+                                .to_string(),
+                        )
+                    })?;
+                if let Some(requested) = requested_network_id {
+                    if requested != authority.network_id {
+                        return Err(MisakaError::Other(
+                            "--network-id does not match the local Network authority".to_string(),
+                        ));
+                    }
+                }
+                let record = misaka_core::RevocationRecord::issue(
+                    &authority,
+                    &authority_key,
+                    membership_serial,
+                    unix_now(),
+                    reason,
+                );
+                misaka_runtime::revocation_store::RevocationStore::append(
+                    &data_dir,
+                    &authority,
+                    record.clone(),
+                )
+                .map_err(|error| MisakaError::Other(error.to_string()))?;
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "network_id": authority.network_id.to_string(),
+                        "membership_serial": record.membership_serial,
+                        "revoked_at": record.revoked_at,
+                        "reason": record.reason,
+                    })
+                );
             }
         },
 
@@ -974,6 +1039,7 @@ async fn async_main() -> Result<(), MisakaError> {
             tls_cert,
             tls_key,
             access_allowlist,
+            bootstrap_allowlist,
         } => {
             tracing_subscriber::fmt().with_target(false).init();
             misaka_relay::RelayService::bind_with_options(misaka_relay::RelayOptions {
@@ -982,6 +1048,7 @@ async fn async_main() -> Result<(), MisakaError> {
                 tls_cert,
                 tls_key,
                 access_allowlist,
+                bootstrap_allowlist,
             })
             .await
             .map_err(|error| MisakaError::Other(error.to_string()))?
@@ -3309,6 +3376,26 @@ mod stream_tests {
                 command: NetworkCommand::Join { .. }
             }
         ));
+
+        let revoke = Cli::try_parse_from([
+            "misaka",
+            "network",
+            "revoke",
+            "--membership-serial",
+            "7",
+            "--reason",
+            "retired",
+        ])
+        .unwrap();
+        assert!(matches!(
+            revoke.command,
+            Command::Network {
+                command: NetworkCommand::Revoke {
+                    membership_serial: 7,
+                    ..
+                }
+            }
+        ));
     }
 
     #[test]
@@ -3398,6 +3485,21 @@ mod stream_tests {
                 access_allowlist: Some(path),
                 ..
             } if path == std::path::Path::new("/tmp/relay-endpoints.json")
+        ));
+
+        let bootstrap = Cli::try_parse_from([
+            "misaka",
+            "relay",
+            "--bootstrap-allowlist",
+            "/tmp/relay-bootstrap-endpoints.json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            bootstrap.command,
+            Command::Relay {
+                bootstrap_allowlist: Some(path),
+                ..
+            } if path == std::path::Path::new("/tmp/relay-bootstrap-endpoints.json")
         ));
     }
 

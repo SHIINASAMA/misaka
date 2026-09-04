@@ -31,6 +31,9 @@ pub struct RelayOptions {
     /// open for compatibility; when present, changes take effect for new
     /// connections without restarting the relay.
     pub access_allowlist: Option<PathBuf>,
+    /// JSON array of temporary enrollment EndpointIds. These are unioned with
+    /// the regular allowlist and should be removed after `network join`.
+    pub bootstrap_allowlist: Option<PathBuf>,
 }
 
 impl RelayOptions {
@@ -41,6 +44,7 @@ impl RelayOptions {
             tls_cert: None,
             tls_key: None,
             access_allowlist: None,
+            bootstrap_allowlist: None,
         }
     }
 }
@@ -109,9 +113,20 @@ impl RelayService {
 
 fn build_server_config(options: &RelayOptions) -> Result<ServerConfig, RelayError> {
     let mut relay = IrohRelayConfig::new(options.bind);
-    if let Some(path) = &options.access_allowlist {
-        validate_allowlist(path)?;
-        relay.access = Arc::new(FileAllowlistAccess { path: path.clone() });
+    let allowlist_paths = [
+        options.access_allowlist.clone(),
+        options.bootstrap_allowlist.clone(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    if !allowlist_paths.is_empty() {
+        for path in &allowlist_paths {
+            validate_allowlist(path)?;
+        }
+        relay.access = Arc::new(FileAllowlistAccess {
+            paths: allowlist_paths,
+        });
     }
     match (&options.tls_cert, &options.tls_key) {
         (None, None) => {}
@@ -140,19 +155,26 @@ fn build_server_config(options: &RelayOptions) -> Result<ServerConfig, RelayErro
 
 #[derive(Debug, Clone)]
 struct FileAllowlistAccess {
-    path: PathBuf,
+    paths: Vec<PathBuf>,
 }
 
 impl AccessControl for FileAllowlistAccess {
     async fn on_connect(&self, request: &ClientRequest) -> Access {
-        match load_allowlist(&self.path) {
-            Ok(endpoints) if endpoints.contains(&request.endpoint_id()) => Access::Allow,
-            Ok(_) => Access::Deny {
-                reason: Some("Iroh EndpointId is not admitted by this relay".to_string()),
-            },
-            Err(error) => Access::Deny {
-                reason: Some(format!("relay access allowlist unavailable: {error}")),
-            },
+        for path in &self.paths {
+            match load_allowlist(path) {
+                Ok(endpoints) if endpoints.contains(&request.endpoint_id()) => {
+                    return Access::Allow;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    return Access::Deny {
+                        reason: Some(format!("relay access allowlist unavailable: {error}")),
+                    };
+                }
+            }
+        }
+        Access::Deny {
+            reason: Some("Iroh EndpointId is not admitted by this relay".to_string()),
         }
     }
 }
@@ -234,6 +256,7 @@ mod tests {
             tls_cert: Some("cert.pem".into()),
             tls_key: None,
             access_allowlist: None,
+            bootstrap_allowlist: None,
         };
         let error = super::build_server_config(&options).unwrap_err();
         assert!(error.to_string().contains("provided together"));
@@ -252,6 +275,7 @@ mod tests {
             tls_cert: None,
             tls_key: None,
             access_allowlist: Some(path),
+            bootstrap_allowlist: None,
         };
         let error = super::build_server_config(&options).unwrap_err();
         assert!(error.to_string().contains("access allowlist"));
