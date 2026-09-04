@@ -4,13 +4,15 @@
 //! Misaka Network, and does not inspect or authorize application payloads.
 
 use iroh_relay::server::{
-    CertConfig, RelayConfig as IrohRelayConfig, Server, ServerConfig, TlsConfig,
+    Access, AccessControl, CertConfig, ClientRequest, RelayConfig as IrohRelayConfig, Server,
+    ServerConfig, TlsConfig,
 };
 use rustls::pki_types::CertificateDer;
 use std::fs::File;
 use std::io::BufReader;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Configuration for one Iroh relay service.
 #[derive(Debug, Clone)]
@@ -25,6 +27,10 @@ pub struct RelayOptions {
     pub tls_cert: Option<PathBuf>,
     /// PEM private key for HTTPS mode.
     pub tls_key: Option<PathBuf>,
+    /// JSON array of admitted Iroh EndpointIds. When absent, relay access is
+    /// open for compatibility; when present, changes take effect for new
+    /// connections without restarting the relay.
+    pub access_allowlist: Option<PathBuf>,
 }
 
 impl RelayOptions {
@@ -34,6 +40,7 @@ impl RelayOptions {
             http_bind: None,
             tls_cert: None,
             tls_key: None,
+            access_allowlist: None,
         }
     }
 }
@@ -102,6 +109,10 @@ impl RelayService {
 
 fn build_server_config(options: &RelayOptions) -> Result<ServerConfig, RelayError> {
     let mut relay = IrohRelayConfig::new(options.bind);
+    if let Some(path) = &options.access_allowlist {
+        validate_allowlist(path)?;
+        relay.access = Arc::new(FileAllowlistAccess { path: path.clone() });
+    }
     match (&options.tls_cert, &options.tls_key) {
         (None, None) => {}
         (Some(cert), Some(key)) => {
@@ -125,6 +136,36 @@ fn build_server_config(options: &RelayOptions) -> Result<ServerConfig, RelayErro
     let mut config = ServerConfig::default();
     config.relay = Some(relay);
     Ok(config)
+}
+
+#[derive(Debug, Clone)]
+struct FileAllowlistAccess {
+    path: PathBuf,
+}
+
+impl AccessControl for FileAllowlistAccess {
+    async fn on_connect(&self, request: &ClientRequest) -> Access {
+        match load_allowlist(&self.path) {
+            Ok(endpoints) if endpoints.contains(&request.endpoint_id()) => Access::Allow,
+            Ok(_) => Access::Deny {
+                reason: Some("Iroh EndpointId is not admitted by this relay".to_string()),
+            },
+            Err(error) => Access::Deny {
+                reason: Some(format!("relay access allowlist unavailable: {error}")),
+            },
+        }
+    }
+}
+
+fn validate_allowlist(path: &Path) -> Result<(), RelayError> {
+    load_allowlist(path)
+        .map(|_| ())
+        .map_err(|error| RelayError::InvalidConfig(format!("read relay access allowlist: {error}")))
+}
+
+fn load_allowlist(path: &Path) -> Result<Vec<iroh::EndpointId>, std::io::Error> {
+    let json = std::fs::read_to_string(path)?;
+    serde_json::from_str(&json).map_err(|error| std::io::Error::other(error.to_string()))
 }
 
 fn load_tls_config(cert_path: &Path, key_path: &Path) -> Result<rustls::ServerConfig, RelayError> {
@@ -192,8 +233,28 @@ mod tests {
             http_bind: None,
             tls_cert: Some("cert.pem".into()),
             tls_key: None,
+            access_allowlist: None,
         };
         let error = super::build_server_config(&options).unwrap_err();
         assert!(error.to_string().contains("provided together"));
+    }
+
+    #[test]
+    fn access_allowlist_must_be_a_json_endpoint_id_array() {
+        let directory =
+            std::env::temp_dir().join(format!("misaka-relay-access-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("allowlist.json");
+        std::fs::write(&path, "not-json").unwrap();
+        let options = RelayOptions {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            http_bind: None,
+            tls_cert: None,
+            tls_key: None,
+            access_allowlist: Some(path),
+        };
+        let error = super::build_server_config(&options).unwrap_err();
+        assert!(error.to_string().contains("access allowlist"));
+        let _ = std::fs::remove_dir_all(directory);
     }
 }

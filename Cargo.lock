@@ -2050,12 +2050,16 @@ dependencies = [
 name = "misaka-relay"
 version = "0.1.0"
 dependencies = [
+ "iroh",
  "iroh-relay",
  "rustls",
  "rustls-pemfile",
+ "serde",
+ "serde_json",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

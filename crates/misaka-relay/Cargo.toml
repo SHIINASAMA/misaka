@@ -5,7 +5,11 @@ edition.workspace = true
 description = "Iroh-native relay service for Misaka Network"
 
 [dependencies]
+iroh.workspace = true
 iroh-relay = { version = "1.1", default-features = false, features = ["server", "tls-aws-lc-rs"] }
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
 rustls.workspace = true
 rustls-pemfile = "2"
 thiserror.workspace = true

@@ -138,6 +138,10 @@ enum Command {
         /// PEM private key for the integrated Iroh relay.
         #[arg(long)]
         relay_tls_key: Option<PathBuf>,
+
+        /// JSON array of admitted Iroh EndpointIds for the integrated relay.
+        #[arg(long)]
+        relay_access_allowlist: Option<PathBuf>,
     },
 
     /// Form a Network or install membership from a signed invite.
@@ -177,6 +181,10 @@ enum Command {
         /// PEM private key for HTTPS mode.
         #[arg(long)]
         tls_key: Option<PathBuf>,
+
+        /// JSON array of admitted Iroh EndpointIds; changes apply to new connections.
+        #[arg(long)]
+        access_allowlist: Option<PathBuf>,
     },
 
     /// Experimental Network Stream v0 black-box client.
@@ -400,6 +408,7 @@ async fn async_main() -> Result<(), MisakaError> {
             relay_http_bind,
             relay_tls_cert,
             relay_tls_key,
+            relay_access_allowlist,
         } => {
             init_tracing(&log_format);
             // 加载或生成身份 (持久化)
@@ -579,6 +588,7 @@ async fn async_main() -> Result<(), MisakaError> {
                     http_bind: relay_http_bind,
                     tls_cert: relay_tls_cert,
                     tls_key: relay_tls_key,
+                    access_allowlist: relay_access_allowlist,
                 };
                 Some(
                     misaka_relay::RelayService::bind_with_options(options)
@@ -963,6 +973,7 @@ async fn async_main() -> Result<(), MisakaError> {
             http_bind,
             tls_cert,
             tls_key,
+            access_allowlist,
         } => {
             tracing_subscriber::fmt().with_target(false).init();
             misaka_relay::RelayService::bind_with_options(misaka_relay::RelayOptions {
@@ -970,6 +981,7 @@ async fn async_main() -> Result<(), MisakaError> {
                 http_bind,
                 tls_cert,
                 tls_key,
+                access_allowlist,
             })
             .await
             .map_err(|error| MisakaError::Other(error.to_string()))?
@@ -3322,6 +3334,24 @@ mod stream_tests {
             } if http_bind == "0.0.0.0:80".parse::<SocketAddr>().unwrap()
                 && tls_cert == std::path::Path::new("/etc/misaka/relay.crt")
                 && tls_key == std::path::Path::new("/etc/misaka/relay.key")
+        ));
+    }
+
+    #[test]
+    fn relay_commands_accept_endpoint_allowlists() {
+        let cli = Cli::try_parse_from([
+            "misaka",
+            "relay",
+            "--access-allowlist",
+            "/tmp/relay-endpoints.json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Relay {
+                access_allowlist: Some(path),
+                ..
+            } if path == std::path::Path::new("/tmp/relay-endpoints.json")
         ));
     }
 
