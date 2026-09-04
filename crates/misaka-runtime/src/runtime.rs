@@ -381,7 +381,7 @@ async fn iroh_session_accept_loop(node: SisterNode, backend: misaka_network::Iro
     loop {
         tokio::select! {
             _ = node.shutdown.cancelled() => break,
-            accepted = backend.accept_session() => {
+            accepted = backend.accept_session_for_network(node.config.network_id) => {
                 match accepted {
                     Ok(session) => {
                         let session_node = node.clone();
@@ -1289,6 +1289,7 @@ mod tests {
 
     #[tokio::test]
     async fn iroh_stream_backend_accepts_and_echoes_a_valid_stream() {
+        let network_id = misaka_core::NetworkId::generate();
         let server_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
             .alpns(vec![misaka_network::IROH_ALPN.to_vec()])
             .bind_addr("127.0.0.1:0")
@@ -1322,6 +1323,7 @@ mod tests {
             RuntimeConfig {
                 listen_port: 0,
                 stream_backend: StreamBackend::Iroh(server_backend),
+                network_id,
                 discovery: DiscoveryMode::Off,
                 ..Default::default()
             },
@@ -1333,7 +1335,10 @@ mod tests {
         let task = tokio::spawn(runtime.run());
 
         let mut stream = client_backend
-            .connect(misaka_network::NetworkEndpoint::Iroh(server_address))
+            .connect_for_network(
+                misaka_network::NetworkEndpoint::Iroh(server_address),
+                network_id,
+            )
             .await
             .unwrap();
         let mut greeting = [0u8; 5];

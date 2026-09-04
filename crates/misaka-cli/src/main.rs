@@ -648,7 +648,10 @@ async fn async_main() -> Result<(), MisakaError> {
                 })?;
             let data_dir =
                 IdentityStore::config_dir().map_err(|e| MisakaError::Other(e.to_string()))?;
+            let network_id = NetworkIdStore::load_or_init(&data_dir, requested_network_id)
+                .map_err(|e| MisakaError::Other(e.to_string()))?;
             let config = misaka_runtime::config::RuntimeConfig {
+                network_id,
                 listen_port: identity.listen_port,
                 data_dir,
                 ..Default::default()

@@ -124,6 +124,10 @@ impl IrohBackend {
     /// Accept one long-lived Iroh connection without consuming a logical
     /// stream. The caller can accept multiple streams from the session.
     pub async fn accept_session(&self) -> Result<IrohSession> {
+        self.accept_session_for_network(NetworkId::default()).await
+    }
+
+    pub async fn accept_session_for_network(&self, network_id: NetworkId) -> Result<IrohSession> {
         let incoming = self.endpoint.accept().await.ok_or(NetworkError::Closed)?;
         let accepting = incoming
             .accept()
@@ -135,7 +139,7 @@ impl IrohBackend {
         Ok(IrohSession::new(
             self.endpoint.clone(),
             connection,
-            NetworkId::default(),
+            network_id,
         ))
     }
 
