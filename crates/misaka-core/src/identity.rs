@@ -600,6 +600,92 @@ impl PeerRecord {
     }
 }
 
+/// Authority-signed, portable Network bootstrap artifact.
+///
+/// A v0 invite may include a certificate for a pre-identified Sister. The
+/// authority private key is never embedded in the artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkInvite {
+    pub network_id: NetworkId,
+    pub authority: NetworkAuthority,
+    pub bootstrap_records: Vec<PeerRecord>,
+    pub issued_at: u64,
+    pub expires_at: u64,
+    pub invite_id: [u8; 16],
+    pub membership: Option<MembershipCertificate>,
+    pub authority_signature: AuthoritySignature,
+}
+
+#[derive(Serialize)]
+struct NetworkInviteUnsigned<'a> {
+    network_id: NetworkId,
+    authority: NetworkAuthority,
+    bootstrap_records: &'a [PeerRecord],
+    issued_at: u64,
+    expires_at: u64,
+    invite_id: [u8; 16],
+    membership: &'a Option<MembershipCertificate>,
+}
+
+impl NetworkInvite {
+    #[allow(clippy::too_many_arguments)]
+    pub fn issue(
+        authority: NetworkAuthority,
+        authority_key: &AuthorityKeyPair,
+        bootstrap_records: Vec<PeerRecord>,
+        issued_at: u64,
+        expires_at: u64,
+        invite_id: [u8; 16],
+        membership: Option<MembershipCertificate>,
+    ) -> Self {
+        let mut invite = Self {
+            network_id: authority.network_id,
+            authority,
+            bootstrap_records,
+            issued_at,
+            expires_at,
+            invite_id,
+            membership,
+            authority_signature: AuthoritySignature([0; SISTER_SIGNATURE_LEN]),
+        };
+        invite.authority_signature = authority_key.sign(&invite.signing_bytes());
+        invite
+    }
+
+    pub fn verify(&self, now: u64) -> bool {
+        self.network_id == self.authority.network_id
+            && self.issued_at <= self.expires_at
+            && self.issued_at <= now
+            && now <= self.expires_at
+            && self
+                .authority
+                .authority_public_key
+                .verify(&self.signing_bytes(), &self.authority_signature)
+            && self
+                .bootstrap_records
+                .iter()
+                .all(|record| record.network_id == self.network_id && record.verify())
+            && self.membership.as_ref().is_none_or(|membership| {
+                membership.network_id == self.network_id
+                    && membership.verify(&self.authority)
+                    && membership.is_valid_at(now)
+            })
+    }
+
+    fn signing_bytes(&self) -> Vec<u8> {
+        bincode::serialize(&NetworkInviteUnsigned {
+            network_id: self.network_id,
+            authority: self.authority,
+            bootstrap_records: &self.bootstrap_records,
+            issued_at: self.issued_at,
+            expires_at: self.expires_at,
+            invite_id: self.invite_id,
+            membership: &self.membership,
+        })
+        .expect("network invite fields are serializable")
+    }
+}
+
 /// A nonce scoped to one Misaka Network for proving possession of a Sister
 /// private key during a future authenticated session handshake.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -846,5 +932,58 @@ mod tests {
         assert!(record.verify(&authority));
         assert_eq!(record.membership_serial, 7);
         assert!(!record.verify(&NetworkAuthority::generate(NetworkId::generate()).0));
+    }
+
+    #[test]
+    fn network_invite_binds_bootstrap_records_and_membership_to_authority() {
+        let network_id = NetworkId::generate();
+        let (authority, authority_key) = NetworkAuthority::generate(network_id);
+        let sister_key = SisterKeyPair::generate();
+        let binding = TransportBinding::sign(
+            network_id,
+            42,
+            IrohEndpointId::from_bytes([8u8; 32]),
+            1,
+            &sister_key,
+        );
+        let record = PeerRecord::issue(
+            network_id,
+            42,
+            "iroh://bootstrap".into(),
+            binding,
+            100,
+            &sister_key,
+        );
+        let membership = MembershipCertificate::issue(
+            &authority,
+            &authority_key,
+            sister_key.public_key(),
+            42,
+            100,
+            Some(200),
+            1,
+        );
+        let invite = NetworkInvite::issue(
+            authority,
+            &authority_key,
+            vec![record],
+            100,
+            200,
+            [4u8; 16],
+            Some(membership),
+        );
+
+        assert!(invite.verify(100));
+        assert!(invite.verify(200));
+        assert!(!invite.verify(99));
+        assert!(!invite.verify(201));
+
+        let mut tampered = invite.clone();
+        tampered.bootstrap_records[0].endpoint_addr = "iroh://forged".into();
+        assert!(!tampered.verify(100));
+
+        let mut wrong_network = invite;
+        wrong_network.network_id = NetworkId::generate();
+        assert!(!wrong_network.verify(100));
     }
 }

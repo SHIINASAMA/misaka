@@ -9,21 +9,27 @@ use misaka_core::protocol::{
     TunnelRequest, TRANSFER_MAGIC, TRANSFER_V1_CHUNK_SIZE, TRANSFER_V1_MAGIC, TRANSFER_V2_MAGIC,
     TUNNEL_MAGIC,
 };
-use misaka_core::IrohEndpointId;
+use misaka_core::{
+    IrohEndpointId, MembershipCertificate, NetworkId, NetworkInvite, PeerRecord, SisterKeyPair,
+    SisterPublicKey,
+};
 use misaka_network::{NetworkBackend, NetworkEndpoint};
 use serde::{de::DeserializeOwned, Serialize};
 use sha2::{Digest, Sha256};
 
 use misaka_runtime::error::MisakaError;
 use misaka_runtime::identity_store::IdentityStore;
+use misaka_runtime::membership_store::MembershipStore;
+use misaka_runtime::network_authority_store::NetworkAuthorityStore;
 use misaka_runtime::network_id_store::NetworkIdStore;
 use misaka_runtime::node::SisterNode;
+use misaka_runtime::peer_record_store::PeerRecordStore;
 use misaka_runtime::peer_store::PeerStore;
 use misaka_runtime::resources::{ResourceProvider, SysinfoResourceProvider};
 use misaka_runtime::runtime::{default_encryption_key, SisterRuntime};
 use misaka_runtime::sister_key_store::SisterKeyStore;
 use misaka_runtime::transport_binding_store::TransportBindingStore;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -130,6 +136,12 @@ enum Command {
         /// PEM private key for the integrated Iroh relay.
         #[arg(long)]
         relay_tls_key: Option<PathBuf>,
+    },
+
+    /// Form a Network or install membership from a signed invite.
+    Network {
+        #[command(subcommand)]
+        command: NetworkCommand,
     },
 
     /// Export the local Iroh endpoint address for cross-domain preflight.
@@ -284,6 +296,37 @@ enum Command {
         /// Target Sister ID.
         #[arg(long)]
         sister: Option<u64>,
+    },
+}
+
+#[derive(Subcommand)]
+enum NetworkCommand {
+    /// Initialize the local Network authority and owner Sister membership.
+    Init,
+
+    /// Issue a signed invite for a pre-identified Sister.
+    Invite {
+        /// Write the invite JSON to this file; print it when omitted.
+        #[arg(long)]
+        output: Option<PathBuf>,
+
+        /// Sister ID that will receive the membership certificate.
+        #[arg(long)]
+        sister_id: Option<String>,
+
+        /// Hex-encoded Sister public key that will receive the certificate.
+        #[arg(long)]
+        sister_public_key: Option<String>,
+
+        /// Lifetime of the invite and membership certificate in seconds.
+        #[arg(long, default_value_t = 86_400)]
+        expires_in_secs: u64,
+    },
+
+    /// Install a signed invite without installing the authority private key.
+    Join {
+        /// Invite JSON file produced by `misaka network invite`.
+        invite: PathBuf,
     },
 }
 
@@ -534,6 +577,170 @@ async fn async_main() -> Result<(), MisakaError> {
             }
             result?;
         }
+
+        Command::Network { command } => match command {
+            NetworkCommand::Init => {
+                let data_dir = IdentityStore::config_dir()
+                    .map_err(|error| MisakaError::Other(error.to_string()))?;
+                let network_id = NetworkIdStore::load_or_init(&data_dir, requested_network_id)
+                    .map_err(|error| MisakaError::Other(error.to_string()))?;
+                let authority = NetworkAuthorityStore::init(&data_dir, Some(network_id))
+                    .map_err(|error| MisakaError::Other(error.to_string()))?;
+                if authority.network_id != network_id {
+                    return Err(MisakaError::Other(
+                        "existing Network authority does not match the requested NetworkId"
+                            .to_string(),
+                    ));
+                }
+                let identity = IdentityStore::load_or_init(None, 31700)
+                    .map_err(|error| MisakaError::Other(error.to_string()))?;
+                let sister_key = SisterKeyStore::load_or_init(&data_dir)
+                    .map_err(|error| MisakaError::Other(error.to_string()))?;
+                let now = unix_now();
+                let membership = if let Some(existing) = MembershipStore::load(&data_dir)
+                    .map_err(|error| MisakaError::Other(error.to_string()))?
+                {
+                    if existing.network_id != network_id
+                        || existing.sister_id != identity.id
+                        || existing.sister_public_key != sister_key.public_key()
+                        || !existing.verify(&authority)
+                    {
+                        return Err(MisakaError::Other(
+                            "existing membership does not match the local Network authority or Sister"
+                                .to_string(),
+                        ));
+                    }
+                    existing
+                } else {
+                    let membership = MembershipCertificate::issue(
+                        &authority,
+                        &authority_key(&data_dir)?,
+                        sister_key.public_key(),
+                        identity.id.as_u64(),
+                        now,
+                        None,
+                        1,
+                    );
+                    MembershipStore::save(&data_dir, &membership)
+                        .map_err(|error| MisakaError::Other(error.to_string()))?;
+                    membership
+                };
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "network_id": network_id.to_string(),
+                        "sister_id": identity.id.as_u64(),
+                        "sister_public_key": sister_key.public_key().to_string(),
+                        "authority_public_key": authority.authority_public_key.to_string(),
+                        "membership_serial": membership.serial,
+                    })
+                );
+            }
+            NetworkCommand::Invite {
+                output,
+                sister_id,
+                sister_public_key,
+                expires_in_secs,
+            } => {
+                let data_dir = IdentityStore::config_dir()
+                    .map_err(|error| MisakaError::Other(error.to_string()))?;
+                let (authority, authority_key) = NetworkAuthorityStore::load_with_key(&data_dir)
+                    .map_err(|error| MisakaError::Other(error.to_string()))?
+                    .ok_or_else(|| {
+                        MisakaError::Other(
+                            "network invite requires an initialized Network authority".to_string(),
+                        )
+                    })?;
+                if let Some(requested) = requested_network_id {
+                    if requested != authority.network_id {
+                        return Err(MisakaError::Other(
+                            "--network-id does not match the local Network authority".to_string(),
+                        ));
+                    }
+                }
+                let _ = NetworkIdStore::load_or_init(&data_dir, Some(authority.network_id))
+                    .map_err(|error| MisakaError::Other(error.to_string()))?;
+                let target_id = sister_id
+                    .as_deref()
+                    .map(parse_sister_id)
+                    .transpose()
+                    .map_err(MisakaError::Other)?;
+                let target_key = sister_public_key
+                    .as_deref()
+                    .map(parse_sister_public_key)
+                    .transpose()
+                    .map_err(MisakaError::Other)?;
+                if target_id.is_none() != target_key.is_none() {
+                    return Err(MisakaError::Other(
+                        "--sister-id and --sister-public-key must be supplied together".to_string(),
+                    ));
+                }
+                let target_id = target_id.ok_or_else(|| {
+                    MisakaError::Other(
+                        "this v0 invite flow requires --sister-id and --sister-public-key"
+                            .to_string(),
+                    )
+                })?;
+                let target_key = target_key.expect("target key checked above");
+                let now = unix_now();
+                let expires_at = now.saturating_add(expires_in_secs);
+                let mut records = PeerRecordStore::load_from_dir(&data_dir, authority.network_id);
+                let local_identity =
+                    IdentityStore::load().map_err(|error| MisakaError::Other(error.to_string()))?;
+                let local_key = SisterKeyStore::load(&data_dir)
+                    .map_err(|error| MisakaError::Other(error.to_string()))?;
+                if let (Some(local_identity), Some(local_key)) =
+                    (local_identity.as_ref(), local_key.as_ref())
+                {
+                    if let Some(local_record) = load_local_peer_record(
+                        &data_dir,
+                        authority.network_id,
+                        local_identity,
+                        local_key,
+                    )
+                    .map_err(MisakaError::Other)?
+                    {
+                        records.insert(local_record.sister_id.as_u64(), local_record);
+                    }
+                }
+                if records.is_empty() {
+                    return Err(MisakaError::Other(
+                        "network invite requires at least one persisted bootstrap PeerRecord"
+                            .to_string(),
+                    ));
+                }
+                let membership = MembershipCertificate::issue(
+                    &authority,
+                    &authority_key,
+                    target_key,
+                    target_id,
+                    now,
+                    Some(expires_at),
+                    now.max(1),
+                );
+                let invite = NetworkInvite::issue(
+                    authority,
+                    &authority_key,
+                    records.into_values().collect(),
+                    now,
+                    expires_at,
+                    uuid::Uuid::new_v4().into_bytes(),
+                    Some(membership),
+                );
+                let json = serde_json::to_string_pretty(&invite)
+                    .map_err(|error| MisakaError::Other(error.to_string()))?;
+                if let Some(output) = output {
+                    std::fs::write(&output, json)
+                        .map_err(|error| MisakaError::Other(error.to_string()))?;
+                    println!("wrote Network invite to {}", output.display());
+                } else {
+                    println!("{json}");
+                }
+            }
+            NetworkCommand::Join { invite } => {
+                join_network_invite(&invite, requested_network_id).map_err(MisakaError::Other)?;
+            }
+        },
 
         Command::StreamTest {
             addr,
@@ -2086,6 +2293,128 @@ fn parse_sister_id(value: &str) -> Result<u64, String> {
         .map_err(|error| format!("invalid Sister ID {value}: {error}"))
 }
 
+fn authority_key(data_dir: &Path) -> Result<misaka_core::AuthorityKeyPair, MisakaError> {
+    NetworkAuthorityStore::load_key(data_dir)
+        .map_err(|error| MisakaError::Other(error.to_string()))?
+        .ok_or_else(|| {
+            MisakaError::Other(
+                "Network authority private key is missing; only the Network owner can do this"
+                    .to_string(),
+            )
+        })
+}
+
+fn parse_sister_public_key(value: &str) -> Result<SisterPublicKey, String> {
+    if value.len() != 64 {
+        return Err(format!(
+            "invalid Sister public key: expected 64 hexadecimal characters, got {}",
+            value.len()
+        ));
+    }
+    let mut bytes = [0u8; 32];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        let start = index * 2;
+        *byte = u8::from_str_radix(&value[start..start + 2], 16)
+            .map_err(|_| format!("invalid Sister public key hex at byte {index}"))?;
+    }
+    Ok(SisterPublicKey::from_bytes(bytes))
+}
+
+fn load_local_peer_record(
+    data_dir: &Path,
+    network_id: NetworkId,
+    identity: &misaka_core::SisterIdentity,
+    sister_key: &SisterKeyPair,
+) -> Result<Option<PeerRecord>, String> {
+    let endpoint = misaka_runtime::iroh_endpoint_store::IrohEndpointStore::load(data_dir)
+        .map_err(|error| error.to_string())?;
+    let binding = TransportBindingStore::load(data_dir).map_err(|error| error.to_string())?;
+    let (Some(endpoint), Some(binding)) = (endpoint, binding) else {
+        return Ok(None);
+    };
+    if !binding.verify()
+        || binding.network_id != network_id
+        || binding.sister_id != identity.id
+        || binding.sister_public_key != sister_key.public_key()
+    {
+        return Err("persisted Iroh transport binding does not match the local Sister".to_string());
+    }
+    Ok(Some(PeerRecord::issue(
+        network_id,
+        identity.id.as_u64(),
+        NetworkEndpoint::Iroh(endpoint).to_string(),
+        binding,
+        unix_now(),
+        sister_key,
+    )))
+}
+
+fn join_network_invite(
+    invite_path: &Path,
+    requested_network_id: Option<NetworkId>,
+) -> Result<(), String> {
+    let json = std::fs::read_to_string(invite_path)
+        .map_err(|error| format!("read Network invite {}: {error}", invite_path.display()))?;
+    let invite: NetworkInvite = serde_json::from_str(&json)
+        .map_err(|error| format!("decode Network invite {}: {error}", invite_path.display()))?;
+    let now = unix_now();
+    if !invite.verify(now) {
+        return Err(
+            "Network invite signature, membership, or validity window is invalid".to_string(),
+        );
+    }
+    if let Some(requested) = requested_network_id {
+        if requested != invite.network_id {
+            return Err("--network-id does not match the Network invite".to_string());
+        }
+    }
+    let membership = invite.membership.as_ref().ok_or_else(|| {
+        "this v0 join flow requires an invite with a target membership certificate".to_string()
+    })?;
+    let data_dir = IdentityStore::config_dir().map_err(|error| error.to_string())?;
+    let identity = IdentityStore::load_or_init(None, 31700).map_err(|error| error.to_string())?;
+    let sister_key = SisterKeyStore::load_or_init(&data_dir).map_err(|error| error.to_string())?;
+    if membership.sister_id != identity.id
+        || membership.sister_public_key != sister_key.public_key()
+    {
+        return Err(format!(
+            "invite is for Sister {} / {}, but local Sister is {} / {}",
+            membership.sister_id,
+            membership.sister_public_key,
+            identity.id,
+            sister_key.public_key()
+        ));
+    }
+
+    NetworkIdStore::load_or_init(&data_dir, Some(invite.network_id))
+        .map_err(|error| error.to_string())?;
+    NetworkAuthorityStore::install_descriptor(&data_dir, &invite.authority)
+        .map_err(|error| error.to_string())?;
+    if let Some(existing) = MembershipStore::load(&data_dir).map_err(|error| error.to_string())? {
+        if existing != *membership {
+            return Err(
+                "a different local membership certificate is already installed".to_string(),
+            );
+        }
+    } else {
+        MembershipStore::save(&data_dir, membership).map_err(|error| error.to_string())?;
+    }
+
+    let records = invite
+        .bootstrap_records
+        .into_iter()
+        .map(|record| (record.sister_id.as_u64(), record))
+        .collect::<HashMap<_, _>>();
+    PeerRecordStore::save_to_dir(&data_dir, &records).map_err(|error| error.to_string())?;
+    println!(
+        "joined Network {} as Sister {} with {} bootstrap peer record(s)",
+        invite.network_id,
+        identity.id,
+        records.len()
+    );
+    Ok(())
+}
+
 async fn proxy_tunnel(
     mut local: tokio::net::TcpStream,
     endpoint: NetworkEndpoint,
@@ -2582,7 +2911,9 @@ fn check_online(addr: Option<SocketAddr>) -> bool {
 
 #[cfg(test)]
 mod stream_tests {
-    use super::{deterministic_hash, fill_deterministic, Cli, Command, StreamProbeReport};
+    use super::{
+        deterministic_hash, fill_deterministic, Cli, Command, NetworkCommand, StreamProbeReport,
+    };
     use clap::Parser;
     use std::net::SocketAddr;
 
@@ -2716,6 +3047,44 @@ mod stream_tests {
             Command::Start {
                 probe_only: true,
                 ..
+            }
+        ));
+    }
+
+    #[test]
+    fn network_commands_accept_init_invite_and_join() {
+        let init = Cli::try_parse_from(["misaka", "network", "init"]).unwrap();
+        assert!(matches!(
+            init.command,
+            Command::Network {
+                command: NetworkCommand::Init
+            }
+        ));
+
+        let invite = Cli::try_parse_from([
+            "misaka",
+            "network",
+            "invite",
+            "--output",
+            "/tmp/invite.json",
+            "--sister-id",
+            "#42",
+            "--sister-public-key",
+            "00".repeat(32).as_str(),
+        ])
+        .unwrap();
+        assert!(matches!(
+            invite.command,
+            Command::Network {
+                command: NetworkCommand::Invite { .. }
+            }
+        ));
+
+        let join = Cli::try_parse_from(["misaka", "network", "join", "/tmp/invite.json"]).unwrap();
+        assert!(matches!(
+            join.command,
+            Command::Network {
+                command: NetworkCommand::Join { .. }
             }
         ));
     }

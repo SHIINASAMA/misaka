@@ -21,6 +21,8 @@ pub enum NetworkAuthorityStoreError {
     InvalidKeyLength(usize),
     #[error("Network authority descriptor and private key are inconsistent")]
     KeyMismatch,
+    #[error("cannot install a different Network authority over an existing descriptor")]
+    DescriptorMismatch,
 }
 
 pub struct NetworkAuthorityStore;
@@ -53,6 +55,27 @@ impl NetworkAuthorityStore {
             return Ok(None);
         }
         Ok(Some(serde_json::from_str(&std::fs::read_to_string(path)?)?))
+    }
+
+    /// Install a public authority descriptor received from a trusted invite.
+    /// This intentionally does not create or write the authority private key.
+    pub fn install_descriptor(
+        directory: &Path,
+        authority: &NetworkAuthority,
+    ) -> Result<(), NetworkAuthorityStoreError> {
+        if let Some(existing) = Self::load(directory)? {
+            if existing != *authority {
+                return Err(NetworkAuthorityStoreError::DescriptorMismatch);
+            }
+            return Ok(());
+        }
+
+        std::fs::create_dir_all(directory)?;
+        std::fs::write(
+            Self::descriptor_path(directory),
+            serde_json::to_string_pretty(authority)?,
+        )?;
+        Ok(())
     }
 
     pub fn load_key(
@@ -135,5 +158,30 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn installing_a_public_descriptor_does_not_create_an_authority_key() {
+        let source = std::env::temp_dir().join(format!(
+            "misaka-network-authority-source-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let recipient = std::env::temp_dir().join(format!(
+            "misaka-network-authority-recipient-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let authority = NetworkAuthorityStore::init(&source, None).unwrap();
+
+        NetworkAuthorityStore::install_descriptor(&recipient, &authority).unwrap();
+        assert_eq!(
+            NetworkAuthorityStore::load(&recipient).unwrap(),
+            Some(authority)
+        );
+        assert!(NetworkAuthorityStore::load_key(&recipient)
+            .unwrap()
+            .is_none());
+
+        let _ = std::fs::remove_dir_all(source);
+        let _ = std::fs::remove_dir_all(recipient);
     }
 }
