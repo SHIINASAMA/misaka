@@ -71,7 +71,14 @@ mod tests {
         let data_dir = isolated_dir();
         let network_id = NetworkId::generate();
         let runtime = SisterRuntime::new(
-            SisterIdentity::new(42, "console".into(), "host".into(), "test".into(), "0.1".into(), 0),
+            SisterIdentity::new(
+                42,
+                "console".into(),
+                "host".into(),
+                "test".into(),
+                "0.1".into(),
+                0,
+            ),
             default_encryption_key(),
             RuntimeConfig {
                 data_dir: data_dir.clone(),
