@@ -14,6 +14,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 
 pub const CONTROL_MAGIC: &[u8; 4] = b"MSKC";
 const MAX_CONTROL_FRAME_LENGTH: usize = 4 * 1024 * 1024;
+/// §7: a stalled authenticated peer must not pin a control-channel task forever.
+const CONTROL_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ControlRequest {
@@ -93,13 +95,23 @@ pub async fn serve(
     mut stream: NetworkStream,
     peer: Option<AuthenticatedPeer>,
 ) -> Result<()> {
-    let request: ControlRequest = read_frame(&mut stream).await?;
+    // §7: bound how long an authenticated but stalled peer can hold this task.
+    let request: ControlRequest =
+        tokio::time::timeout(CONTROL_READ_TIMEOUT, read_frame(&mut stream))
+            .await
+            .map_err(|_| {
+                NetworkError::Authentication("control frame read timed out".to_string())
+            })??;
     let response = crate::handler::dispatch_envelope(node, request.envelope, peer)
         .await
         .map_err(|error| NetworkError::Authentication(error.to_string()))?;
     if request.expect_response {
         if let Some(response) = response {
-            write_frame(&mut stream, &response).await?;
+            tokio::time::timeout(CONTROL_READ_TIMEOUT, write_frame(&mut stream, &response))
+                .await
+                .map_err(|_| {
+                    NetworkError::Authentication("control frame write timed out".to_string())
+                })??;
         }
     }
     Ok(())
@@ -200,5 +212,27 @@ impl AsyncWrite for PrefixedStream {
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{read_frame, ControlRequest, NetworkStream, MAX_CONTROL_FRAME_LENGTH};
+    use tokio::io::AsyncWriteExt;
+
+    // §7: an oversized declared frame length is rejected from the header alone,
+    // before any allocation of the attacker-controlled size.
+    #[tokio::test]
+    async fn oversized_control_frame_is_rejected_before_allocation() {
+        let (duplex, mut peer) = tokio::io::duplex(64);
+        let mut stream = NetworkStream::from_stream(duplex);
+        // Advertise a length one over the cap; send nothing else.
+        let oversized = (MAX_CONTROL_FRAME_LENGTH as u32) + 1;
+        peer.write_all(&oversized.to_be_bytes()).await.unwrap();
+        let result = read_frame::<ControlRequest>(&mut stream).await;
+        assert!(
+            matches!(result, Err(misaka_network::NetworkError::Authentication(_))),
+            "oversized frame length must be refused: {result:?}"
+        );
     }
 }

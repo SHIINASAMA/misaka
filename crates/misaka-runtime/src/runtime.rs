@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 use tokio::task::{JoinHandle, JoinSet};
 
 /// Orchestrates one complete Sister runtime.
@@ -376,13 +376,26 @@ fn spawn_background_tasks(
             match acceptor {
                 StreamAcceptor::Direct(listener) => stream_accept_loop(stream_node, listener).await,
                 StreamAcceptor::Iroh(backend) => {
-                    iroh_session_accept_loop(stream_node, backend).await;
+                    // Bound concurrent inbound Iroh sessions and streams so a
+                    // peer (or many) cannot make this Sister spawn unbounded
+                    // tasks that outlive the handshake (§7).
+                    let session_slots = Arc::new(Semaphore::new(MAX_IROH_SESSIONS));
+                    let stream_slots = Arc::new(Semaphore::new(MAX_IROH_STREAMS));
+                    iroh_session_accept_loop(stream_node, backend, session_slots, stream_slots)
+                        .await;
                 }
             }
         }));
     }
     tasks
 }
+
+/// Caps for inbound Iroh work (§7). Conservative and intentionally simple: a
+/// semaphore bounds concurrency, timeouts bound how long a stalled, not-yet-
+/// authenticated stream can occupy a task.
+const MAX_IROH_SESSIONS: usize = 512;
+const MAX_IROH_STREAMS: usize = 2048;
+const AUTH_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 async fn stream_accept_loop(node: SisterNode, listener: misaka_network::NetworkListener) {
     let mut sessions = JoinSet::new();
@@ -413,7 +426,12 @@ async fn stream_accept_loop(node: SisterNode, listener: misaka_network::NetworkL
     while sessions.join_next().await.is_some() {}
 }
 
-async fn iroh_session_accept_loop(node: SisterNode, backend: misaka_network::IrohBackend) {
+async fn iroh_session_accept_loop(
+    node: SisterNode,
+    backend: misaka_network::IrohBackend,
+    session_slots: Arc<Semaphore>,
+    stream_slots: Arc<Semaphore>,
+) {
     let mut sessions = JoinSet::new();
     loop {
         tokio::select! {
@@ -421,8 +439,26 @@ async fn iroh_session_accept_loop(node: SisterNode, backend: misaka_network::Iro
             accepted = backend.accept_session_for_network(node.config.network_id) => {
                 match accepted {
                     Ok(session) => {
+                        // §7: refuse (close) rather than queue when inbound
+                        // session capacity is exhausted — bounded backpressure.
+                        let permit = match session_slots.clone().try_acquire_owned() {
+                            Ok(permit) => permit,
+                            Err(_) => {
+                                tracing::warn!(
+                                    event = "iroh_session_saturated",
+                                    sister_id = node.identity.id.as_u64(),
+                                    "rejecting an Iroh session: inbound capacity reached"
+                                );
+                                session.close();
+                                continue;
+                            }
+                        };
                         let session_node = node.clone();
+                        let streams = stream_slots.clone();
                         sessions.spawn(async move {
+                            // Holding the permit for the session's lifetime caps
+                            // concurrent sessions; dropped when this task ends.
+                            let _session_permit = permit;
                             // Enrollment rides a dedicated ALPN and is served by
                             // the Authority ahead of, and independently from, the
                             // authenticated member session (a joiner has no
@@ -442,7 +478,7 @@ async fn iroh_session_accept_loop(node: SisterNode, backend: misaka_network::Iro
                                 }
                                 return;
                             }
-                            iroh_session_loop(session_node, session).await;
+                            iroh_session_loop(session_node, session, streams).await;
                         });
                     }
                     Err(error) => {
@@ -463,7 +499,11 @@ async fn iroh_session_accept_loop(node: SisterNode, backend: misaka_network::Iro
     while sessions.join_next().await.is_some() {}
 }
 
-async fn iroh_session_loop(node: SisterNode, session: misaka_network::IrohSession) {
+async fn iroh_session_loop(
+    node: SisterNode,
+    session: misaka_network::IrohSession,
+    stream_slots: Arc<Semaphore>,
+) {
     let mut streams = JoinSet::new();
     loop {
         tokio::select! {
@@ -473,24 +513,54 @@ async fn iroh_session_loop(node: SisterNode, session: misaka_network::IrohSessio
                     Ok(stream) => {
                         let stream_node = node.clone();
                         let auth = node.config.authenticated_session.clone();
+                        let permit = match stream_slots.clone().try_acquire_owned() {
+                            Ok(permit) => permit,
+                            Err(_) => {
+                                // Bounded: drop the excess stream rather than
+                                // spawn an unbounded number of service tasks.
+                                tracing::debug!(
+                                    event = "iroh_stream_saturated",
+                                    sister_id = stream_node.identity.id.as_u64(),
+                                    "dropping an Iroh stream: per-node stream capacity reached"
+                                );
+                                drop(stream);
+                                continue;
+                            }
+                        };
                         streams.spawn(async move {
-                            // Authenticate, capturing the verified peer to bind
-                            // subsequent application messages to (legacy/dev
-                            // Iroh has no session material to authenticate with).
+                            let _stream_permit = permit;
+                            // Authenticate within a bound (§7): a peer that
+                            // connects but never completes the handshake cannot
+                            // pin this task forever or hang shutdown.
                             let (stream, peer) = match auth.as_ref() {
                                 Some(auth) => {
-                                    match crate::authenticated_session::authenticate_server(
-                                        stream, auth,
+                                    match tokio::time::timeout(
+                                        AUTH_HANDSHAKE_TIMEOUT,
+                                        crate::authenticated_session::authenticate_server(
+                                            stream, auth,
+                                        ),
                                     )
                                     .await
                                     {
-                                        Ok((stream, peer)) => (stream, Some(peer)),
-                                        Err(error) => {
+                                        Ok(Ok((stream, peer))) => (stream, Some(peer)),
+                                        Ok(Err(error)) => {
                                             tracing::warn!(
                                                 event = "iroh_authenticated_session_rejected",
                                                 sister_id = stream_node.identity.id.as_u64(),
                                                 error = %error,
                                                 "Iroh stream rejected before service dispatch"
+                                            );
+                                            return;
+                                        }
+                                        Err(_elapsed) => {
+                                            // §7: a peer that opens a stream but
+                                            // stalls the handshake is dropped on a
+                                            // bound, so it cannot pin this task or
+                                            // hang shutdown forever.
+                                            tracing::debug!(
+                                                event = "iroh_authenticated_session_timeout",
+                                                sister_id = stream_node.identity.id.as_u64(),
+                                                "Iroh handshake timed out; dropping stream"
                                             );
                                             return;
                                         }
@@ -1953,10 +2023,14 @@ mod tests {
         let server_task = tokio::spawn(iroh_session_accept_loop(
             server_node.clone(),
             server_backend,
+            std::sync::Arc::new(tokio::sync::Semaphore::new(super::MAX_IROH_SESSIONS)),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(super::MAX_IROH_STREAMS)),
         ));
         let client_task = tokio::spawn(iroh_session_accept_loop(
             client_node.clone(),
             client_backend.clone(),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(super::MAX_IROH_SESSIONS)),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(super::MAX_IROH_STREAMS)),
         ));
 
         let discovered = crate::discovery::DiscoveredPeer {
