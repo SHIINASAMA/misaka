@@ -56,3 +56,10 @@ Joining installs only the Network descriptor, the recipient's certificate,
 and verified bootstrap records. Peer knowledge then expands through the
 authenticated Iroh control channel; there is no DHT, consensus, or leader
 election.
+
+Once two Sisters belong to the same Network, ongoing discovery can go through
+a **Gateway**: each configures a Gateway domain and exchanges signed
+`PeerRecord`s over HTTPS, then forms the same authenticated Iroh connection.
+Enrollment, membership issuance, and the Authority remain entirely separate
+from the Gateway, which never holds the private key. See
+[gateway-v0.md](gateway-v0.md).

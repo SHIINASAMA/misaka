@@ -79,12 +79,13 @@ deadlock when two fresh Sisters simultaneously wait for each other's Hello.
 `run` starts cancellable background tasks and selects between listener
 acceptance and shutdown.
 
-The same token is selected by discovery, state broadcast, cleanup, executor,
-work stealing, response-listener, and accept loops. On cancellation, the
-accept loop stops, in-flight request tasks are aborted, service tasks are
-joined within `RuntimeConfig.shutdown_timeout`, and `sister_stopped` is
-emitted. A currently running `spawn_blocking` command is allowed to finish;
-shutdown waits only up to the configured bound and then detaches if necessary.
+The same token is selected by discovery, gateway discovery, state broadcast,
+cleanup, executor, work stealing, response-listener, and accept loops. On
+cancellation, the accept loop stops, in-flight request tasks are aborted,
+service tasks are joined within `RuntimeConfig.shutdown_timeout`, and
+`sister_stopped` is emitted. A currently running `spawn_blocking` command is
+allowed to finish; shutdown waits only up to the configured bound and then
+detaches if necessary.
 
 The CLI installs SIGTERM/SIGINT handling on `Start`. A signal requests this
 cooperative shutdown and the process exits successfully after `run` returns.
@@ -128,6 +129,29 @@ the key exchange and record encryption. `RuntimeConfig::MutualTls` wires this
 primitive into an opt-in listener, while the default raw stream remains
 loopback-only. Trust provisioning is explicit and is never inferred from
 mDNS alone.
+
+## Discovery and the Gateway v0
+
+Sisters learn about each other through `DiscoveryMode` (mDNS on a LAN, manual
+peer addresses, or off). Beyond that, a **Gateway** lets Sisters that already
+share a Network discover each other over plain HTTPS using only a configured
+domain. The `gateway_loop` background task periodically announces the local
+signed `PeerRecord`, fetches peers from every configured Gateway independently,
+merges results per Sister by the highest `PeerRecord::sequence`, and calls
+`SisterNode::bootstrap_peer_record` for new or newer locators. Bootstrap
+re-verifies the record, cross-checks its endpoint against its own
+`TransportBinding`, and pins the authenticated Iroh Hello to the record's
+Sister id before storing it, so the Gateway is never a trust anchor.
+
+The Gateway layering rule is **crypto vs. storage**: the signature and
+membership verification (`misaka_core::gateway::verify_request`) is shared
+pure code in `misaka-core`; the directory state machine (uniqueness,
+monotonic-sequence update, nonce replay, TTL, GC, list) is owned by the storage
+platform — Durable Object SQL for the Cloudflare reference host, an in-process
+map for the native `misaka-gatewayd` self-host/test host. It is deliberately
+not reimplemented as a reusable Rust state machine. Gateways never talk to each
+other, replicate, elect a leader, or reconcile. `--iroh-peer` remains only a
+debug/recovery escape hatch. Full design: [gateway-v0.md](gateway-v0.md).
 
 ## Network Stream v0 boundary
 

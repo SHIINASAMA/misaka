@@ -69,6 +69,11 @@ separately. Introspection is never advertised. `manual` discovery uses configure
 addresses and is the deterministic mode for Testament; `off` disables
 discovery while retaining local execution and direct configured operations.
 
+A **Gateway** is a separate, out-of-band discovery path and is not part of this
+peer envelope protocol: Sisters exchange signed `PeerRecord`s with it over
+plain HTTPS, then use the authenticated Iroh control plane above for the actual
+peer connection. See [gateway-v0.md](gateway-v0.md).
+
 ## Introspection (not peer protocol)
 
 When explicitly enabled, a Sister exposes a loopback-only JSON snapshot over a separate TCP listener. It is read-only and contains no mutation or job submission operation. It is not encrypted peer traffic, does not use the envelope format, and is never used by Sisters to communicate with each other.

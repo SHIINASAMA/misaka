@@ -5,13 +5,39 @@ Misaka Network is a local-network, decentralized runtime in which every node is 
 ## Workspace
 
 ```text
-misaka-core       shared identity, job, peer, and protocol contracts
-misaka-runtime    Sister networking and runtime services
-misaka            CLI for starting Sisters and submitting jobs
+misaka-core       shared identity, job, peer, protocol, and Gateway contracts
+misaka-network    Network Stream transports (Direct TCP and opt-in Iroh)
+misaka-runtime    Sister networking, discovery, and runtime services
+misaka-api        local loopback HTTP API over a running Sister
+misaka            CLI for starting Sisters, submitting jobs, and managing Gateways
+misaka-relay      native Iroh relay server (infrastructure only)
+misaka-gatewayd   native reference Gateway (discovery service / self-host)
 testament         external real-process scenario harness
+gateway/cloudflare  Cloudflare Workers reference Gateway (separate cargo workspace)
 ```
 
-Dependency direction is intentionally one-way: `misaka-core <- misaka-runtime <- misaka`, while Testament depends only on `misaka-core` and the external `misaka` executable.
+Dependency direction is intentionally one-way: `misaka-core <- misaka-network <-
+misaka-runtime <- { misaka, misaka-api, misaka-gatewayd }`, while Testament
+depends only on `misaka-core` and the external `misaka` executable. The
+Cloudflare Gateway is its own workspace and consumes `misaka-core` as a path
+dependency.
+
+## Gateway v0
+
+Sisters that already share a Network can discover each other through a Gateway
+using only a domain name, then form the existing authenticated Iroh P2P. The
+Gateway stores signed `PeerRecord`s and never manufactures trust, never holds
+the Authority private key, and is out of the path once the connection forms.
+
+```bash
+misaka network gateway add https://gateway.example.com
+misaka start --stream-backend iroh          # no --iroh-peer needed for discovery
+misaka network gateway serve --bind 0.0.0.0:8443 \
+  --network-id <uuid> --authority-public-key <hex>   # native reference host
+```
+
+See [docs/gateway-v0.md](docs/gateway-v0.md) for the wire contract, the Cloudflare
+Durable-Object deployment, and the multi-Gateway discovery loop.
 
 ## Quick start
 
@@ -94,6 +120,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
 cargo build -p misaka
 cargo run -p testament -- verify --json
+cargo run -p testament -- gateway-verify --json
 ```
 
 Testament launches real `misaka` OS processes. It does not instantiate runtime objects, execute commands in-process, join discovery, or serve as a network peer. Test run artifacts live under `.testament/`, which is ignored by Git. Deterministic scenarios use manual peer topology; mDNS is reserved for a separate environment-sensitive smoke test.

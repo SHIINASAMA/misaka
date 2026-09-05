@@ -12,6 +12,7 @@ cargo run -p testament -- verify
 cargo run -p testament -- verify --json
 cargo run -p testament -- network-verify --json
 cargo run -p testament -- security-verify --json
+cargo run -p testament -- gateway-verify --json
 ```
 
 The suite currently contains:
@@ -189,6 +190,27 @@ an external NAT or cross-domain claim. For real-host measurements, pass
 `--iroh-relay <URL> --iroh-relay-only` to both endpoints to make the
 relay-only condition explicit and repeatable.
 
+## Gateway v0 suite
+
+`gateway-verify` spawns a native reference Gateway (`misaka network gateway
+serve`) and drives real HTTP against it, while discovery runs against real Iroh
+Sisters. G01–G05, G07–G10 are process scenarios; G06 is a deterministic
+`misaka-runtime` unit test.
+
+- `G01` a valid member announce is accepted and returned by a peers query.
+- `G02` a record whose identity does not match the presenting membership is rejected.
+- `G03` an expired or invalid membership is rejected.
+- `G04` a replayed nonce is rejected on second use.
+- `G05` *(Definition of Done)* two Sisters that know only the Gateway domain discover each other and complete the authenticated Iroh connection.
+- `G06` a Sister rejects a malicious Gateway record locally (`bootstrap_rejects_untrusted_records`: foreign network, failed self-verification, and endpoint/`TransportBinding` mismatch, each rejected before any dial).
+- `G07` two Gateways with one killed — discovery still converges.
+- `G08` Gateway down after connect — the formed P2P persists.
+- `G09` Gateway removed — the Sister keeps operating and retains the peer.
+- `G10` the normal discovery path carries zero manual `iroh://` bootstrap.
+
+Discovery scenarios use `--gateway` with a short `--gateway-interval` and never
+pass `--iroh-peer`; assertions use introspection (peers converged), not logs.
+
 ## CI gate
 
 The baseline gate is:
@@ -199,4 +221,5 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
 cargo build -p misaka
 cargo run -p testament -- verify --json
+cargo run -p testament -- gateway-verify --json
 ```
