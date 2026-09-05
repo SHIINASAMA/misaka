@@ -10,7 +10,7 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../../.." && pwd)"
 GW="$HERE/.."
-PORT=8799
+PORT=8899
 BASE="http://127.0.0.1:$PORT"
 
 NETWORK_ID="03030303-0303-0303-0303-030303030303"
@@ -39,6 +39,8 @@ AUTH_PUB="$("$SIGN" authority-pub "$AUTH_SECRET")"
 # Start the Worker with a short record TTL. `wrangler dev --local` persists DO
 # state (`.wrangler/state`) across runs; wipe it so nonces/peers start fresh.
 rm -rf "$GW/.wrangler"
+# A prior CI step may leave workerd bound to a port; clear strays first.
+pkill -f "wrangler dev" 2>/dev/null; pkill -f workerd 2>/dev/null; sleep 1
 ( cd "$GW" && npx wrangler dev --local --port "$PORT" \
     --var "NETWORK_ID:$NETWORK_ID" \
     --var "NETWORK_AUTHORITY_PUBLIC_KEY:$AUTH_PUB" \

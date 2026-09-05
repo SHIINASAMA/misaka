@@ -72,6 +72,8 @@ jobs:
           VERIFY="$(curl -s http://127.0.0.1:8799/verify)"
           INFO="$(curl -s http://127.0.0.1:8799/.well-known/misaka)"
           kill $WPID 2>/dev/null || true
+          pkill -f "wrangler dev" 2>/dev/null || true
+          pkill -f workerd 2>/dev/null || true
           echo "GET /                  -> $HELLO"
           echo "GET /verify            -> $VERIFY"
           echo "GET /.well-known/misaka-> $INFO"
