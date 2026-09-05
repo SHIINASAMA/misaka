@@ -22,7 +22,7 @@ use misaka_core::{
 };
 
 use crate::auth::{
-    authority_from_env, now_secs, record_ttl_secs, AUTH_WINDOW_SECS, NONCE_TTL_SECS,
+    authority_from_env, nonce_ttl_secs, now_secs, record_ttl_secs, AUTH_WINDOW_SECS,
 };
 
 /// A row of the `peers` table. `record` is the JSON-encoded signed locator.
@@ -78,12 +78,17 @@ impl GatewayDirectory {
     /// Atomically spend a request nonce. A second use of a still-blocking nonce
     /// fails on the PRIMARY KEY and is reported as replayed. Shared by both the
     /// announce and peers routes so replay protection is uniform.
-    fn spend_nonce(storage: &Storage, nonce: &[u8; 16], now: u64) -> Result<Nonce> {
+    fn spend_nonce(
+        storage: &Storage,
+        nonce: &[u8; 16],
+        now: u64,
+        nonce_ttl: u64,
+    ) -> Result<Nonce> {
         match storage.sql().exec(
             "INSERT INTO nonces (nonce, expires_at) VALUES (?, ?)",
             Some(vec![
                 SqlStorageValue::from(nonce.to_vec()),
-                SqlStorageValue::from((now + NONCE_TTL_SECS) as i64),
+                SqlStorageValue::from((now + nonce_ttl) as i64),
             ]),
         ) {
             Ok(_) => Ok(Nonce::Fresh),
@@ -113,9 +118,13 @@ impl GatewayDirectory {
         let storage = self.state.storage();
         Self::ensure_schema(&storage)?;
         let record_ttl = record_ttl_secs(&self.env);
+        let nonce_ttl = nonce_ttl_secs(&self.env);
 
         // 2. Spend the nonce (shared with /v1/peers).
-        if matches!(Self::spend_nonce(&storage, &parsed.auth.nonce, now)?, Nonce::Replayed) {
+        if matches!(
+            Self::spend_nonce(&storage, &parsed.auth.nonce, now, nonce_ttl)?,
+            Nonce::Replayed
+        ) {
             return Response::error("replayed nonce", 401);
         }
 
@@ -181,9 +190,20 @@ impl GatewayDirectory {
 
         // Peers queries are authenticated member requests too: spend the nonce so
         // a captured peers request cannot be replayed (parity with announce).
-        if matches!(Self::spend_nonce(&storage, &parsed.auth.nonce, now)?, Nonce::Replayed) {
+        if matches!(
+            Self::spend_nonce(
+                &storage,
+                &parsed.auth.nonce,
+                now,
+                nonce_ttl_secs(&self.env)
+            )?,
+            Nonce::Replayed
+        ) {
             return Response::error("replayed nonce", 401);
         }
+        // Re-arm GC: a peers call can be the only thing that ever wrote a row
+        // (empty directory), so schedule the alarm off the nonce expiry too.
+        self.schedule_alarm(&storage).await;
 
         let rows = storage
             .sql()
@@ -204,13 +224,20 @@ impl GatewayDirectory {
         Response::from_json(&GatewayPeersResponse { records })
     }
 
-    /// Schedule the GC alarm for the soonest-expiring record. Best-effort for
-    /// correctness (reads already filter `expires_at > now`), but it must be
-    /// awaited so the DO actually records the alarm.
+    /// Schedule the GC alarm for the soonest expiry across BOTH tables. A peers
+    /// call with an empty directory still leaves a nonce row, so the alarm must
+    /// not be driven by `peers` alone or spent nonces would never be collected.
     async fn schedule_alarm(&self, storage: &Storage) {
         if let Ok(min) = storage
             .sql()
-            .exec("SELECT min(expires_at) AS n FROM peers", None)
+            .exec(
+                "SELECT min(expires_at) AS n FROM (
+                     SELECT expires_at FROM peers
+                     UNION ALL
+                     SELECT expires_at FROM nonces
+                 )",
+                None,
+            )
             .and_then(|c| c.one::<MinRow>())
         {
             if let Some(expires_at_secs) = min.n {

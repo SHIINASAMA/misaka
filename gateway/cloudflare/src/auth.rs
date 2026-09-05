@@ -49,6 +49,17 @@ pub fn record_ttl_secs(env: &Env) -> u64 {
         .unwrap_or(RECORD_TTL_SECS)
 }
 
+/// How long a spent nonce keeps blocking replays. Defaults to
+/// [`NONCE_TTL_SECS`]; overridable via `GATEWAY_NONCE_TTL_SECS` so the nonce-GC
+/// test does not wait the full window. Default behaviour is unchanged.
+pub fn nonce_ttl_secs(env: &Env) -> u64 {
+    env.var("GATEWAY_NONCE_TTL_SECS")
+        .ok()
+        .and_then(|value| value.to_string().parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .unwrap_or(NONCE_TTL_SECS)
+}
+
 /// Minimal lowercase/uppercase hex decoder. `misaka-core` intentionally has no
 /// hex crate dependency; only this Gateway host needs to read a hex public key
 /// from configuration, so the helper lives here rather than in the shared crate.

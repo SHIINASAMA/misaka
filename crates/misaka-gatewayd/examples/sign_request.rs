@@ -10,8 +10,13 @@
 //!   cargo run -p misaka-gatewayd --example sign_request -- <args>
 //!
 //!   authority-pub  <auth_secret_hex>                       -> hex pubkey
-//!   announce <network_id> <auth_secret_hex> <sister_secret_hex> <sister_id> <nonce_hex> [expires_in_secs]
+//!   announce <network_id> <auth_secret_hex> <sister_secret_hex> <sister_id> <nonce_hex> <expires_in_secs> <record_sequence>
 //!   peers    <network_id> <auth_secret_hex> <sister_secret_hex> <sister_id> <nonce_hex> [expires_in_secs]
+//!
+//! `record_sequence` fixes the announced `PeerRecord` sequence so a test can
+//! re-announce the SAME sequence (renewal) rather than accidentally bumping it.
+//! The record's `updated_at` is pinned to that sequence, so two calls with the
+//! same `record_sequence` produce byte-identical `PeerRecord`s.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -80,19 +85,23 @@ fn main() {
     );
 
     let body = if mode == "announce" {
+        let sequence: u64 = argv[7].parse().expect("record sequence");
         let binding = TransportBinding::sign(
             network_id,
             sister_id,
             IrohEndpointId::from_bytes([7u8; 32]),
-            1,
+            sequence,
             &sister_key,
         );
+        // updated_at pinned to the sequence: same sequence => byte-identical
+        // record, so a re-announce is a genuine same-record renewal, not a new
+        // locator that merely happens to carry a higher sequence.
         let record = PeerRecord::issue(
             network_id,
             sister_id,
             "iroh://peer".to_string(),
             binding,
-            now,
+            sequence,
             &sister_key,
         );
         let auth = GatewayAuth::sign_announce(
