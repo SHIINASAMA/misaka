@@ -18,7 +18,6 @@ use misaka_core::{
 use misaka_network::{IrohSession, NetworkError, NetworkStream, ENROLLMENT_ALPN};
 use rand::random;
 use std::io;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -47,9 +46,9 @@ pub struct EnrollmentServer {
     locator: PeerRecord,
     /// Additional already-trusted bootstrap records the Authority can share.
     extra_bootstrap: Vec<PeerRecord>,
-    /// Monotonic serial allocator so each redeemed membership gets a distinct,
-    /// individually revocable serial.
-    next_serial: std::sync::Arc<AtomicU64>,
+    /// Persistent monotonic MembershipCertificate serial allocator. Survives
+    /// Authority restart and never reuses a serial (revocation is keyed on it).
+    serials: std::sync::Arc<crate::membership_serial_store::MembershipSerialStore>,
 }
 
 impl std::fmt::Debug for EnrollmentServer {
@@ -63,7 +62,9 @@ impl std::fmt::Debug for EnrollmentServer {
 }
 
 impl EnrollmentServer {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
+        data_dir: &std::path::Path,
         network_id: NetworkId,
         authority: NetworkAuthority,
         authority_key: AuthorityKeyPair,
@@ -71,9 +72,8 @@ impl EnrollmentServer {
         iroh_endpoint_id: IrohEndpointId,
         locator: PeerRecord,
         extra_bootstrap: Vec<PeerRecord>,
-    ) -> Self {
-        let seed = now_secs().max(1);
-        Self {
+    ) -> std::io::Result<Self> {
+        Ok(Self {
             network_id,
             authority,
             authority_key,
@@ -81,8 +81,10 @@ impl EnrollmentServer {
             iroh_endpoint_id,
             locator,
             extra_bootstrap,
-            next_serial: std::sync::Arc::new(AtomicU64::new(seed)),
-        }
+            serials: std::sync::Arc::new(
+                crate::membership_serial_store::MembershipSerialStore::open(data_dir)?,
+            ),
+        })
     }
 
     /// Whether this session was negotiated for the enrollment protocol.
@@ -136,24 +138,43 @@ impl EnrollmentServer {
         write_frame(&mut stream, &ServerReply::Challenge(challenge.clone())).await?;
 
         let proof: EnrollmentProof = read_frame(&mut stream).await?;
-        let verified = challenge.verify(&proof);
-        let response = if verified {
-            tracing::info!(
-                event = "enrollment_redeemed",
-                network_id = %self.network_id,
-                new_sister_id = request.sister_id.as_u64(),
-                "issued enrollment membership"
-            );
-            self.issue_membership(&request)
-        } else {
+        let response = if !challenge.verify(&proof) {
             EnrollmentResponse::rejected(EnrollmentRejectionKind::InvalidProof.to_core())
+        } else {
+            match self.serials.allocate() {
+                Ok(serial) => {
+                    tracing::info!(
+                        event = "enrollment_redeemed",
+                        network_id = %self.network_id,
+                        new_sister_id = request.sister_id.as_u64(),
+                        membership_serial = serial,
+                        "issued enrollment membership"
+                    );
+                    self.issue_membership(&request, serial)
+                }
+                Err(error) => {
+                    // Never fall back to a non-persisted serial: reuse would
+                    // corrupt revocation. Refuse and let the client retry.
+                    tracing::warn!(
+                        event = "enrollment_serial_alloc_failed",
+                        error = %error,
+                        sister_id = self.sister_id,
+                        "could not allocate a durable membership serial"
+                    );
+                    EnrollmentResponse::rejected(EnrollmentRejectionKind::IssuanceFailed.to_core())
+                }
+            }
         };
+        let accepted = matches!(
+            response.outcome,
+            misaka_core::EnrollmentOutcome::Accepted { .. }
+        );
         write_frame(&mut stream, &response).await?;
-        if verified {
+        if accepted {
             Ok(())
         } else {
             Err(EnrollmentFailure::Rejected(
-                EnrollmentRejectionKind::InvalidProof,
+                EnrollmentRejectionKind::IssuanceFailed,
             ))
         }
     }
@@ -195,9 +216,9 @@ impl EnrollmentServer {
 
     /// Issue a normal, Authority-signed membership indistinguishable from one
     /// provisioned any other way, and return only public recipient material.
-    fn issue_membership(&self, request: &EnrollmentRequest) -> EnrollmentResponse {
+    /// `serial` comes from the durable allocator (never reused).
+    fn issue_membership(&self, request: &EnrollmentRequest, serial: u64) -> EnrollmentResponse {
         let now = now_secs();
-        let serial = self.next_serial.fetch_add(1, Ordering::Relaxed);
         let membership = MembershipCertificate::issue(
             &self.authority,
             &self.authority_key,
@@ -449,6 +470,12 @@ mod tests {
         (server, client, addr)
     }
 
+    /// A fresh temp directory backing the persistent membership serial store
+    /// (unique per test so concurrent tests never share a high-water mark).
+    fn serial_dir() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("misaka-enroll-serial-{}", uuid::Uuid::new_v4()))
+    }
+
     fn signed_locator(
         network_id: NetworkId,
         sister_key: &SisterKeyPair,
@@ -482,6 +509,7 @@ mod tests {
             locator.clone(),
         );
         let server = EnrollmentServer::new(
+            &serial_dir(),
             network_id,
             authority,
             authority_key.clone(),
@@ -489,7 +517,8 @@ mod tests {
             endpoint_id,
             locator,
             vec![],
-        );
+        )
+        .unwrap();
 
         // Clone the backend into the serve task so the original endpoint stays
         // alive in this scope until the exchange completes (a running Authority
@@ -553,6 +582,7 @@ mod tests {
             locator.clone(),
         );
         let server = EnrollmentServer::new(
+            &serial_dir(),
             network_id,
             authority,
             authority_key.clone(),
@@ -560,7 +590,8 @@ mod tests {
             endpoint_id,
             locator,
             vec![],
-        );
+        )
+        .unwrap();
         let accept_backend = server_backend.clone();
         let serve = tokio::spawn(async move {
             for _ in 0..2 {
@@ -618,6 +649,7 @@ mod tests {
             locator.clone(),
         );
         let server = EnrollmentServer::new(
+            &serial_dir(),
             network_id,
             authority,
             authority_key,
@@ -625,7 +657,8 @@ mod tests {
             endpoint_id,
             locator,
             vec![],
-        );
+        )
+        .unwrap();
         let accept_backend = server_backend.clone();
         let serve = tokio::spawn(async move {
             let session = accept_backend
@@ -670,6 +703,7 @@ mod tests {
         );
         let locator = signed_locator(network_id, &server_key, endpoint_id);
         let server = EnrollmentServer::new(
+            &serial_dir(),
             network_id,
             authority,
             authority_key,
@@ -677,7 +711,8 @@ mod tests {
             endpoint_id,
             locator,
             vec![],
-        );
+        )
+        .unwrap();
         let accept_backend = server_backend.clone();
         let serve = tokio::spawn(async move {
             let session = accept_backend
@@ -726,6 +761,7 @@ mod tests {
             locator.clone(),
         );
         let server = EnrollmentServer::new(
+            &serial_dir(),
             network_id,
             authority,
             authority_key,
@@ -733,7 +769,8 @@ mod tests {
             endpoint_id,
             locator,
             vec![],
-        );
+        )
+        .unwrap();
         let accept = server_backend.clone();
         let serve = tokio::spawn(async move {
             let session = accept.accept_session_for_network(network_id).await.unwrap();

@@ -829,6 +829,16 @@ async fn async_main() -> Result<(), MisakaError> {
                     }
                     existing
                 } else {
+                    // Allocate the owner serial from the same durable allocator
+                    // enrollment uses, so no Authority-issued Sister membership
+                    // ever shares a serial (revocation is keyed on it).
+                    let serial =
+                        misaka_runtime::membership_serial_store::MembershipSerialStore::open(
+                            &data_dir,
+                        )
+                        .map_err(|error| MisakaError::Other(error.to_string()))?
+                        .allocate()
+                        .map_err(|error| MisakaError::Other(error.to_string()))?;
                     let membership = MembershipCertificate::issue(
                         &authority,
                         &authority_key(&data_dir)?,
@@ -836,7 +846,7 @@ async fn async_main() -> Result<(), MisakaError> {
                         identity.id.as_u64(),
                         now,
                         None,
-                        1,
+                        serial,
                     );
                     MembershipStore::save(&data_dir, &membership)
                         .map_err(|error| MisakaError::Other(error.to_string()))?;
@@ -3283,15 +3293,21 @@ fn build_enrollment_server(
         .into_values()
         .filter(|record| record.sister_id != peer_record.sister_id)
         .collect();
-    Ok(Some(enrollment::EnrollmentServer::new(
-        network_id,
-        authority,
-        authority_key,
-        identity.id.as_u64(),
-        binding.iroh_endpoint_id,
-        peer_record.clone(),
-        extra_bootstrap,
-    )))
+    Ok(Some(
+        enrollment::EnrollmentServer::new(
+            data_dir,
+            network_id,
+            authority,
+            authority_key,
+            identity.id.as_u64(),
+            binding.iroh_endpoint_id,
+            peer_record.clone(),
+            extra_bootstrap,
+        )
+        .map_err(|error| {
+            format!("could not open the enrollment membership serial store: {error}")
+        })?,
+    ))
 }
 
 fn join_network_invite(

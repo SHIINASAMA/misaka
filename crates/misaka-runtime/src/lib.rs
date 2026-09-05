@@ -27,6 +27,7 @@ pub mod iroh_endpoint_store;
 pub mod iroh_identity_store;
 pub mod job_manager;
 pub mod join_transaction;
+pub mod membership_serial_store;
 pub mod membership_store;
 pub mod network;
 pub mod network_authority_store;
