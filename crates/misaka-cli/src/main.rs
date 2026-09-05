@@ -488,7 +488,17 @@ fn main() -> Result<(), MisakaError> {
         .thread_stack_size(8 * 1024 * 1024)
         .enable_all()
         .build()?;
-    runtime.block_on(async_main())
+    // Run the whole command on a runtime *worker* thread, not the OS main
+    // thread. `Runtime::block_on` polls the future it is given on the calling
+    // thread, and `thread_stack_size` only sizes spawned workers — so awaiting
+    // `async_main()` directly would run Iroh's deep connect call stack (used by
+    // `network join`, `connect`, …) on the main thread's stack, which is only
+    // 1 MiB on Windows and overflows. Spawning `async_main` puts it on an
+    // 8 MiB worker; the main thread merely waits on the JoinHandle.
+    let task = runtime.spawn(async_main());
+    runtime
+        .block_on(task)
+        .map_err(|error| MisakaError::Other(format!("misaka task terminated abnormally: {error}")))?
 }
 
 async fn async_main() -> Result<(), MisakaError> {
