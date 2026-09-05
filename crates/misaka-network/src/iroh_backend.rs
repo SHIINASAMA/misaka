@@ -6,8 +6,8 @@
 
 use crate::{
     validate_handshake, AsyncStream, ListenerFuture, NetworkEndpoint, NetworkError,
-    NetworkListener, NetworkListenerDriver, NetworkStream, PathInfo, Result, HANDSHAKE_LEN,
-    HANDSHAKE_TIMEOUT, IROH_ALPN, MAGIC, PROTOCOL_VERSION,
+    NetworkListener, NetworkListenerDriver, NetworkStream, PathInfo, Result, ENROLLMENT_ALPN,
+    HANDSHAKE_LEN, HANDSHAKE_TIMEOUT, IROH_ALPN, MAGIC, PROTOCOL_VERSION,
 };
 use futures_util::StreamExt;
 use iroh::endpoint::{Connection, IncomingAddr, PathList, RecvStream, SendStream};
@@ -25,6 +25,15 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 pub struct IrohBackend {
     endpoint: Endpoint,
     alpn: Vec<u8>,
+}
+
+/// The ALPN set every Misaka Iroh endpoint advertises.
+///
+/// The member stream protocol and the narrow enrollment protocol share one
+/// endpoint and are distinguished by the negotiated ALPN, so enrollment can be
+/// served by an ordinary running Sister without a separate networking stack.
+pub fn misaka_alpns() -> Vec<Vec<u8>> {
+    vec![IROH_ALPN.to_vec(), ENROLLMENT_ALPN.to_vec()]
 }
 
 impl IrohBackend {
@@ -47,7 +56,7 @@ impl IrohBackend {
     pub async fn bind_with_secret_key(secret_key: iroh::SecretKey) -> Result<Self> {
         let endpoint = Endpoint::builder(iroh::endpoint::presets::N0)
             .secret_key(secret_key)
-            .alpns(vec![IROH_ALPN.to_vec()])
+            .alpns(misaka_alpns())
             .bind()
             .await
             .map_err(|error| NetworkError::Iroh(error.to_string()))?;
@@ -64,7 +73,7 @@ impl IrohBackend {
     ) -> Result<Self> {
         let endpoint = Endpoint::builder(iroh::endpoint::presets::N0)
             .secret_key(secret_key)
-            .alpns(vec![IROH_ALPN.to_vec()])
+            .alpns(misaka_alpns())
             .relay_mode(iroh::RelayMode::Custom(iroh::RelayMap::from(relay_url)))
             .bind()
             .await
@@ -82,7 +91,7 @@ impl IrohBackend {
     ) -> Result<Self> {
         let endpoint = Endpoint::builder(iroh::endpoint::presets::N0)
             .secret_key(secret_key)
-            .alpns(vec![IROH_ALPN.to_vec()])
+            .alpns(misaka_alpns())
             .relay_mode(iroh::RelayMode::Custom(iroh::RelayMap::from(relay_url)))
             .clear_ip_transports()
             .bind()
@@ -103,6 +112,21 @@ impl IrohBackend {
         endpoint: NetworkEndpoint,
         network_id: NetworkId,
     ) -> Result<IrohSession> {
+        self.connect_session_with_alpn(endpoint, network_id, &self.alpn)
+            .await
+    }
+
+    /// Establish one long-lived connection on an explicit ALPN.
+    ///
+    /// Enrollment clients dial the Authority on [`ENROLLMENT_ALPN`]; the member
+    /// control plane keeps dialing on [`IROH_ALPN`]. The endpoint advertises both,
+    /// so the choice is per-connection, not per-backend.
+    pub async fn connect_session_with_alpn(
+        &self,
+        endpoint: NetworkEndpoint,
+        network_id: NetworkId,
+        alpn: &[u8],
+    ) -> Result<IrohSession> {
         let NetworkEndpoint::Iroh(endpoint_addr) = endpoint else {
             return Err(NetworkError::UnsupportedEndpoint(
                 "IrohBackend requires iroh:// endpoint".to_string(),
@@ -110,7 +134,7 @@ impl IrohBackend {
         };
         let connection = self
             .endpoint
-            .connect(endpoint_addr, &self.alpn)
+            .connect(endpoint_addr, alpn)
             .await
             .map_err(|error| NetworkError::Iroh(error.to_string()))?;
         Ok(IrohSession::new(
@@ -165,6 +189,7 @@ pub struct IrohSession {
     connection: Connection,
     path_telemetry: IrohPathTelemetry,
     network_id: NetworkId,
+    alpn: Vec<u8>,
 }
 
 impl std::fmt::Debug for IrohSession {
@@ -189,13 +214,24 @@ impl IrohSession {
                 path.route = incoming_route(incoming_addr).to_string();
             }
         }
+        let alpn = connection.alpn().to_vec();
         let path_telemetry = IrohPathTelemetry::new(connection.clone(), path);
         Self {
             endpoint,
             connection,
             path_telemetry,
             network_id,
+            alpn,
         }
+    }
+
+    /// The ALPN this connection actually negotiated.
+    ///
+    /// A single running Sister advertises both the member and enrollment ALPNs;
+    /// the accept loop dispatches on this value so enrollment is served ahead of,
+    /// and independently from, the authenticated member session.
+    pub fn negotiated_alpn(&self) -> &[u8] {
+        &self.alpn
     }
 
     pub fn remote_id(&self) -> iroh::EndpointId {

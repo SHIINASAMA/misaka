@@ -5,8 +5,8 @@ use testament::run_manager::{
     set_current_run,
 };
 use testament::scenario::{
-    gateway_scenarios, network_scenarios, relay_scenarios, run_gateway_live, scenarios,
-    security_scenarios, Context, ScenarioDef,
+    enrollment_scenarios, gateway_scenarios, network_scenarios, relay_scenarios, run_gateway_live,
+    scenarios, security_scenarios, Context, ScenarioDef,
 };
 use testament::types::{Manifest, RunLayout, SisterEntry};
 
@@ -92,6 +92,12 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Run timed-invite enrollment scenarios (E01-E13) against real processes.
+    #[command(name = "enrollment-verify")]
+    EnrollmentVerify {
+        #[arg(long)]
+        json: bool,
+    },
     /// Run relay-only and Sister+Relay black-box scenarios (R01-R07).
     #[command(name = "relay-verify")]
     RelayVerify {
@@ -147,6 +153,9 @@ fn main() {
         Command::Verify { json } => verify(json),
         Command::NetworkVerify { json } => {
             verify_definitions(json, network_scenarios(), "network stream scenarios")
+        }
+        Command::EnrollmentVerify { json } => {
+            verify_definitions(json, enrollment_scenarios(), "enrollment scenarios")
         }
         Command::RelayVerify { json } => {
             verify_definitions(json, relay_scenarios(), "relay scenarios")

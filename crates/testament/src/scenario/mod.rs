@@ -9,6 +9,7 @@
 
 mod context;
 mod core;
+mod enrollment;
 mod gateway;
 pub(crate) mod helpers;
 mod live;
@@ -42,6 +43,7 @@ pub use context::Context;
 pub use types::{ScenarioDef, ScenarioFn};
 
 pub use core::scenarios;
+pub use enrollment::enrollment_scenarios;
 pub use gateway::gateway_scenarios;
 pub use live::run_gateway_live;
 pub use network::network_scenarios;

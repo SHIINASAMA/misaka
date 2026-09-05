@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::authenticated_session::AuthenticatedSessionConfig;
+use crate::enrollment::EnrollmentServer;
 
 #[derive(Debug, Clone)]
 pub enum StreamSecurity {
@@ -65,6 +66,11 @@ pub struct RuntimeConfig {
     /// Optional authenticated Iroh session material. When present, Iroh
     /// streams must complete ClientHello/ServerHello before services run.
     pub authenticated_session: Option<AuthenticatedSessionConfig>,
+    /// Optional enrollment service. When present, a Sister that holds the
+    /// Network Authority private key answers the enrollment ALPN by redeeming
+    /// timed invites into ordinary memberships. Never set without the authority
+    /// private key, and never served by a Gateway.
+    pub enrollment: Option<EnrollmentServer>,
     /// Explicit compatibility switch for local development scenarios that do
     /// not provision Human identity material. Production defaults to fail
     /// closed for every side-effecting remote operation.
@@ -115,6 +121,7 @@ impl Default for RuntimeConfig {
             stream_security: StreamSecurity::InsecureLoopback,
             probe_only: false,
             authenticated_session: None,
+            enrollment: None,
             allow_unauthenticated_operations: false,
             peer_record: None,
             gateways: Vec::new(),

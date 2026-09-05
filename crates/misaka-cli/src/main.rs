@@ -10,11 +10,11 @@ use misaka_core::protocol::{
     TUNNEL_MAGIC,
 };
 use misaka_core::{
-    CommandAuthorization, HumanMembershipCertificate, IrohEndpointId, MembershipCertificate,
-    MembershipKind, NetworkId, NetworkInvite, PeerRecord, Permission, Principal, Role,
-    SisterKeyPair, SisterPublicKey,
+    CommandAuthorization, EnrollmentInvite, HumanMembershipCertificate, IrohEndpointId,
+    MembershipCertificate, MembershipKind, NetworkId, NetworkInvite, PeerRecord, Permission,
+    Principal, Role, SisterKeyPair, SisterPublicKey, MAX_INVITE_TTL_SECS,
 };
-use misaka_network::{NetworkBackend, NetworkEndpoint};
+use misaka_network::{NetworkBackend, NetworkEndpoint, ENROLLMENT_ALPN};
 use serde::{de::DeserializeOwned, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -32,6 +32,7 @@ use misaka_runtime::resources::{ResourceProvider, SysinfoResourceProvider};
 use misaka_runtime::runtime::{default_encryption_key, SisterRuntime};
 use misaka_runtime::sister_key_store::SisterKeyStore;
 use misaka_runtime::transport_binding_store::TransportBindingStore;
+use misaka_runtime::{enrollment, join_transaction};
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -84,8 +85,10 @@ enum Command {
         #[arg(long)]
         insecure_development: bool,
 
-        /// Stream backend (direct-tcp | iroh).
-        #[arg(long, default_value = "direct-tcp")]
+        /// Stream backend (iroh | direct-tcp). Iroh is the default and needs no
+        /// further configuration. Direct TCP is a debug / diagnostics /
+        /// compatibility escape hatch for tests.
+        #[arg(long, default_value = "iroh")]
         stream_backend: String,
 
         /// DER certificate of a trusted peer; may be repeated in secure mode.
@@ -354,23 +357,37 @@ enum NetworkCommand {
     /// Initialize the local Network authority and owner Sister membership.
     Init,
 
-    /// Issue a signed invite for a pre-identified Sister.
+    /// Create a time-limited Invite Code that lets a fresh device join.
+    ///
+    /// The invite is not bound to any recipient: hand someone the Network ID and
+    /// this Invite Code and they can join with `misaka network join`.
     Invite {
-        /// Write the invite JSON to this file; print it when omitted.
-        #[arg(long)]
-        output: Option<PathBuf>,
+        /// How long the invite stays redeemable, e.g. 15m, 1h, 24h (default 1h).
+        #[arg(long, default_value = "1h")]
+        expires: String,
 
-        /// Sister ID that will receive the membership certificate.
+        /// Emit a machine-readable JSON record instead of the human summary.
         #[arg(long)]
-        sister_id: Option<String>,
+        json: bool,
+    },
 
-        /// Hex-encoded Sister public key that will receive the certificate.
+    /// Join a Network using its Network ID and a time-limited Invite Code.
+    ///
+    /// A completely fresh device can run this with no prior identity preparation:
+    /// Misaka generates the local Sister identity, proves key possession to the
+    /// Authority over Iroh, and installs the returned membership atomically.
+    Join {
+        /// Network ID the invite was issued for.
+        network_id: String,
+
+        /// Invite Code produced by `misaka network invite`.
+        invite_code: String,
+
+        /// Optional Gateway URL to announce to and discover through. Committed
+        /// only after enrollment succeeds; Gateway is never the enrollment
+        /// authority.
         #[arg(long)]
-        sister_public_key: Option<String>,
-
-        /// Lifetime of the invite and membership certificate in seconds.
-        #[arg(long, default_value_t = 86_400)]
-        expires_in_secs: u64,
+        gateway: Option<String>,
     },
 
     /// Revoke a membership serial with the local Network authority.
@@ -388,15 +405,39 @@ enum NetworkCommand {
         reason: String,
     },
 
-    /// Install a signed invite without installing the authority private key.
-    Join {
-        /// Invite JSON file produced by `misaka network invite`.
-        invite: PathBuf,
-    },
-
     /// Manage the Gateways this Sister announces to and discovers through.
     #[command(subcommand)]
     Gateway(GatewayAction),
+
+    /// Legacy pre-identified invite: issue a recipient-bound invite file. Hidden
+    /// from normal help; retained only for offline recovery and debugging. The
+    /// normal path is `misaka network invite` (an Invite Code, no file).
+    #[command(name = "invite-legacy", hide = true)]
+    LegacyInvite {
+        /// Write the invite JSON to this file; print it when omitted.
+        #[arg(long)]
+        output: Option<PathBuf>,
+
+        /// Sister ID that will receive the membership certificate.
+        #[arg(long)]
+        sister_id: Option<String>,
+
+        /// Hex-encoded Sister public key that will receive the certificate.
+        #[arg(long)]
+        sister_public_key: Option<String>,
+
+        /// Lifetime of the invite and membership certificate in seconds.
+        #[arg(long, default_value_t = 86_400)]
+        expires_in_secs: u64,
+    },
+
+    /// Legacy: install a recipient-bound invite JSON file. Hidden from normal
+    /// help; the normal path is `misaka network join <network-id> <invite-code>`.
+    #[command(name = "join-legacy", hide = true)]
+    LegacyJoin {
+        /// Invite JSON file produced by `misaka network invite-legacy`.
+        invite: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -648,6 +689,18 @@ async fn async_main() -> Result<(), MisakaError> {
                     gateways.push(url);
                 }
             }
+            // A Sister holding the Network Authority private key and a live Iroh
+            // locator serves enrollment automatically — no separate command.
+            let enrollment =
+                build_enrollment_server(&data_dir, network_id, &identity, peer_record.as_ref())
+                    .map_err(MisakaError::Other)?;
+            if enrollment.is_some() {
+                tracing::info!(
+                    event = "enrollment_enabled",
+                    sister_id = identity.id.as_u64(),
+                    "Network Authority enrollment handler active"
+                );
+            }
             let config = misaka_runtime::config::RuntimeConfig {
                 network_id,
                 listen_port: port,
@@ -656,6 +709,7 @@ async fn async_main() -> Result<(), MisakaError> {
                 stream_security,
                 probe_only,
                 authenticated_session,
+                enrollment,
                 allow_unauthenticated_operations: insecure_development,
                 peer_record,
                 gateways,
@@ -789,7 +843,94 @@ async fn async_main() -> Result<(), MisakaError> {
                     })
                 );
             }
-            NetworkCommand::Invite {
+            NetworkCommand::Invite { expires, json } => {
+                let data_dir = IdentityStore::config_dir()
+                    .map_err(|error| MisakaError::Other(error.to_string()))?;
+                let (authority, authority_key) = NetworkAuthorityStore::load_with_key(&data_dir)
+                    .map_err(|error| MisakaError::Other(error.to_string()))?
+                    .ok_or_else(|| {
+                        MisakaError::Other(
+                            "network invite requires an initialized Network authority".to_string(),
+                        )
+                    })?;
+                if let Some(requested) = requested_network_id {
+                    if requested != authority.network_id {
+                        return Err(MisakaError::Other(
+                            "--network-id does not match the local Network authority".to_string(),
+                        ));
+                    }
+                }
+                let _ = NetworkIdStore::load_or_init(&data_dir, Some(authority.network_id))
+                    .map_err(|error| MisakaError::Other(error.to_string()))?;
+                let ttl_secs = parse_invite_expiry(&expires).map_err(MisakaError::Other)?;
+                // The invite must carry a live, signed locator for this Authority
+                // Sister so a joiner can reach it. This requires the Authority to
+                // have started once under Iroh; refuse rather than mint a broken
+                // invite.
+                let locator = current_enrollment_locator(&data_dir, authority.network_id)
+                    .map_err(MisakaError::Other)?
+                    .ok_or_else(|| {
+                        MisakaError::Other(
+                            "network invite needs a live enrollment locator: run \
+                             `misaka start` on this Authority device first, then retry"
+                                .to_string(),
+                        )
+                    })?;
+                let now = unix_now();
+                let expires_at = now.saturating_add(ttl_secs);
+                let invite = EnrollmentInvite::issue(
+                    &authority,
+                    &authority_key,
+                    now,
+                    expires_at,
+                    rand::random(),
+                    locator,
+                );
+                let code = invite
+                    .encode_code()
+                    .map_err(|error| MisakaError::Other(error.to_string()))?;
+                // Gateway is optional convenience only; never part of the invite.
+                let gateway = GatewayStore::load(&data_dir).into_iter().next();
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "network_id": authority.network_id.to_string(),
+                            "invite_code": code,
+                            "expires_at": expires_at,
+                            "expires_in_secs": ttl_secs,
+                            "gateway": gateway,
+                        })
+                    );
+                } else {
+                    println!("Network ID:   {}", authority.network_id);
+                    println!("Invite Code:  {code}");
+                    println!("Expires:      {ttl_secs}s from now (unix {expires_at})");
+                    if let Some(gateway) = gateway {
+                        println!("Gateway:      {gateway}");
+                    }
+                }
+            }
+            NetworkCommand::Join {
+                network_id,
+                invite_code,
+                gateway,
+            } => {
+                let expected = NetworkId::parse(&network_id)
+                    .map_err(|error| MisakaError::Other(format!("invalid Network ID: {error}")))?;
+                let data_dir = IdentityStore::config_dir()
+                    .map_err(|error| MisakaError::Other(error.to_string()))?;
+                join_network(
+                    &data_dir,
+                    expected,
+                    &invite_code,
+                    gateway.as_deref(),
+                    iroh_options,
+                )
+                .await
+                .map_err(MisakaError::Other)?;
+            }
+            NetworkCommand::LegacyInvite {
                 output,
                 sister_id,
                 sister_public_key,
@@ -830,7 +971,7 @@ async fn async_main() -> Result<(), MisakaError> {
                 }
                 let target_id = target_id.ok_or_else(|| {
                     MisakaError::Other(
-                        "this v0 invite flow requires --sister-id and --sister-public-key"
+                        "this legacy invite flow requires --sister-id and --sister-public-key"
                             .to_string(),
                     )
                 })?;
@@ -890,7 +1031,7 @@ async fn async_main() -> Result<(), MisakaError> {
                     println!("{json}");
                 }
             }
-            NetworkCommand::Join { invite } => {
+            NetworkCommand::LegacyJoin { invite } => {
                 join_network_invite(&invite, requested_network_id).map_err(MisakaError::Other)?;
             }
             NetworkCommand::Revoke {
@@ -2774,6 +2915,200 @@ fn load_local_peer_record(
     )))
 }
 
+fn parse_invite_expiry(value: &str) -> Result<u64, String> {
+    let value = value.trim().to_ascii_lowercase();
+    if value.is_empty() {
+        return Err("invite expiry must not be empty".to_string());
+    }
+    let (number, multiplier) = if let Some(n) = value
+        .strip_suffix("secs")
+        .or(value.strip_suffix("seconds"))
+        .or(value.strip_suffix('s'))
+    {
+        (n, 1)
+    } else if let Some(n) = value
+        .strip_suffix("hours")
+        .or(value.strip_suffix("hour"))
+        .or(value.strip_suffix('h'))
+    {
+        (n, 3_600)
+    } else if let Some(n) = value
+        .strip_suffix("minutes")
+        .or(value.strip_suffix("minute"))
+        .or(value.strip_suffix("mins"))
+        .or(value.strip_suffix("min"))
+        .or(value.strip_suffix('m'))
+    {
+        (n, 60)
+    } else if let Some(n) = value
+        .strip_suffix("days")
+        .or(value.strip_suffix("day"))
+        .or(value.strip_suffix('d'))
+    {
+        (n, 86_400)
+    } else {
+        (value.as_str(), 1)
+    };
+    let number = number.trim();
+    if number.is_empty() {
+        return Err(format!("invalid invite expiry {value:?}"));
+    }
+    let parsed: u64 = number
+        .parse()
+        .map_err(|_| format!("invalid invite expiry {value:?} (use e.g. 15m, 1h, 24h)"))?;
+    let secs = parsed
+        .checked_mul(multiplier)
+        .ok_or_else(|| format!("invite expiry {value:?} is too large"))?;
+    if secs == 0 {
+        return Err("invite expiry must be greater than zero".to_string());
+    }
+    if secs > MAX_INVITE_TTL_SECS {
+        return Err(format!(
+            "invite expiry {secs}s exceeds the {MAX_INVITE_TTL_SECS}s maximum"
+        ));
+    }
+    Ok(secs)
+}
+
+/// Build the Authority Sister's current signed enrollment locator, or `None`
+/// when the device has not yet produced a usable one (no identity, key, Iroh
+/// endpoint, or transport binding).
+fn current_enrollment_locator(
+    data_dir: &Path,
+    network_id: NetworkId,
+) -> Result<Option<PeerRecord>, String> {
+    let identity = IdentityStore::load().map_err(|error| error.to_string())?;
+    let sister_key = SisterKeyStore::load(data_dir).map_err(|error| error.to_string())?;
+    let (Some(identity), Some(sister_key)) = (identity, sister_key) else {
+        return Ok(None);
+    };
+    load_local_peer_record(data_dir, network_id, &identity, &sister_key)
+}
+
+/// Join a Network from a Network ID + Invite Code. Validates every received
+/// artifact before writing, then installs the Network atomically. Identity and
+/// Sister key are generated on a fresh device as an idempotent, inert
+/// prerequisite (a Sister without a Network membership grants nothing).
+async fn join_network(
+    data_dir: &Path,
+    expected_network_id: NetworkId,
+    invite_code: &str,
+    gateway: Option<&str>,
+    iroh_options: IrohTransportOptions,
+) -> Result<(), String> {
+    let invite = EnrollmentInvite::decode_code(invite_code).map_err(|error| error.to_string())?;
+    let now = unix_now();
+    // Validate the invite itself before reaching for the network at all.
+    if !invite.verify(now) {
+        return Err("the invite code is not a valid signed invite or has expired".to_string());
+    }
+    if !invite.matches_network(expected_network_id) {
+        return Err(format!(
+            "the invite code is for Network {}, not the requested Network {expected_network_id}",
+            invite.network_id
+        ));
+    }
+    std::fs::create_dir_all(data_dir).map_err(|error| error.to_string())?;
+    let identity = IdentityStore::load_or_init(None, 31700).map_err(|error| error.to_string())?;
+    let sister_key = SisterKeyStore::load_or_init(data_dir).map_err(|error| error.to_string())?;
+
+    let endpoint: NetworkEndpoint = invite
+        .locator
+        .endpoint_addr
+        .parse()
+        .map_err(|error| format!("invite carries an invalid enrollment locator: {error}"))?;
+    let backend = bind_iroh_client_backend(iroh_options).await?;
+    let exchange = async {
+        let session = backend
+            .connect_session_with_alpn(endpoint, expected_network_id, ENROLLMENT_ALPN)
+            .await
+            .map_err(|error| format!("could not reach the Network Authority: {error}"))?;
+        enrollment::redeem(session, invite.clone(), identity.id.clone(), &sister_key)
+            .await
+            .map_err(|error| error.to_string())
+    }
+    .await;
+    backend.close().await;
+    let response = exchange?;
+
+    // Trust nothing until every returned artifact has validated locally. Use a
+    // fresh clock for membership-window validation: the Authority stamps
+    // `issued_at` with its own now, which can cross a second boundary during the
+    // round trip, so the pre-dial `now` would spuriously reject a valid cert.
+    let bundle = response
+        .validate_received(
+            &invite,
+            expected_network_id,
+            &identity.id,
+            sister_key.public_key(),
+            unix_now(),
+        )
+        .map_err(|reason| format!("the Network Authority response was rejected: {reason}"))?;
+
+    let gateways = gateway
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+        .map(|value| vec![value]);
+    // Commit only now, atomically, with everything validated.
+    join_transaction::install(
+        data_dir,
+        &join_transaction::NetworkInstall::new(bundle, gateways.clone()),
+    )
+    .map_err(|error| error.to_string())?;
+
+    println!(
+        "joined Network {expected_network_id} as Sister {id}",
+        id = identity.id
+    );
+    if let Some(gateways) = gateways {
+        println!("configured Gateway {} for discovery", gateways[0]);
+    }
+    println!("run `misaka start` to begin networking");
+    Ok(())
+}
+
+/// Build the Authority-side enrollment server when this running Sister holds
+/// the Network Authority private key and has a live Iroh locator. Absent either,
+/// enrollment is simply not served (this Sister is not an enrollment Authority).
+fn build_enrollment_server(
+    data_dir: &Path,
+    network_id: NetworkId,
+    identity: &misaka_core::SisterIdentity,
+    peer_record: Option<&PeerRecord>,
+) -> Result<Option<enrollment::EnrollmentServer>, String> {
+    let Some((authority, authority_key)) =
+        NetworkAuthorityStore::load_with_key(data_dir).map_err(|error| error.to_string())?
+    else {
+        return Ok(None);
+    };
+    if authority.network_id != network_id {
+        return Ok(None);
+    }
+    let Some(peer_record) = peer_record else {
+        return Ok(None);
+    };
+    let Some(binding) = TransportBindingStore::load(data_dir).map_err(|error| error.to_string())?
+    else {
+        return Ok(None);
+    };
+    if !binding.verify() || binding.network_id != network_id || !peer_record.verify() {
+        return Ok(None);
+    }
+    let extra_bootstrap: Vec<PeerRecord> = PeerRecordStore::load_from_dir(data_dir, network_id)
+        .into_values()
+        .filter(|record| record.sister_id != peer_record.sister_id)
+        .collect();
+    Ok(Some(enrollment::EnrollmentServer::new(
+        network_id,
+        authority,
+        authority_key,
+        identity.id.as_u64(),
+        binding.iroh_endpoint_id,
+        peer_record.clone(),
+        extra_bootstrap,
+    )))
+}
+
 fn join_network_invite(
     invite_path: &Path,
     requested_network_id: Option<NetworkId>,
@@ -3086,7 +3421,12 @@ fn load_authenticated_session(
     let binding = TransportBindingStore::load(data_dir).map_err(|error| error.to_string())?;
 
     match (authority, membership, binding) {
-        (None, None, None) => Ok(None),
+        // Not enrolled: no authority descriptor and no membership. A lone
+        // transport binding (created above when the Iroh backend bound its
+        // endpoint) is not membership, so this is still a non-member. Iroh is
+        // the default backend, so a fresh device must be able to `start` before
+        // it has joined; it simply runs unauthenticated with nothing to share.
+        (None, None, _) => Ok(None),
         (Some(authority), Some(membership), Some(binding)) => {
             if authority.network_id != network_id
                 || membership.sister_id != identity.id
@@ -3618,10 +3958,68 @@ mod stream_tests {
             }
         ));
 
-        let invite = Cli::try_parse_from([
+        // Normal invite: a duration, no recipient identity, no output file.
+        let invite =
+            Cli::try_parse_from(["misaka", "network", "invite", "--expires", "24h"]).unwrap();
+        assert!(matches!(
+            invite.command,
+            Command::Network {
+                command: NetworkCommand::Invite { expires, json: false }
+            } if expires == "24h"
+        ));
+        // Default lifetime is one hour.
+        let invite_default = Cli::try_parse_from(["misaka", "network", "invite"]).unwrap();
+        assert!(matches!(
+            invite_default.command,
+            Command::Network {
+                command: NetworkCommand::Invite { expires, .. }
+            } if expires == "1h"
+        ));
+
+        // Normal join: Network ID + Invite Code, optional Gateway.
+        let join = Cli::try_parse_from([
             "misaka",
             "network",
-            "invite",
+            "join",
+            "01234567-89ab-cdef-0123-456789abcdef",
+            "misaka1_abc",
+            "--gateway",
+            "https://gateway.example.com",
+        ])
+        .unwrap();
+        assert!(matches!(
+            join.command,
+            Command::Network {
+                command: NetworkCommand::Join {
+                    network_id,
+                    invite_code,
+                    gateway: Some(gateway),
+                }
+            } if network_id == "01234567-89ab-cdef-0123-456789abcdef"
+                && invite_code == "misaka1_abc"
+                && gateway == "https://gateway.example.com"
+        ));
+        // Gateway is optional.
+        let join_no_gateway = Cli::try_parse_from([
+            "misaka",
+            "network",
+            "join",
+            "01234567-89ab-cdef-0123-456789abcdef",
+            "misaka1_abc",
+        ])
+        .unwrap();
+        assert!(matches!(
+            join_no_gateway.command,
+            Command::Network {
+                command: NetworkCommand::Join { gateway: None, .. }
+            }
+        ));
+
+        // Legacy recipient-bound recovery commands still parse (hidden).
+        let legacy_invite = Cli::try_parse_from([
+            "misaka",
+            "network",
+            "invite-legacy",
             "--output",
             "/tmp/invite.json",
             "--sister-id",
@@ -3631,17 +4029,17 @@ mod stream_tests {
         ])
         .unwrap();
         assert!(matches!(
-            invite.command,
+            legacy_invite.command,
             Command::Network {
-                command: NetworkCommand::Invite { .. }
+                command: NetworkCommand::LegacyInvite { .. }
             }
         ));
-
-        let join = Cli::try_parse_from(["misaka", "network", "join", "/tmp/invite.json"]).unwrap();
+        let legacy_join =
+            Cli::try_parse_from(["misaka", "network", "join-legacy", "/tmp/invite.json"]).unwrap();
         assert!(matches!(
-            join.command,
+            legacy_join.command,
             Command::Network {
-                command: NetworkCommand::Join { .. }
+                command: NetworkCommand::LegacyJoin { .. }
             }
         ));
 

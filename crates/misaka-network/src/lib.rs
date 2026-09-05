@@ -18,11 +18,18 @@ pub const MAGIC: &[u8; 13] = b"MISAKA_STREAM";
 pub const PROTOCOL_VERSION: u8 = 1;
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 pub const IROH_ALPN: &[u8] = b"misaka/stream/iroh/0";
+/// Dedicated ALPN for the narrow enrollment protocol.
+///
+/// A joining Sister does not yet hold a membership, so it cannot pass the
+/// authenticated member session; enrollment is therefore carried on its own
+/// ALPN and served ahead of, and independently from, the member control plane.
+/// It exposes exactly one operation (redeem an invite) and nothing else.
+pub const ENROLLMENT_ALPN: &[u8] = b"misaka/enrollment/1";
 
 pub mod iroh_backend;
 pub mod resolver;
 pub mod tls;
-pub use iroh_backend::{IrohBackend, IrohSession};
+pub use iroh_backend::{misaka_alpns, IrohBackend, IrohSession};
 
 #[derive(Debug, Error)]
 pub enum NetworkError {

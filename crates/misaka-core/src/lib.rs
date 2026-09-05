@@ -7,12 +7,20 @@
 //! `serde` is acceptable because these types are exchanged between packages
 //! and exposed through machine-readable introspection.
 
+pub mod enrollment;
 pub mod gateway;
 pub mod identity;
 pub mod introspection;
 pub mod job;
 pub mod peer;
 pub mod protocol;
+
+pub use enrollment::{
+    base64url_decode, base64url_encode, EnrollmentBundle, EnrollmentChallenge, EnrollmentInvite,
+    EnrollmentOutcome, EnrollmentProof, EnrollmentRejection, EnrollmentRequest, EnrollmentResponse,
+    InviteCodeError, DEFAULT_INVITE_TTL_SECS, ENROLLMENT_PROTOCOL_VERSION, ENROLLMENT_VERSION,
+    INVITE_CODE_PREFIX, MAX_INVITE_TTL_SECS,
+};
 
 pub use gateway::{
     announce_body_bytes, peers_body_bytes, record_matches_membership, verify_request,

@@ -534,6 +534,14 @@ impl std::fmt::Display for AuthorityPublicKey {
 pub struct AuthoritySignature([u8; SISTER_SIGNATURE_LEN]);
 
 impl AuthoritySignature {
+    pub fn from_bytes(bytes: [u8; SISTER_SIGNATURE_LEN]) -> Self {
+        Self(bytes)
+    }
+
+    pub fn to_bytes(self) -> [u8; SISTER_SIGNATURE_LEN] {
+        self.0
+    }
+
     fn as_dalek(&self) -> ed25519_dalek::Signature {
         ed25519_dalek::Signature::from_bytes(&self.0)
     }
@@ -592,7 +600,7 @@ impl AuthorityKeyPair {
         AuthorityPublicKey(self.0.verifying_key().to_bytes())
     }
 
-    fn sign(&self, message: &[u8]) -> AuthoritySignature {
+    pub fn sign(&self, message: &[u8]) -> AuthoritySignature {
         AuthoritySignature(self.0.sign(message).to_bytes())
     }
 }

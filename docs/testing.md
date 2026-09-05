@@ -11,6 +11,7 @@ cargo build -p misaka
 cargo run -p testament -- verify
 cargo run -p testament -- verify --json
 cargo run -p testament -- network-verify --json
+cargo run -p testament -- enrollment-verify --json
 cargo run -p testament -- security-verify --json
 cargo run -p testament -- gateway-verify --json
 ```
@@ -190,6 +191,36 @@ an external NAT or cross-domain claim. For real-host measurements, pass
 `--iroh-relay <URL> --iroh-relay-only` to both endpoints to make the
 relay-only condition explicit and repeatable.
 
+## Enrollment v1 suite
+
+`enrollment-verify` drives the timed-invite flow end to end with real `misaka`
+processes and isolated `MISAKA_CONFIG_DIR` per Sister. The Authority is created
+with `misaka network init`, run with the default `misaka start`, and issues a
+code with `misaka network invite`; a fresh device joins with exactly
+`misaka network join <network-id> <invite-code> [--gateway]`. Assertions inspect
+persisted state and introspection, never CLI log text.
+
+- `E01` a fresh Sister joins with Network ID + Invite Code only.
+- `E02` the recipient identity is generated automatically — no prior `misaka start`.
+- `E03` an expired Invite Code is rejected.
+- `E04` a tampered Invite Code is rejected.
+- `E05` a command-line Network ID that differs from the invite's is rejected.
+- `E06` an invalid Sister key-possession proof is rejected (protocol-level, in the
+  `misaka-runtime` `enrollment` unit tests — a CLI join cannot present a foreign key).
+- `E07` joining with `--gateway` persists the Gateway through `GatewayStore`.
+- `E08` joining without `--gateway` still succeeds.
+- `E09` two different Sisters redeem the same still-valid Invite Code.
+- `E10` the normal path uses none of `--sister-id`, `--sister-public-key`,
+  `--peer`, `--iroh-peer`, or `invite.json`.
+- `E11` a failed join leaves no partial Network state (and no staging residue).
+- `E12` a successfully joined Sister starts normally and reaches readiness.
+- `E13` the joined Sister discovers the Authority through a local native Gateway
+  and forms the authenticated Iroh connection (both directions converge).
+
+The suite uses only local infrastructure (a native `network gateway serve`); it
+never depends on the production Cloudflare Gateway. `gateway-live-verify`
+remains the separate real-deployment smoke.
+
 ## Gateway v0 suite
 
 `gateway-verify` spawns a native reference Gateway (`misaka network gateway
@@ -255,5 +286,6 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
 cargo build -p misaka
 cargo run -p testament -- verify --json
+cargo run -p testament -- enrollment-verify --json
 cargo run -p testament -- gateway-verify --json
 ```

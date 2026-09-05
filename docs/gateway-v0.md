@@ -32,6 +32,17 @@ The Gateway does **not**:
 
 A Gateway deployment serves exactly **one Network** in v0.
 
+## Enrollment is separate
+
+The Gateway is never the enrollment authority. A new Sister obtains its first
+membership through the Authority over Iroh (see
+[network-formation-v0.md](network-formation-v0.md)), and only then uses the
+Gateway for discovery. `misaka network join <network-id> <invite-code>
+--gateway <url>` persists the Gateway (via `GatewayStore`) **after** enrollment
+succeeds; a join without `--gateway` is equally valid. The Gateway keeps doing
+exactly what it does for any member: announce a signed `PeerRecord`, serve
+signed `PeerRecord`s, and bootstrap authenticated Iroh peers.
+
 ## Engineering invariants
 
 1. **The Gateway stores signed records and manufactures no trust.** Every

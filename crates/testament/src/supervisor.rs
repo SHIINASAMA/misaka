@@ -65,6 +65,10 @@ pub struct SpawnConfig<'a> {
     pub discovery: &'a str,
     pub heartbeat: u64,
     pub peer_timeout: u64,
+    /// Explicit `--stream-backend` for this Sister. The CLI default is now Iroh,
+    /// so every scenario states its intent (direct-TCP mesh vs. Iroh) and the
+    /// flag is passed exactly once.
+    pub stream_backend: &'static str,
 }
 
 /// 一个由 Testament 启动、用于提交测试任务的外部 CLI 进程。
@@ -190,6 +194,7 @@ fn build_spawn_with_mode(
         discovery,
         heartbeat,
         peer_timeout,
+        stream_backend,
     } = config;
     let config_dir = sister_config_dir(layout, alias);
     let _ = std::fs::create_dir_all(&config_dir);
@@ -202,6 +207,8 @@ fn build_spawn_with_mode(
         "start".into(),
         "--network-id".into(),
         TEST_NETWORK_ID.into(),
+        "--stream-backend".into(),
+        stream_backend.into(),
         "--port".into(),
         listen_port.to_string(),
         "--stream-port".into(),
@@ -240,7 +247,7 @@ fn build_spawn_with_mode(
         pid: None,
         listen_addr: format!("127.0.0.1:{}", listen_port),
         stream_addr: format!("127.0.0.1:{}", stream_port),
-        stream_backend: String::new(),
+        stream_backend: stream_backend.to_string(),
         introspection_addr: Some(format!("127.0.0.1:{}", introspect_port)),
         config_dir: config_dir.to_string_lossy().to_string(),
         stdout_log: stdout_log.to_string_lossy().to_string(),
@@ -689,6 +696,7 @@ mod tests {
             discovery: "manual",
             heartbeat: 2,
             peer_timeout: 8,
+            stream_backend: "direct-tcp",
         });
 
         assert_eq!(entry.stream_addr, "127.0.0.1:31701");

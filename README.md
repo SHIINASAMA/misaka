@@ -6,7 +6,7 @@ Misaka Network is a local-network, decentralized runtime in which every node is 
 
 ```text
 misaka-core       shared identity, job, peer, protocol, and Gateway contracts
-misaka-network    Network Stream transports (Direct TCP and opt-in Iroh)
+misaka-network    Network Stream transports (Iroh by default, Direct TCP for debug)
 misaka-runtime    Sister networking, discovery, and runtime services
 misaka-api        local loopback HTTP API over a running Sister
 misaka            CLI for starting Sisters, submitting jobs, and managing Gateways
@@ -31,7 +31,7 @@ the Authority private key, and is out of the path once the connection forms.
 
 ```bash
 misaka network gateway add https://gateway.example.com
-misaka start --stream-backend iroh          # no --iroh-peer needed for discovery
+misaka start                              # Iroh is the default transport; no --iroh-peer needed
 misaka network gateway serve --bind 0.0.0.0:8443 \
   --network-id <uuid> --authority-public-key <hex>   # native reference host
 ```
@@ -50,28 +50,51 @@ Worker at deploy time via `wrangler deploy --secrets-file`. See
 
 Requires Rust `1.98.0` (the repository includes `rust-toolchain.toml`).
 
+Join a Network in three ideas — a Network ID, an Invite Code, and an optional
+Gateway URL. You never need a Sister ID, a public key, a membership file, or a
+raw `iroh://` address.
+
+First device (the Network owner):
+
 ```bash
-cargo build --workspace
-cargo run -p misaka -- start --port 31700 --nickname alpha
+cargo build -p misaka
+cargo run -p misaka -- network init          # create the Network + Authority
+cargo run -p misaka -- start                 # run the Sister (Iroh is the default)
+cargo run -p misaka -- network invite --expires 1h   # prints Network ID + Invite Code
 ```
 
-Use another terminal to submit a local command:
+Second device, from a fresh config directory:
 
 ```bash
-cargo run -p misaka -- run --local 'printf hello'
+cargo run -p misaka -- network join \
+  <network-id> <invite-code> \
+  --gateway https://gateway.example.com      # optional
+cargo run -p misaka -- start
 ```
 
-For deterministic local experiments, use manual discovery and isolated configuration directories:
+`network join` generates the local Sister identity automatically, proves key
+possession to the Authority over Iroh, installs an Authority-signed membership
+atomically, and commits the optional Gateway only on success. See
+[docs/network-formation-v0.md](docs/network-formation-v0.md) for the full model
+and [docs/gateway-v0.md](docs/gateway-v0.md) for discovery.
+
+For deterministic local experiments without a Gateway, use manual discovery and
+isolated configuration directories:
 
 ```bash
 MISAKA_CONFIG_DIR=.misaka-a cargo run -p misaka -- start \
-  --port 31701 --nickname alpha --discovery manual --introspect 33801
+  --stream-backend direct-tcp --port 31701 --nickname alpha \
+  --discovery manual --introspect 33801
 MISAKA_CONFIG_DIR=.misaka-b cargo run -p misaka -- start \
-  --port 31702 --nickname beta --discovery manual --peer 127.0.0.1:31701 \
-  --introspect 33802
+  --stream-backend direct-tcp --port 31702 --nickname beta \
+  --discovery manual --peer 127.0.0.1:31701 --introspect 33802
 ```
 
-`--introspect` enables a read-only JSON snapshot endpoint on loopback. It is disabled by default. See [docs/architecture.md](docs/architecture.md) and [docs/protocol.md](docs/protocol.md).
+`--stream-backend` (default `iroh`), `--peer`, `--iroh-peer`, and
+`--advertise-host` are low-level debug / recovery / compatibility options and
+are not needed for normal onboarding. `--introspect` enables a read-only JSON
+snapshot endpoint on loopback; it is disabled by default. See
+[docs/architecture.md](docs/architecture.md) and [docs/protocol.md](docs/protocol.md).
 
 Once a peer has been learned into the local PeerStore, establish and verify a
 stream by Sister identity:
@@ -80,9 +103,10 @@ stream by Sister identity:
 MISAKA_CONFIG_DIR=.misaka-a cargo run -p misaka -- connect '#<sister-id>'
 ```
 
-The command resolves the stored TCP or explicitly advertised Iroh candidate,
+The command resolves the stored Iroh or explicitly advertised candidate,
 performs the stream handshake and a bounded echo exchange, then reports the
 selected path.
+
 
 ## Operator UX
 
@@ -127,6 +151,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
 cargo build -p misaka
 cargo run -p testament -- verify --json
+cargo run -p testament -- enrollment-verify --json
 cargo run -p testament -- gateway-verify --json
 ```
 

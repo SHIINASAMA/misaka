@@ -24,13 +24,19 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
 cargo build -p misaka
 cargo run -p testament -- verify --json
+cargo run -p testament -- enrollment-verify --json
 cargo run -p testament -- gateway-verify --json
 ```
 
-Use `MISAKA_CONFIG_DIR` for every local multi-Sister experiment. Never use a developer's real `~/.misaka` directory in tests. Deterministic Testament scenarios should use `--discovery manual`; do not make CI depend on multicast mDNS.
+Use `MISAKA_CONFIG_DIR` for every local multi-Sister experiment. Never use a developer's real `~/.misaka` directory in tests. Deterministic Testament scenarios should use `--discovery manual`; do not make CI depend on multicast mDNS. Normal enrollment is exercised by `enrollment-verify` (E01–E13) with real processes and isolated config directories; do not fold the enrollment trust model into Gateway.
 
 ## Architecture rules
 
+- Normal Misaka enrollment UX must not expose Sister IDs, Sister public keys,
+  `MembershipCertificate` internals, raw Iroh endpoints, or manual peer topology.
+  Preserve the underlying Authority/Membership trust model while keeping normal
+  CLI enrollment limited to Network ID, Invite Code, and an optional Gateway.
+  Do not make Gateway an enrollment authority.
 - Keep wire serialization and shared data contracts in `misaka-core`.
 - Keep TCP framing, encryption, protocol dispatch, scheduling, execution, and discovery in `misaka-runtime`.
 - Keep the CLI as argument/config construction and presentation; do not move runtime behavior into `main.rs`.

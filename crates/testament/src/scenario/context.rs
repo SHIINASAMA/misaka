@@ -62,6 +62,7 @@ impl Context {
             discovery: &self.discovery,
             heartbeat: self.heartbeat,
             peer_timeout: self.peer_timeout,
+            stream_backend: "direct-tcp",
         });
         self.do_spawn(alias, entry, cmd, restart)
     }
@@ -92,6 +93,7 @@ impl Context {
             discovery: &self.discovery,
             heartbeat: self.heartbeat,
             peer_timeout: self.peer_timeout,
+            stream_backend: "direct-tcp",
         });
         self.do_spawn(alias, entry, command, restart)
     }
@@ -123,6 +125,7 @@ impl Context {
             discovery: &self.discovery,
             heartbeat: self.heartbeat,
             peer_timeout: self.peer_timeout,
+            stream_backend: "direct-tcp",
         });
         cmd.arg("--relay")
             .arg("--relay-bind")
@@ -159,9 +162,53 @@ impl Context {
             discovery: &self.discovery,
             heartbeat: self.heartbeat,
             peer_timeout: self.peer_timeout,
+            stream_backend: "direct-tcp",
         });
         cmd.env("MISAKA_CONFIG_DIR", &config_dir);
         entry.config_dir = config_dir.to_string_lossy().to_string();
+        self.do_spawn(alias, entry, cmd, restart)
+    }
+
+    /// Start a Sister on a caller-provided config directory over the Iroh
+    /// backend, optionally announcing through a Gateway. Used by enrollment
+    /// scenarios, where the Authority must run Iroh so its enrollment handler is
+    /// live and `misaka start` reflects the normal (Iroh-default) path. Discovery
+    /// is off: peers meet only through the invite locator and/or the Gateway.
+    pub fn start_iroh_sister_with_config(
+        &mut self,
+        alias: &str,
+        nickname: &str,
+        config_dir: &Path,
+        gateway: Option<&str>,
+    ) -> Result<(), ScenarioError> {
+        let listen_port =
+            alloc_port().map_err(|e| ScenarioError::infra(format!("alloc_port: {e}")))?;
+        let introspect_port =
+            alloc_port().map_err(|e| ScenarioError::infra(format!("alloc_port: {e}")))?;
+        let stream_port =
+            alloc_port().map_err(|e| ScenarioError::infra(format!("alloc_port: {e}")))?;
+        let _ = std::fs::create_dir_all(config_dir);
+
+        let (mut entry, mut cmd, mut restart) = build_spawn(SpawnConfig {
+            layout: &self.layout,
+            alias,
+            nickname,
+            listen_port,
+            stream_port,
+            introspect_port,
+            binary: &self.binary,
+            peers: &[],
+            discovery: "off",
+            heartbeat: self.heartbeat,
+            peer_timeout: self.peer_timeout,
+            stream_backend: "iroh",
+        });
+        cmd.env("MISAKA_CONFIG_DIR", config_dir);
+        entry.config_dir = config_dir.to_string_lossy().to_string();
+        if let Some(gateway) = gateway {
+            cmd.arg("--gateway").arg(gateway);
+            restart.append_args(["--gateway", gateway]);
+        }
         self.do_spawn(alias, entry, cmd, restart)
     }
 
@@ -293,6 +340,7 @@ impl Context {
                 discovery: "manual",
                 heartbeat: self.heartbeat,
                 peer_timeout: self.peer_timeout,
+                stream_backend: "direct-tcp",
             });
             prepared.push((alias, entry, command, restart));
         }
@@ -357,6 +405,7 @@ impl Context {
             discovery: "manual",
             heartbeat: self.heartbeat,
             peer_timeout: self.peer_timeout,
+            stream_backend: "direct-tcp",
         });
         let (b_entry, mut b_command, b_restart) = build_spawn(SpawnConfig {
             layout: &self.layout,
@@ -370,6 +419,7 @@ impl Context {
             discovery: "manual",
             heartbeat: self.heartbeat,
             peer_timeout: self.peer_timeout,
+            stream_backend: "direct-tcp",
         });
 
         let a_cert = provision_tls_identity(&a_entry.config_dir, 10001, "alpha", a_ports.0)?;
@@ -416,7 +466,7 @@ impl Context {
                 build_spawn_secure(config)
             }
         };
-        let (mut a_entry, mut a_command, mut a_restart) = spawn(SpawnConfig {
+        let (mut a_entry, a_command, a_restart) = spawn(SpawnConfig {
             layout: &self.layout,
             alias: "a",
             nickname: "alpha",
@@ -428,6 +478,7 @@ impl Context {
             discovery: "manual",
             heartbeat: self.heartbeat,
             peer_timeout: self.peer_timeout,
+            stream_backend: "iroh",
         });
         let (mut b_entry, mut b_command, mut b_restart) = spawn(SpawnConfig {
             layout: &self.layout,
@@ -441,6 +492,7 @@ impl Context {
             discovery: "manual",
             heartbeat: self.heartbeat,
             peer_timeout: self.peer_timeout,
+            stream_backend: "iroh",
         });
         a_entry.stream_backend = "iroh".to_string();
         b_entry.stream_backend = "iroh".to_string();
@@ -461,10 +513,8 @@ impl Context {
             &authority,
             &authority_key,
         )?;
-        a_command.arg("--stream-backend").arg("iroh");
-        b_command.arg("--stream-backend").arg("iroh");
-        a_restart.append_args(["--stream-backend", "iroh"]);
-        b_restart.append_args(["--stream-backend", "iroh"]);
+        // The base spawn already pins `--stream-backend iroh` (from SpawnConfig),
+        // so no manual flag is appended here.
 
         self.spawn_only("a", a_entry, a_command, a_restart)?;
         if let Err(error) = self.wait_until_ready("a") {
@@ -506,6 +556,7 @@ impl Context {
             discovery: "off",
             heartbeat: self.heartbeat,
             peer_timeout: self.peer_timeout,
+            stream_backend: "iroh",
         });
         let (authority, authority_key) = self.ensure_iroh_authority();
         let (id, nickname) = match alias {
@@ -522,11 +573,10 @@ impl Context {
             &authority_key,
         )?;
         entry.stream_backend = "iroh".to_string();
-        command
-            .arg("--stream-backend")
-            .arg("iroh")
-            .arg("--probe-only");
-        restart.append_args(["--stream-backend", "iroh", "--probe-only"]);
+        // `--stream-backend iroh` is already pinned by SpawnConfig; add only the
+        // probe-only mode here.
+        command.arg("--probe-only");
+        restart.append_args(["--probe-only"]);
         self.spawn_only(alias, entry, command, restart)?;
         self.wait_until_ready(alias)
     }
@@ -676,6 +726,29 @@ impl Context {
         command.args(args).env("MISAKA_CONFIG_DIR", config_dir);
         CliProcess::spawn(command).map_err(|e| ScenarioError::infra(format!("spawn cli: {e}")))
     }
+
+    /// Run a one-shot `misaka` command against an isolated config directory with
+    /// no running Sister, returning its stdout. Enrollment uses this for the
+    /// `network init` / `invite` / `join` steps a normal operator runs on a bare
+    /// device. Non-zero exit is surfaced as an assertion with stderr.
+    pub fn run_config_cli(
+        &self,
+        config_dir: &Path,
+        args: &[&str],
+    ) -> Result<String, ScenarioError> {
+        let output = self
+            .spawn_cli_with_config(config_dir, args)?
+            .wait_timeout(Duration::from_secs(60))
+            .map_err(|error| ScenarioError::infra(format!("run config cli: {error}")))?;
+        if !output.status.success() {
+            return Err(ScenarioError::assertion(format!(
+                "cli {args:?} exited {}; stderr: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    }
     /// 停止一个 Sister，并从当前场景移除它。
     pub fn stop_sister(&mut self, alias: &str) -> Result<(), ScenarioError> {
         let Some(mut process) = self.sisters.remove(alias) else {
@@ -773,6 +846,7 @@ impl Context {
             discovery: "off",
             heartbeat: self.heartbeat,
             peer_timeout: self.peer_timeout,
+            stream_backend: "iroh",
         });
         let (mut b_entry, mut b_command, mut b_restart) = build_spawn(SpawnConfig {
             layout: &self.layout,
@@ -786,6 +860,7 @@ impl Context {
             discovery: "off",
             heartbeat: self.heartbeat,
             peer_timeout: self.peer_timeout,
+            stream_backend: "iroh",
         });
         let (authority, authority_key) = self.ensure_iroh_authority();
         provision_iroh_membership(
@@ -808,17 +883,15 @@ impl Context {
             (&mut a_entry, &mut a_command, &mut a_restart),
             (&mut b_entry, &mut b_command, &mut b_restart),
         ] {
-            entry.stream_backend = "iroh".to_string();
+            // `--stream-backend iroh` is pinned by SpawnConfig; only add the
+            // Gateway options that make this the v0 normal-discovery path.
+            let _ = &entry.stream_backend;
             command
-                .arg("--stream-backend")
-                .arg("iroh")
                 .arg("--gateway-interval")
                 .arg(gateway_interval.to_string());
             for url in gateway_urls {
                 command.arg("--gateway").arg(url);
             }
-            restart.append_arg("--stream-backend");
-            restart.append_arg("iroh");
             restart.append_arg("--gateway-interval");
             restart.append_arg(gateway_interval.to_string());
             for url in gateway_urls {

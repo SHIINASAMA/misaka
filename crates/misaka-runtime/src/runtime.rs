@@ -423,6 +423,25 @@ async fn iroh_session_accept_loop(node: SisterNode, backend: misaka_network::Iro
                     Ok(session) => {
                         let session_node = node.clone();
                         sessions.spawn(async move {
+                            // Enrollment rides a dedicated ALPN and is served by
+                            // the Authority ahead of, and independently from, the
+                            // authenticated member session (a joiner has no
+                            // membership yet). Every other connection is the
+                            // normal member stream session.
+                            if session.negotiated_alpn() == misaka_network::ENROLLMENT_ALPN {
+                                match session_node.config.enrollment.clone() {
+                                    Some(server) => server.serve_session(session).await,
+                                    None => {
+                                        tracing::debug!(
+                                            event = "enrollment_refused_no_authority",
+                                            sister_id = session_node.identity.id.as_u64(),
+                                            "received enrollment connection without an Authority"
+                                        );
+                                        session.close();
+                                    }
+                                }
+                                return;
+                            }
                             iroh_session_loop(session_node, session).await;
                         });
                     }
