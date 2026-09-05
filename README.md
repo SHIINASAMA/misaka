@@ -39,6 +39,10 @@ misaka network gateway serve --bind 0.0.0.0:8443 \
 See [docs/gateway-v0.md](docs/gateway-v0.md) for the wire contract, the Cloudflare
 Durable-Object deployment, and the multi-Gateway discovery loop.
 
+Cloudflare Gateway deployments require `NETWORK_ID` and
+`NETWORK_AUTHORITY_PUBLIC_KEY` to be configured outside the repository. See
+`docs/gateway-v0.md`.
+
 ## Quick start
 
 Requires Rust `1.98.0` (the repository includes `rust-toolchain.toml`).

@@ -1,0 +1,7 @@
+# Local development values for the Misaka Cloudflare Gateway.
+# Copy to `.dev.vars` (gitignored) and fill in. These declare WHICH values a
+# Gateway deployment needs; the committed file carries NO real values.
+# Obtain each from the target Network (out of band). The Network Authority
+# PRIVATE key is never here, and never deployed to a Gateway.
+NETWORK_ID=
+NETWORK_AUTHORITY_PUBLIC_KEY=

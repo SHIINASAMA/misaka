@@ -40,6 +40,7 @@ Use `MISAKA_CONFIG_DIR` for every local multi-Sister experiment. Never use a dev
 - Treat structured logs as diagnostics. Testament assertions must use introspection or command results, not log text.
 - Keep Gateway **cryptography** (canonical-bytes signing, `verify_request`, membership/identity checks) in `misaka-core`, and keep the Gateway **directory state machine** (uniqueness, monotonic-sequence update, nonce replay, TTL, GC, list) in the storage platform — a Durable Object/SQL statement — not as a reusable Rust state machine duplicated per host.
 - A Gateway serves one Network, stores only signed `PeerRecord`s, and must never hold the Network Authority private key. A Sister must re-verify any Gateway-supplied `PeerRecord` before use; `--iroh-peer` is only a debug/recovery escape hatch.
+- Gateway deployment configuration is Network-specific and must not be hard-coded in the repository. `NETWORK_ID` and `NETWORK_AUTHORITY_PUBLIC_KEY` are injected by the deployment environment (Cloudflare secrets / `.dev.vars` / CI `--var` fixtures); only their names are declared in `wrangler.toml`. The Network Authority private key must never be available to a Gateway.
 
 ## Change style
 

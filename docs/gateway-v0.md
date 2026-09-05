@@ -162,10 +162,62 @@ in the crate's `Cargo.toml`. **`strip = true` must be omitted** from
 `[profile.release]`: wasm-bindgen ≥ 0.2.125 hard-requires the `externref` table
 that `strip` removes (`cloudflare/workers-rs#1014`); `lto` + `codegen-units=1`
 are kept and worker-build's wasm-opt strips names anyway. `wrangler.toml`
-declares the `GATEWAY_DIRECTORY` binding and its migration;
-`NETWORK_ID` and `NETWORK_AUTHORITY_PUBLIC_KEY` are public env vars. A
-`/verify` route runs the real crypto path as a build guard so the linker can
-never strip it.
+declares the `GATEWAY_DIRECTORY` binding and its migration, and declares
+`NETWORK_ID` and `NETWORK_AUTHORITY_PUBLIC_KEY` as **required** deployment
+secrets — their values live outside the repository (see [Deployment
+configuration](#deployment-configuration)). A `/verify` route runs the real
+crypto path as a build guard so the linker can never strip it.
+
+## Deployment configuration
+
+The Gateway **implementation** is generic; the values that point it at a
+specific Network are **deployment configuration** and never enter Git. The
+repository declares only the required binding names:
+
+```text
+Repository                          Cloudflare deployment
+  Gateway protocol                    NETWORK_ID
+  Worker implementation               NETWORK_AUTHORITY_PUBLIC_KEY
+  Durable Object schema
+  wrangler config + required
+  secret names  ───────────────────▶
+```
+
+- `NETWORK_ID` is not cryptographically secret, but it is a specific Network's
+  deployment metadata.
+- `NETWORK_AUTHORITY_PUBLIC_KEY` is a public key (no confidentiality), but is
+  likewise Network-specific deployment configuration.
+- Both are managed as Cloudflare **secrets** for deployment isolation /
+  repository hygiene, not secrecy of the values themselves.
+- The Network Authority **private key is never deployed to a Gateway** — only
+  the public key is, to verify member certificates.
+- One Gateway deployment serves **one** Network; different deployments can serve
+  different Networks and share no directory state.
+
+Where the values come from, per environment:
+
+| Environment | Source | In Git? |
+|---|---|---|
+| Production | Cloudflare Worker secrets (`wrangler secret put …`) | No |
+| Local dev   | `gateway/cloudflare/.dev.vars` (gitignored)            | No |
+| CI tests   | explicit `--var` fixtures in the workflow / `do-sql.sh`  | Yes (test values) |
+
+`.dev.vars.example` (committed, empty values) documents the required names.
+Provision production with:
+
+```bash
+cd gateway/cloudflare
+npx wrangler secret put NETWORK_ID
+npx wrangler secret put NETWORK_AUTHORITY_PUBLIC_KEY   # updates the Worker
+                                                        # secret (may publish a
+                                                        # new version)
+```
+
+`wrangler.toml`'s `[secrets] required = [ … ]` makes a real `wrangler deploy`
+fail if a value is unset. `authority_from_env()` has no fallback (no zero
+NetworkId, no default key): a missing or malformed value fails fast. `wrangler
+deploy --dry-run` and `wrangler dev --local` are unaffected — tests inject their
+own fixed values.
 
 ## Native reference host — `crates/misaka-gatewayd`
 

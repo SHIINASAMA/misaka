@@ -15,9 +15,16 @@ class_name = "GatewayDirectory"
 tag = "v1"
 new_sqlite_classes = ["GatewayDirectory"]
 
-# Public configuration, not secrets. One Gateway deployment serves one Network.
-# `NETWORK_AUTHORITY_PUBLIC_KEY` is the hex-encoded Authority PUBLIC key; the
-# private half never leaves the Network owner's machine.
-[vars]
-NETWORK_ID = "00000000-0000-0000-0000-000000000000"
-NETWORK_AUTHORITY_PUBLIC_KEY = "0000000000000000000000000000000000000000000000000000000000000000"
+# Network-specific deployment configuration is NEVER stored here. The two
+# values below are injected by the deployment environment (Cloudflare secrets
+# in production, `.dev.vars` for local, explicit test vars in CI). They are
+# declared required so `wrangler deploy` fails if unset. They are managed as
+# secrets for deployment isolation / repository hygiene, not because they are
+# confidential: `NETWORK_AUTHORITY_PUBLIC_KEY` is a public key, and the Network
+# Authority PRIVATE key is never deployed to a Gateway. One Gateway serves one
+# Network; different deployments point at different Networks and share no state.
+[secrets]
+required = [
+  "NETWORK_ID",
+  "NETWORK_AUTHORITY_PUBLIC_KEY",
+]
