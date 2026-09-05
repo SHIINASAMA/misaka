@@ -15,7 +15,7 @@ use misaka_core::protocol::{
     TransferV2Ack, TransferV2Operation, TransferV2Request, TransferV2Resume, TunnelRequest,
     TRANSFER_MAGIC, TRANSFER_V1_CHUNK_SIZE, TRANSFER_V1_MAGIC, TRANSFER_V2_MAGIC, TUNNEL_MAGIC,
 };
-use misaka_core::{CommandAuthorization, MembershipKind, Permission, SisterIdentity};
+use misaka_core::{CommandAuthorization, MembershipKind, Permission, Principal, SisterIdentity};
 use misaka_network::{NetworkBackend, NetworkEndpoint};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -1405,6 +1405,14 @@ async fn receive_tunnel_with_node(
     Ok(())
 }
 
+/// §5/§13: a remote side-effect authorization must be bound to exactly the
+/// destination Sister that receives it. An untargeted authorization, or one bound
+/// to a different Sister, must not execute here — otherwise an authorization
+/// captured for Sister B replays against Sister C.
+fn authorization_bound_to_local(authorization: &CommandAuthorization, local_id: u64) -> bool {
+    authorization.target == Some(Principal::Sister(misaka_core::SisterId(local_id)))
+}
+
 async fn authorize_stream_operation(
     node: Option<&SisterNode>,
     authorization: Option<&CommandAuthorization>,
@@ -1439,7 +1447,9 @@ async fn authorize_stream_operation(
             authorization.permission,
             Permission::FileSend | Permission::TunnelOpen | Permission::ShellOpen
         )
-        || authorization.target.is_some()
+        // §5/§13: bound to THIS destination Sister (untargeted or mis-targeted
+        // authorizations are a cross-Sister replay risk).
+        || !authorization_bound_to_local(authorization, node.identity.id.as_u64())
         || authorization.network_id != node.config.network_id
         || !authorization.verify(&authority, crate::node::now_secs())
         || authorization.constraints != constraints
@@ -1505,6 +1515,57 @@ mod tests {
     fn missing_stream_authorization_is_rejected_without_explicit_development_mode() {
         assert!(super::require_stream_authorization(None, false).is_err());
         assert!(super::require_stream_authorization(None, true).is_ok());
+    }
+
+    // S05: a remote side-effect authorization must be bound to the receiving
+    // Sister. An untargeted one, or one captured for a different Sister, is a
+    // cross-Sister replay and must be rejected.
+    #[test]
+    fn stream_authorization_must_be_bound_to_the_destination_sister() {
+        use misaka_core::{
+            CommandAuthorization, HumanId, HumanIdentity, HumanKeyPair, HumanMembershipCertificate,
+            NetworkAuthority, NetworkId, Permission, Principal, Role, SisterId,
+        };
+        let network_id = NetworkId::generate();
+        let (authority, authority_key) = NetworkAuthority::generate(network_id);
+        let human_key = HumanKeyPair::generate();
+        let human = HumanIdentity::new(HumanId::generate(), "op".into(), human_key.public_key());
+        let membership = HumanMembershipCertificate::issue(
+            &authority,
+            &authority_key,
+            human.clone(),
+            Role::Admin,
+            0,
+            None,
+            1,
+        );
+        let build = |target: Option<Principal>| {
+            CommandAuthorization::issue(
+                network_id,
+                human.clone(),
+                membership.clone(),
+                Role::Admin,
+                Permission::FileSend,
+                target,
+                vec!["destination=/tmp/x".into()],
+                0,
+                u64::MAX,
+                [1u8; 16],
+                &human_key,
+            )
+        };
+        // Bound to the local Sister #5 → accepted.
+        assert!(super::authorization_bound_to_local(
+            &build(Some(Principal::Sister(SisterId(5)))),
+            5
+        ));
+        // Bound to a different Sister #6 → rejected (Sister #5 must not run it).
+        assert!(!super::authorization_bound_to_local(
+            &build(Some(Principal::Sister(SisterId(6)))),
+            5
+        ));
+        // Untargeted → rejected (no longer permitted for remote side effects).
+        assert!(!super::authorization_bound_to_local(&build(None), 5));
     }
 
     use super::{iroh_session_accept_loop, SisterRuntime};

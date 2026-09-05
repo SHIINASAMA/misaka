@@ -2332,7 +2332,7 @@ async fn run_copy(
     .await?;
     let authorization = load_cli_authorization(
         local_network_id()?,
-        None,
+        Some(peer_id),
         Permission::FileSend,
         vec![format!("destination={}", remote_path.display())],
     )?;
@@ -2442,7 +2442,7 @@ async fn run_copy_v1(
     .await?;
     let authorization = load_cli_authorization(
         local_network_id()?,
-        None,
+        Some(peer_id),
         Permission::FileSend,
         vec![format!("destination={}", remote_path.display())],
     )?;
@@ -2584,7 +2584,7 @@ async fn run_copy_v2(
         chunk_digest: [0; 32],
         authorization: load_cli_authorization(
             network_id,
-            None,
+            Some(peer_id),
             Permission::FileSend,
             transfer_constraints.clone(),
         )?,
@@ -2624,7 +2624,7 @@ async fn run_copy_v2(
             operation: TransferV2Operation::Chunk,
             authorization: load_cli_authorization(
                 network_id,
-                None,
+                Some(peer_id),
                 Permission::FileSend,
                 transfer_constraints.clone(),
             )?,
@@ -2668,7 +2668,7 @@ async fn run_copy_v2(
             operation: TransferV2Operation::Finalize,
             authorization: load_cli_authorization(
                 network_id,
-                None,
+                Some(peer_id),
                 Permission::FileSend,
                 transfer_constraints,
             )?,
@@ -3459,7 +3459,7 @@ async fn proxy_tunnel(
         connect_peer_stream(endpoint, sister_id, peer_certificate, iroh_options).await?;
     let authorization = load_cli_authorization(
         local_network_id()?,
-        None,
+        Some(sister_id),
         permission,
         vec![format!("remote={remote}")],
     )?;
