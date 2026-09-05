@@ -40,3 +40,13 @@ tokio-rustls = "0.26"
 rcgen = "0.13"
 iroh = { version = "1.1", default-features = false, features = ["tls-aws-lc-rs"] }
 clap = { version = "4", features = ["derive"] }
+
+# Compile-side disk/size control. The dependency tree (iroh, aws-lc-sys, ring,
+# icu, rustls, hyper, reqwest) is large, and full DWARF debug info for those
+# third-party crates dominates `target/` and can push the linker over the disk
+# budget on constrained runners. Third-party crates build with no debug info;
+# workspace crates keep their own (small) debug info for readable panics.
+[profile.dev.package."*"]
+debug = false
+[profile.test.package."*"]
+debug = false
