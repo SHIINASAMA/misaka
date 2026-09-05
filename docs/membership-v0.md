@@ -57,6 +57,31 @@ store at each session/authorization decision. Distribution over the
 authenticated Control Channel is deferred until the session/control-plane
 phases; no CRL server is introduced here.
 
+## Revocation is currently LOCAL-only — a known security gap
+
+Revocation records are enforced from the local `revocations.json` in each
+Sister's own config directory. A newly issued revocation reaches other Sisters
+only to the extent they happen to already hold the same signed record. There is
+NO established Network-wide propagation, so a revoked Sister that still has a
+valid cached membership and an open session may continue to be treated as a
+member by peers that have not received the revocation. This is a real
+security-model limitation, not a solved feature; do not treat local revocation
+as network-wide enforcement.
+
+Follow-up (an explicit architecture decision, not built here):
+Authority-signed `RevocationRecord` propagation, with these requirements:
+- the Gateway is never trusted for revocation (records stay Authority-signed and
+  are re-verified on receipt, exactly as `PeerRecord`s already are);
+- eventual (not synchronous) propagation;
+- the semantics for ALREADY-established sessions vs NEW sessions on revocation
+  must be defined explicitly (e.g. enforce on next auth/heartbeat, or force
+  reconnect);
+- must work across the available discovery transports (Gateway and direct
+  control channel), not assume one.
+
+Do not add an ad-hoc gossip protocol or Gateway-side revocation storage as a
+shortcut; those are architecture decisions.
+
 Phase C supplies the trust and persistence primitives. It does not yet admit
 network traffic: ClientHello/ServerHello, possession proof and service gating
 are Phase D responsibilities.

@@ -273,7 +273,8 @@ enum Command {
         sister: String,
     },
 
-    /// Copy one local file to a known Sister over its stream endpoint.
+    /// Copy one local file to a known Sister (EXPERIMENTAL transport, not a
+    /// committed Resource abstraction).
     Cp {
         /// Local source file.
         source: PathBuf,

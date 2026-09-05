@@ -8,7 +8,6 @@ NetworkId
 
 SisterId
   human-friendly numeric handle used by the existing CLI and peer state
-
 Sister public key
   cryptographic identity used for signatures
 
@@ -32,6 +31,24 @@ endpoint diagnostics; private key bytes never enter protocol payloads or logs.
 The existing `identity.json` remains the home of display and compatibility
 metadata such as `SisterId` and nickname. It is not used as an authority or
 authentication credential.
+
+## Open decision: SisterId is not the canonical identity
+
+There is an unresolved architectural question deliberately NOT decided by this
+hardening pass: `SisterId` is a `u64` numeric handle, while `SisterPublicKey`
+(Ed25519) is the actual cryptographic identity. A numeric id is not derived from
+the key, so it can in principle be claimed by any key. The concrete risk today:
+an enrollment client can *choose* an `SisterId` that already belongs to another
+Sister while presenting its own different key — an id collision / equivocation.
+
+Protocol boundaries now bind id AND key together wherever signed metadata allows
+(authenticated session binds membership↔key↔endpoint; Gateway bootstrap pins the
+record's SisterId *and* SisterPublicKey; application dispatch binds every
+message to the authenticated peer), so the practical surfaces are covered. What
+is NOT solved: whether the canonical Sister identity should be public-key-derived
+(replacing the `u64` handle), which needs a migration-safe design decision.
+Covered by regression tests for the threats above; the canonical-identity
+question is left for an explicit later decision rather than rushed here.
 
 ## TransportBinding
 
