@@ -1765,6 +1765,7 @@ async fn probe_peer_liveness(
                         Some(auth),
                         &ping,
                         true,
+                        None,
                     ),
                 )
                 .await
@@ -2069,10 +2070,11 @@ async fn run_stream_test(
 
     if is_iroh_endpoint {
         if let Some(auth) = iroh_auth {
-            stream =
-                misaka_runtime::authenticated_session::authenticate_client(stream, &auth, None)
-                    .await
-                    .map_err(|error| format!("Iroh stream authentication failed: {error}"))?;
+            stream = misaka_runtime::authenticated_session::authenticate_client(
+                stream, &auth, None, None,
+            )
+            .await
+            .map_err(|error| format!("Iroh stream authentication failed: {error}"))?;
         }
     }
 
@@ -2789,6 +2791,7 @@ impl TransferV2Transport {
                         stream,
                         &auth,
                         Some(*peer_id),
+                        None,
                     )
                     .await
                     .map_err(|error| format!("Iroh transfer authentication failed: {error}"))?
@@ -3503,9 +3506,14 @@ async fn connect_peer_stream(
         .map_err(|error| error.to_string())?;
         if let Some(auth) = auth {
             let auth = authenticated_session_for_backend(auth, &backend);
-            misaka_runtime::authenticated_session::authenticate_client(stream, &auth, Some(peer_id))
-                .await
-                .map_err(|error| format!("Iroh stream authentication failed: {error}"))?
+            misaka_runtime::authenticated_session::authenticate_client(
+                stream,
+                &auth,
+                Some(peer_id),
+                None,
+            )
+            .await
+            .map_err(|error| format!("Iroh stream authentication failed: {error}"))?
         } else {
             stream
         }

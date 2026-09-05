@@ -474,14 +474,17 @@ async fn iroh_session_loop(node: SisterNode, session: misaka_network::IrohSessio
                         let stream_node = node.clone();
                         let auth = node.config.authenticated_session.clone();
                         streams.spawn(async move {
-                            let stream = match auth.as_ref() {
+                            // Authenticate, capturing the verified peer to bind
+                            // subsequent application messages to (legacy/dev
+                            // Iroh has no session material to authenticate with).
+                            let (stream, peer) = match auth.as_ref() {
                                 Some(auth) => {
                                     match crate::authenticated_session::authenticate_server(
                                         stream, auth,
                                     )
                                     .await
                                     {
-                                        Ok(stream) => stream,
+                                        Ok((stream, peer)) => (stream, Some(peer)),
                                         Err(error) => {
                                             tracing::warn!(
                                                 event = "iroh_authenticated_session_rejected",
@@ -493,9 +496,9 @@ async fn iroh_session_loop(node: SisterNode, session: misaka_network::IrohSessio
                                         }
                                     }
                                 }
-                                None => stream,
+                                None => (stream, None),
                             };
-                            serve_iroh_stream(stream_node, stream).await;
+                            serve_iroh_stream(stream_node, stream, peer).await;
                         });
                     }
                     Err(_) => break,
@@ -507,7 +510,11 @@ async fn iroh_session_loop(node: SisterNode, session: misaka_network::IrohSessio
     while streams.join_next().await.is_some() {}
 }
 
-async fn serve_iroh_stream(node: SisterNode, mut stream: misaka_network::NetworkStream) {
+async fn serve_iroh_stream(
+    node: SisterNode,
+    mut stream: misaka_network::NetworkStream,
+    peer: Option<crate::authenticated_session::AuthenticatedPeer>,
+) {
     if let Err(error) = stream.write_all(b"world").await {
         tracing::debug!(
             event = "iroh_stream_greeting_failed",
@@ -537,7 +544,7 @@ async fn serve_iroh_stream(node: SisterNode, mut stream: misaka_network::Network
         return;
     }
     if prefix == *crate::control_channel::CONTROL_MAGIC {
-        if let Err(error) = crate::control_channel::serve(&node, stream).await {
+        if let Err(error) = crate::control_channel::serve(&node, stream, peer).await {
             tracing::warn!(
                 event = "iroh_control_channel_failed",
                 sister_id = node.identity.id.as_u64(),
@@ -1749,6 +1756,7 @@ mod tests {
             None,
             &request,
             true,
+            None,
         )
         .await
         .unwrap()

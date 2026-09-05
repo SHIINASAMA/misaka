@@ -135,14 +135,17 @@ impl SisterConnector {
                         {
                             Ok(session) => match session.open_stream().await {
                                 Ok(stream) => match auth.as_ref() {
-                                    Some(auth) => {
-                                        authenticate_client(stream, auth, Some(expected_sister_id))
-                                            .await
-                                            .map(|stream| ConnectedStream {
-                                                stream,
-                                                iroh_session: Some(session),
-                                            })
-                                    }
+                                    Some(auth) => authenticate_client(
+                                        stream,
+                                        auth,
+                                        Some(expected_sister_id),
+                                        None,
+                                    )
+                                    .await
+                                    .map(|stream| ConnectedStream {
+                                        stream,
+                                        iroh_session: Some(session),
+                                    }),
                                     None => Ok(ConnectedStream {
                                         stream,
                                         iroh_session: Some(session),

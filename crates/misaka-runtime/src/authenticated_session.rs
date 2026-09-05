@@ -83,10 +83,17 @@ impl From<AuthenticatedSessionError> for NetworkError {
 
 /// Authenticate an outbound Iroh logical stream and return it only after the
 /// remote identity and transport binding have been verified.
+///
+/// `expected_sister_id` and `expected_sister_public_key` pin the responder to a
+/// specific identity discovered from signed metadata (a `PeerRecord`). When a
+/// bootstrap record names Sister B *and* its public key, pinning both means an
+/// equivocation — a peer presenting Sister B's id under a different valid key —
+/// is rejected, not merely the id.
 pub async fn authenticate_client(
     mut stream: NetworkStream,
     local: &AuthenticatedSessionConfig,
     expected_sister_id: Option<u64>,
+    expected_sister_public_key: Option<misaka_core::SisterPublicKey>,
 ) -> Result<NetworkStream> {
     validate_local(local)?;
     let client = AuthenticatedClientHello::sign(
@@ -100,19 +107,46 @@ pub async fn authenticate_client(
     );
     write_frame(&mut stream, &client).await?;
     let server: AuthenticatedServerHello = read_frame(&mut stream).await?;
-    validate_server(local, &client, &server, expected_sister_id, &stream)?;
+    validate_server(
+        local,
+        &client,
+        &server,
+        expected_sister_id,
+        expected_sister_public_key,
+        &stream,
+    )?;
     Ok(stream)
 }
 
+/// The identity cryptographically established by [`authenticate_server`] for
+/// the peer on the other end of an authenticated Iroh stream.
+///
+/// Carrying this forward is what stops a valid Sister from impersonating another
+/// once the session is open: the transport no longer has to re-trust whatever
+/// `Envelope::from` or payload identity a peer claims, because the session
+/// already proved exactly which Sister is speaking.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthenticatedPeer {
+    pub sister_id: misaka_core::SisterId,
+    pub sister_public_key: misaka_core::SisterPublicKey,
+    pub membership_serial: u64,
+}
 /// Authenticate an inbound Iroh logical stream. Failure drops the stream and
-/// prevents it from reaching any service handler.
+/// prevents it from reaching any service handler. On success the verified peer
+/// identity is returned so callers can bind subsequent application messages to
+/// it (see [`crate::handler`]).
 pub async fn authenticate_server(
     mut stream: NetworkStream,
     local: &AuthenticatedSessionConfig,
-) -> Result<NetworkStream> {
+) -> Result<(NetworkStream, AuthenticatedPeer)> {
     validate_local(local)?;
     let client: AuthenticatedClientHello = read_frame(&mut stream).await?;
     validate_client(local, &client, &stream)?;
+    let peer = AuthenticatedPeer {
+        sister_id: client.sister_id,
+        sister_public_key: client.sister_public_key,
+        membership_serial: client.membership_certificate.serial,
+    };
     let server = AuthenticatedServerHello::sign(
         local.network_id,
         local.sister_id,
@@ -124,7 +158,7 @@ pub async fn authenticate_server(
         &local.sister_key,
     );
     write_frame(&mut stream, &server).await?;
-    Ok(stream)
+    Ok((stream, peer))
 }
 
 fn validate_local(local: &AuthenticatedSessionConfig) -> Result<()> {
@@ -185,12 +219,14 @@ fn validate_server(
     client: &AuthenticatedClientHello,
     server: &AuthenticatedServerHello,
     expected_sister_id: Option<u64>,
+    expected_sister_public_key: Option<misaka_core::SisterPublicKey>,
     stream: &NetworkStream,
 ) -> Result<()> {
     if server.protocol_version != AUTH_SESSION_PROTOCOL_VERSION
         || server.network_id != local.network_id
         || server.client_nonce != client.nonce
         || expected_sister_id.is_some_and(|id| server.sister_id.as_u64() != id)
+        || expected_sister_public_key.is_some_and(|key| server.sister_public_key != key)
         || server.sister_public_key != server.membership_certificate.sister_public_key
         || server.sister_id != server.membership_certificate.sister_id
         || server.membership_certificate.network_id != local.network_id
@@ -367,6 +403,7 @@ mod tests {
             server_key,
             IrohEndpointId::from_bytes(*server_backend.endpoint().id().as_bytes()),
         );
+        let client_public_key = client_key.public_key();
         let client_auth = config(
             network_id,
             authority,
@@ -382,7 +419,9 @@ mod tests {
                 .await
                 .unwrap();
             let stream = session.accept_stream().await.unwrap();
-            let mut stream = authenticate_server(stream, &server_auth).await.unwrap();
+            let (mut stream, peer) = authenticate_server(stream, &server_auth).await.unwrap();
+            assert_eq!(peer.sister_id.as_u64(), 1);
+            assert_eq!(peer.sister_public_key, client_public_key);
             stream.write_all(b"ok").await.unwrap();
             stream.flush().await.unwrap();
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -393,13 +432,86 @@ mod tests {
             .await
             .unwrap();
         let stream = session.open_stream().await.unwrap();
-        let mut stream = authenticate_client(stream, &client_auth, Some(2))
+        let mut stream = authenticate_client(stream, &client_auth, Some(2), None)
             .await
             .unwrap();
         let mut response = [0u8; 2];
         stream.read_exact(&mut response).await.unwrap();
         assert_eq!(&response, b"ok");
         server_task.await.unwrap();
+        client_backend.close().await;
+    }
+
+    // S04: a peer that authenticates as the right Sister id under a DIFFERENT
+    // valid key must be rejected when the bootstrap expected a specific key
+    // (a signed PeerRecord pins both identity and cryptographic identity).
+    #[tokio::test]
+    async fn authenticate_client_rejects_wrong_public_key_for_expected_id() {
+        let network_id = NetworkId::generate();
+        let (authority, authority_key) = NetworkAuthority::generate(network_id);
+        let server_key = SisterKeyPair::generate();
+        let client_key = SisterKeyPair::generate();
+        let server_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .alpns(vec![misaka_network::IROH_ALPN.to_vec()])
+            .bind_addr("127.0.0.1:0")
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let client_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .alpns(vec![misaka_network::IROH_ALPN.to_vec()])
+            .bind_addr("127.0.0.1:0")
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let server_backend = IrohBackend::new(server_endpoint, misaka_network::IROH_ALPN);
+        let client_backend = IrohBackend::new(client_endpoint, misaka_network::IROH_ALPN);
+        let server_addr = iroh::EndpointAddr::new(server_backend.endpoint().id())
+            .with_ip_addr(server_backend.endpoint().bound_sockets()[0]);
+        let server_auth = config(
+            network_id,
+            authority,
+            &authority_key,
+            2,
+            server_key,
+            IrohEndpointId::from_bytes(*server_backend.endpoint().id().as_bytes()),
+        );
+        let client_auth = config(
+            network_id,
+            authority,
+            &authority_key,
+            1,
+            client_key,
+            IrohEndpointId::from_bytes(*client_backend.endpoint().id().as_bytes()),
+        );
+
+        let server_task = tokio::spawn(async move {
+            let session = server_backend
+                .accept_session_for_network(network_id)
+                .await
+                .unwrap();
+            let stream = session.accept_stream().await.unwrap();
+            let (mut stream, _) = authenticate_server(stream, &server_auth).await.unwrap();
+            let _ = stream.write_all(b"ok").await;
+        });
+
+        let session = client_backend
+            .connect_session_for_network(
+                misaka_network::NetworkEndpoint::Iroh(server_addr),
+                network_id,
+            )
+            .await
+            .unwrap();
+        let stream = session.open_stream().await.unwrap();
+        // Expect Sister #2 under an unrelated key → mismatch → rejected.
+        let unrelated = SisterKeyPair::generate().public_key();
+        let result = authenticate_client(stream, &client_auth, Some(2), Some(unrelated)).await;
+        assert!(
+            result.is_err(),
+            "same-id / different-key equivocation accepted"
+        );
+        server_task.abort();
         client_backend.close().await;
     }
 

@@ -1,6 +1,8 @@
 //! Transport-neutral control channel framing for authenticated Iroh streams.
 
-use crate::authenticated_session::{authenticate_client, AuthenticatedSessionConfig};
+use crate::authenticated_session::{
+    authenticate_client, AuthenticatedPeer, AuthenticatedSessionConfig,
+};
 use crate::node::SisterNode;
 use misaka_core::{Envelope, NetworkId};
 use misaka_network::{IrohBackend, NetworkEndpoint, NetworkError, NetworkStream, Result};
@@ -20,6 +22,11 @@ struct ControlRequest {
 }
 
 /// Open one authenticated Iroh logical stream and carry a control request.
+///
+/// `expected_sister_id` pins the responder to a specific Sister (discovered from
+/// a signed `PeerRecord`); `expected_sister_public_key` additionally pins it to
+/// that record's cryptographic identity, so a same-id/different-key equivocation
+/// is rejected (§2).
 pub async fn send(
     backend: &IrohBackend,
     endpoint: NetworkEndpoint,
@@ -27,6 +34,7 @@ pub async fn send(
     auth: Option<&AuthenticatedSessionConfig>,
     envelope: &Envelope,
     expect_response: bool,
+    expected_sister_public_key: Option<misaka_core::SisterPublicKey>,
 ) -> Result<Option<Envelope>> {
     let session = backend
         .connect_session_for_network(endpoint, network_id)
@@ -34,7 +42,13 @@ pub async fn send(
     let stream = session.open_stream().await?;
     let mut stream = match auth {
         Some(auth) => {
-            authenticate_client(stream, auth, (envelope.to != 0).then_some(envelope.to)).await?
+            authenticate_client(
+                stream,
+                auth,
+                (envelope.to != 0).then_some(envelope.to),
+                expected_sister_public_key,
+            )
+            .await?
         }
         None => stream,
     };
@@ -71,10 +85,16 @@ pub async fn send(
 }
 
 /// Handle the control payload after the Iroh stream handshake and magic have
-/// already been consumed.
-pub async fn serve(node: &SisterNode, mut stream: NetworkStream) -> Result<()> {
+/// already been consumed. `peer` is the authenticated identity established by
+/// [`authenticate_server`] for this stream, or `None` for the legacy TCP control
+/// plane; it binds every subsequent message's sender to the session (§1).
+pub async fn serve(
+    node: &SisterNode,
+    mut stream: NetworkStream,
+    peer: Option<AuthenticatedPeer>,
+) -> Result<()> {
     let request: ControlRequest = read_frame(&mut stream).await?;
-    let response = crate::handler::dispatch_envelope(node, request.envelope)
+    let response = crate::handler::dispatch_envelope(node, request.envelope, peer)
         .await
         .map_err(|error| NetworkError::Authentication(error.to_string()))?;
     if request.expect_response {

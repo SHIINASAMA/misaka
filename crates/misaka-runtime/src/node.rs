@@ -237,16 +237,18 @@ impl SisterNode {
     /// identity is learned from the authenticated Hello response; no legacy
     /// TCP control listener is required.
     pub async fn add_known_iroh_peer(&self, endpoint: NetworkEndpoint) -> crate::Result<()> {
-        self.connect_iroh(endpoint, None).await
+        self.connect_iroh(endpoint, None, None).await
     }
 
     /// Connect to an Iroh endpoint and run the authenticated Hello. When
-    /// `expected_sister_id` is set, the handshake is pinned to that Sister, so a
-    /// peer presenting a different (or unsigned) identity is rejected.
+    /// `expected_sister_id` / `expected_sister_public_key` are set, the handshake
+    /// is pinned to that identity, so a peer presenting a different (or unsigned)
+    /// identity — or the right id under a different key — is rejected.
     async fn connect_iroh(
         &self,
         endpoint: NetworkEndpoint,
         expected_sister_id: Option<u64>,
+        expected_sister_public_key: Option<misaka_core::SisterPublicKey>,
     ) -> crate::Result<()> {
         let NetworkEndpoint::Iroh(endpoint) = endpoint else {
             return Err(crate::Error::Other(
@@ -265,6 +267,7 @@ impl SisterNode {
             self.config.authenticated_session.as_ref(),
             &self.hello_envelope_to(expected_sister_id.unwrap_or(0))?,
             true,
+            expected_sister_public_key,
         )
         .await
         .map_err(|error| crate::Error::Network(error.to_string()))?
@@ -304,8 +307,15 @@ impl SisterNode {
                 "PeerRecord endpoint disagrees with its TransportBinding".to_string(),
             ));
         }
-        self.connect_iroh(endpoint, Some(record.sister_id.as_u64()))
-            .await?;
+        // The dial is pinned to the record's Sister id *and* its signed public
+        // key: a peer that authenticates as this id under a different key is an
+        // equivocation and is rejected (§2).
+        self.connect_iroh(
+            endpoint,
+            Some(record.sister_id.as_u64()),
+            Some(record.sister_public_key),
+        )
+        .await?;
         self.remember_peer_record(record).await;
         Ok(())
     }
@@ -427,6 +437,7 @@ impl SisterNode {
                 self.config.authenticated_session.as_ref(),
                 env,
                 true,
+                None,
             )
             .await
             .map_err(|error| crate::Error::Network(error.to_string()))?;
@@ -450,6 +461,7 @@ impl SisterNode {
                 self.config.authenticated_session.as_ref(),
                 env,
                 false,
+                None,
             )
             .await
             .map_err(|error| crate::Error::Network(error.to_string()))?;
@@ -554,6 +566,7 @@ impl SisterNode {
                     self.config.authenticated_session.as_ref(),
                     &env,
                     true,
+                    None,
                 )
                 .await
                 .map_err(|error| crate::Error::Network(error.to_string()))?
