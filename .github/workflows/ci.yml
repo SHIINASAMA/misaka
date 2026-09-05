@@ -34,9 +34,33 @@ jobs:
         run: cargo run -p testament -- operator-verify
       - name: Run full Network Stream verification
         run: cargo run -p testament -- network-verify --json
+      - name: Run timed-invite enrollment verification (E01-E13)
+        run: cargo run -p testament -- enrollment-verify --json
       - name: Run relay verification
         run: cargo run -p testament -- relay-verify --json
       - name: Run Gateway discovery verification (G01-G10)
         run: cargo run -p testament -- gateway-verify --json
       - name: Run security verification
         run: cargo run -p testament -- security-verify --json
+
+  # A deliberately lighter Windows gate: the Iroh stack has already exposed
+  # Windows-only runtime behavior (stack-size on `misaka ps`/join), so compile +
+  # the workspace unit/component tests run here. The full multi-process Testament
+  # suites stay on Linux to keep Windows CI fast and non-flaky.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+      - name: Build the CLI
+        run: cargo build -p misaka
+      - name: Run unit and component tests
+        run: cargo test --workspace

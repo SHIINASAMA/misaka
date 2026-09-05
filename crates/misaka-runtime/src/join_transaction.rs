@@ -6,14 +6,22 @@
 //! `network.json` whose certificate failed to arrive. This module stages every
 //! network-scoped artifact into a throwaway subdirectory using the *same* stores
 //! the rest of the runtime uses — so the on-disk format is identical — validates
-//! the staged result, and only then renames each file into place. Because the
-//! staging directory lives inside the config directory, every rename is same
-//! filesystem and therefore atomic.
+//! the staged result, and only then renames each file into place.
+//!
+//! IMPORTANT — what is and is not atomic here. Each individual rename is atomic
+//! on a same-filesystem path, and NOTHING is renamed until every artifact has
+//! been staged and re-verified, so a *failure before commit* leaves the existing
+//! config directory completely untouched (and a fresh directory stays
+//! retryable). But the commit itself is a sequence of independent renames, not a
+//! single multi-file transaction: a crash *during* commit (after some renames,
+//! before the rest) could leave a partially-renamed set. Closing that last gap
+//! needs a durable manifest/recovery step or a single-file bundle and is left as
+//! a documented follow-up rather than claimed as solved here.
 //!
 //! Sister-local preparation (the identity and its key) is intentionally *not*
 //! part of this transaction: a Sister identity without a Network membership is
 //! inert, is created idempotently, and lets a failed join be retried with the
-//! same key. Only the Network itself is committed all-or-nothing.
+//! same key. Only the Network itself is staged-then-committed.
 
 use crate::gateway_store::GatewayStore;
 use crate::membership_store::MembershipStore;
@@ -55,9 +63,11 @@ impl NetworkInstall {
     }
 }
 
-/// Install a validated enrollment bundle atomically. On any failure the existing
-/// config directory is left byte-for-byte unchanged and the staging directory is
-/// removed, so the operation is safely retryable.
+/// Install a validated enrollment bundle. Staging + verification happen before
+/// any rename, so any failure up to the commit leaves the existing config
+/// directory untouched and the staging directory removed (safely retryable). A
+/// crash *during* the commit's rename sequence can still leave a partially
+/// installed set — see the module note (durable recovery is a follow-up).
 pub fn install(data_dir: &Path, install: &NetworkInstall) -> Result<(), JoinError> {
     std::fs::create_dir_all(data_dir)?;
 
