@@ -198,26 +198,64 @@ Where the values come from, per environment:
 
 | Environment | Source | In Git? |
 |---|---|---|
-| Production | Cloudflare Worker secrets (`wrangler secret put …`) | No |
+| Production | Cloudflare Worker secrets (set once, out of band) | No |
 | Local dev   | `gateway/cloudflare/.dev.vars` (gitignored)            | No |
 | CI tests   | explicit `--var` fixtures in the workflow / `do-sql.sh`  | Yes (test values) |
 
 `.dev.vars.example` (committed, empty values) documents the required names.
-Provision production with:
+
+### Production deployment pipeline
+
+The Cloudflare Gateway is deployed automatically by GitHub Actions — the
+**existing** `cloudflare-gateway.yml` is the single deployment owner; there is no
+separate deployment workflow and no `wrangler-action`.
+
+```text
+Developer pushes main
+        ↓
+GitHub Actions (cloudflare-gateway.yml)
+        ↓
+worker-build → wrangler dry-run → Miniflare boot → DO SQL tests → gzip < 3 MiB
+        ↓   (all gates must pass first)
+npx wrangler deploy
+        ↓
+Cloudflare Worker
+```
+
+The deploy step runs **only** on `push` to `main` (PRs, other branches, and
+`workflow_dispatch` never deploy; a deploy failure fails the job). It builds a
+second time (via `[build] command`) — kept simple intentionally.
+
+Configuration ownership:
+
+```text
+GitHub Actions            Cloudflare Worker
+├── CLOUDFLARE_API_TOKEN  ├── NETWORK_ID
+└── CLOUDFLARE_ACCOUNT_ID └── NETWORK_AUTHORITY_PUBLIC_KEY
+
+Repository → no real deployment values
+```
+
+- Both `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` are GitHub Actions
+  **secrets**.
+- `NETWORK_ID` / `NETWORK_AUTHORITY_PUBLIC_KEY` are **never** copied into GitHub.
+  The Gateway reads them from Cloudflare at runtime; `wrangler deploy` uploads
+  code and bindings only.
+
+Because `[secrets].required` declares those two, the very first deploy fails
+until they exist on the Worker. Set them once, out of band:
 
 ```bash
 cd gateway/cloudflare
 npx wrangler secret put NETWORK_ID
-npx wrangler secret put NETWORK_AUTHORITY_PUBLIC_KEY   # updates the Worker
-                                                        # secret (may publish a
-                                                        # new version)
+npx wrangler secret put NETWORK_AUTHORITY_PUBLIC_KEY
 ```
 
-`wrangler.toml`'s `[secrets] required = [ … ]` makes a real `wrangler deploy`
-fail if a value is unset. `authority_from_env()` has no fallback (no zero
-NetworkId, no default key): a missing or malformed value fails fast. `wrangler
-deploy --dry-run` and `wrangler dev --local` are unaffected — tests inject their
-own fixed values.
+`authority_from_env()` has no fallback (no zero NetworkId, no default key): a
+missing or malformed value fails fast. `wrangler deploy --dry-run` and
+`wrangler dev --local` do not enforce `[secrets].required`, so the pre-deploy
+gates pass without production secrets. A local `npx wrangler deploy` remains a
+manual / recovery path, not the recommended production flow.
 
 ## Native reference host — `crates/misaka-gatewayd`
 
@@ -293,4 +331,6 @@ against real Iroh Sisters.
 Plus the Cloudflare packaging gate (`.github/workflows/cloudflare-gateway.yml`):
 `worker-build` + `wrangler deploy --dry-run` + a miniflare boot asserting
 `/verify` `{"valid":true}` and `/.well-known/misaka` `GatewayInfo`, and bundle
-gzip < 3 MiB. No production deploy is wired yet; CI produces the artifact only.
+gzip < 3 MiB. On a `push` to `main`, once every gate above passes, the same
+workflow runs `npx wrangler deploy` to publish the Worker (see
+[Production deployment pipeline](#production-deployment-pipeline)).

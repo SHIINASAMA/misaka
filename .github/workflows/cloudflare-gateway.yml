@@ -108,6 +108,19 @@ jobs:
           fi
           echo "Result: PASS"
 
+      - name: Deploy to Cloudflare
+        # Real deploy ONLY on push to main, and only after every build/test/gate
+        # above has passed (a prior failure aborts the job before this runs).
+        # PRs, non-main pushes, and workflow_dispatch never deploy. Failure here
+        # fails the workflow (no continue-on-error). Network-specific values are
+        # NOT provided here — they live as Cloudflare Worker secrets (see
+        # wrangler.toml [secrets].required); GitHub carries only credentials.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          CLOUDFLARE_API_TOKEN: *** secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx wrangler deploy
+
       - name: Upload dist artifact
         if: always()
         uses: actions/upload-artifact@v4
