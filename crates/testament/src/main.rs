@@ -5,8 +5,8 @@ use testament::run_manager::{
     set_current_run,
 };
 use testament::scenario::{
-    gateway_scenarios, network_scenarios, relay_scenarios, scenarios, security_scenarios, Context,
-    ScenarioDef,
+    gateway_scenarios, network_scenarios, relay_scenarios, run_gateway_live, scenarios,
+    security_scenarios, Context, ScenarioDef,
 };
 use testament::types::{Manifest, RunLayout, SisterEntry};
 
@@ -115,6 +115,28 @@ enum Command {
         json: bool,
     },
 
+    /// Opt-in LIVE smoke against a real, public Gateway (NOT in CI). Verifies one
+    /// chain: two test Sisters that know only the Gateway URL, no manual peer,
+    /// discover each other over the real Network. Deliberately low-volume
+    /// (≈6 Gateway requests) and run only when you explicitly invoke it.
+    #[command(name = "gateway-live-verify")]
+    GatewayLiveVerify {
+        /// The real, public Gateway URL to smoke-test.
+        #[arg(long)]
+        gateway: String,
+        /// Local operator Authority trust store (a NetworkAuthorityStore-style
+        /// directory, or a `network-authority-key` file beside its `.bin`). The
+        /// private key is read only to mint ephemeral test memberships and is
+        /// never sent anywhere or committed.
+        #[arg(long)]
+        authority_key_file: String,
+        /// Max seconds to wait for authenticated-Iroh convergence.
+        #[arg(long, default_value_t = 30)]
+        timeout_secs: u64,
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Remove all run directories.
     Clean,
 }
@@ -135,6 +157,17 @@ fn main() {
         Command::GatewayVerify { json } => {
             verify_definitions(json, gateway_scenarios(), "gateway scenarios")
         }
+        Command::GatewayLiveVerify {
+            gateway,
+            authority_key_file,
+            timeout_secs,
+            json,
+        } => run_gateway_live(
+            &gateway,
+            std::path::Path::new(&authority_key_file),
+            timeout_secs,
+            json,
+        ),
         Command::Run { scenario, json } => run_one(&scenario, json),
         Command::Up { sisters, json } => up(sisters, json),
         Command::Status { run_id, run, json } => status(run.as_deref().or(run_id.as_deref()), json),

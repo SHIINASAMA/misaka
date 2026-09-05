@@ -284,7 +284,7 @@ fn g04_replay_rejected(ctx: &mut Context) -> Result<(), ScenarioError> {
 /// discover each other and complete the authenticated Iroh control connection.
 fn g05_discovery_through_gateway(ctx: &mut Context) -> Result<(), ScenarioError> {
     let (bind, process) = spawn_gateway(ctx)?;
-    ctx.start_iroh_pair_via_gateway(&[gateway_url(bind)])?;
+    ctx.start_iroh_pair_via_gateway(&[gateway_url(bind)], 1)?;
     let outcome = wait_until_peers(ctx, 30);
     ctx.teardown();
     stop_gateway(process)?;
@@ -296,7 +296,7 @@ fn g05_discovery_through_gateway(ctx: &mut Context) -> Result<(), ScenarioError>
 fn g07_multi_gateway_failover(ctx: &mut Context) -> Result<(), ScenarioError> {
     let (bind_a, process_a) = spawn_gateway(ctx)?;
     let (bind_b, process_b) = spawn_gateway(ctx)?;
-    ctx.start_iroh_pair_via_gateway(&[gateway_url(bind_a), gateway_url(bind_b)])?;
+    ctx.start_iroh_pair_via_gateway(&[gateway_url(bind_a), gateway_url(bind_b)], 1)?;
     stop_gateway(process_a)?; // drop one Gateway; B must carry discovery
     let outcome = wait_until_peers(ctx, 30);
     ctx.teardown();
@@ -307,7 +307,7 @@ fn g07_multi_gateway_failover(ctx: &mut Context) -> Result<(), ScenarioError> {
 /// G08: after discovery, all Gateways down — the already-formed P2P persists.
 fn g08_gateway_down_after_connect(ctx: &mut Context) -> Result<(), ScenarioError> {
     let (bind, process) = spawn_gateway(ctx)?;
-    ctx.start_iroh_pair_via_gateway(&[gateway_url(bind)])?;
+    ctx.start_iroh_pair_via_gateway(&[gateway_url(bind)], 1)?;
     wait_until_peers(ctx, 30)?; // both connected through the Gateway
     stop_gateway(process)?; // now remove the Gateway entirely
                             // Let a couple of heartbeat cycles pass with no Gateway available.
@@ -328,7 +328,7 @@ fn g08_gateway_down_after_connect(ctx: &mut Context) -> Result<(), ScenarioError
 /// after the Gateway it discovered through is gone.
 fn g09_gateway_removed_continues(ctx: &mut Context) -> Result<(), ScenarioError> {
     let (bind, process) = spawn_gateway(ctx)?;
-    ctx.start_iroh_pair_via_gateway(&[gateway_url(bind)])?;
+    ctx.start_iroh_pair_via_gateway(&[gateway_url(bind)], 1)?;
     wait_until_peers(ctx, 30)?;
     stop_gateway(process)?;
     // The remaining Sister must still answer introspection (not crashed by the
@@ -350,7 +350,7 @@ fn g10_no_manual_iroh_bootstrap(ctx: &mut Context) -> Result<(), ScenarioError> 
     // seeds no peers. If discovery converges with an empty manual-peer list, the
     // normal path is proven free of any raw `iroh://` contact.
     let (bind, process) = spawn_gateway(ctx)?;
-    ctx.start_iroh_pair_via_gateway(&[gateway_url(bind)])?;
+    ctx.start_iroh_pair_via_gateway(&[gateway_url(bind)], 1)?;
     let a_manual = ctx
         .entries
         .get("a")

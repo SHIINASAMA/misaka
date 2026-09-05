@@ -27,7 +27,7 @@ pub struct SisterProcess {
     pub restart: Option<RestartSpec>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct RestartSpec {
     program: PathBuf,
     args: Vec<String>,
@@ -38,6 +38,12 @@ impl RestartSpec {
     /// Append launch arguments for scenario-specific backend flags.
     pub fn append_args<const N: usize>(&mut self, args: [&str; N]) {
         self.args.extend(args.into_iter().map(str::to_string));
+    }
+
+    /// The recorded launch arguments (excluding the program). Used by the live
+    /// smoke to confirm no manual `--iroh-peer` / `--peer` was ever injected.
+    pub fn extra_args(&self) -> &[String] {
+        &self.args
     }
 
     /// Append one dynamically discovered launch argument.

@@ -1,3 +1,4 @@
+use misaka_core::NetworkId;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -143,4 +144,18 @@ pub const TESTAMENT_ROOT: &str = ".testament";
 
 pub fn runs_dir() -> PathBuf {
     PathBuf::from(TESTAMENT_ROOT).join("runs")
+}
+
+/// Stable NetworkId for the **live** Gateway smoke (`gateway-live-verify`).
+///
+/// The live Cloudflare Gateway must be deployed with this exact `NETWORK_ID`
+/// (the value it is bound to is public configuration, never secret). Testament
+/// mints two test Sisters' memberships against a locally-held operator authority
+/// and points them at the Gateway; the Gateway's authority PUBLIC key must be
+/// that same operator authority. Keeping the id fixed makes that binding
+/// reproducible. It is unrelated to real production networks.
+pub const LIVE_TEST_NETWORK: &str = "00000000-0000-0000-0000-0000000000ff";
+
+pub fn live_test_network_id() -> NetworkId {
+    NetworkId::parse(LIVE_TEST_NETWORK).expect("live test network id is a valid UUID")
 }

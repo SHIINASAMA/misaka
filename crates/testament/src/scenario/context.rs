@@ -531,9 +531,7 @@ impl Context {
         self.wait_until_ready(alias)
     }
 
-    pub(crate) fn ensure_iroh_authority(
-        &mut self,
-    ) -> (NetworkAuthority, misaka_core::AuthorityKeyPair) {
+    pub fn ensure_iroh_authority(&mut self) -> (NetworkAuthority, misaka_core::AuthorityKeyPair) {
         if let Some((authority, key)) = &self.iroh_authority {
             return (*authority, key.clone());
         }
@@ -542,6 +540,13 @@ impl Context {
         let (authority, key) = NetworkAuthority::generate(network_id);
         self.iroh_authority = Some((authority, key.clone()));
         (authority, key)
+    }
+
+    /// Seed the Iroh authority so `ensure_iroh_authority()` returns a specific
+    /// Network (used by the live Gateway smoke to match the real deployment's
+    /// NetworkId + authority key). Call before any Iroh Sister is started.
+    pub fn set_gateway(&mut self, authority: NetworkAuthority, key: misaka_core::AuthorityKeyPair) {
+        self.iroh_authority = Some((authority, key));
     }
 
     pub fn introspect(&self, alias: &str) -> Result<IntrospectionSnapshot, ScenarioError> {
@@ -752,6 +757,7 @@ impl Context {
     pub fn start_iroh_pair_via_gateway(
         &mut self,
         gateway_urls: &[String],
+        gateway_interval: u64,
     ) -> Result<(), ScenarioError> {
         let a_ports = allocate_ports()?;
         let b_ports = allocate_ports()?;
@@ -807,11 +813,14 @@ impl Context {
                 .arg("--stream-backend")
                 .arg("iroh")
                 .arg("--gateway-interval")
-                .arg("1");
+                .arg(gateway_interval.to_string());
             for url in gateway_urls {
                 command.arg("--gateway").arg(url);
             }
-            restart.append_args(["--stream-backend", "iroh", "--gateway-interval", "1"]);
+            restart.append_arg("--stream-backend");
+            restart.append_arg("iroh");
+            restart.append_arg("--gateway-interval");
+            restart.append_arg(gateway_interval.to_string());
             for url in gateway_urls {
                 restart.append_arg("--gateway");
                 restart.append_arg(url.clone());

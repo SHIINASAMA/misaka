@@ -5,11 +5,13 @@
 //!   - `core`     T01–T13 baseline        - `network` N01–N21 Network Stream
 //!   - `relay`    R01–R07 Iroh relay      - `security` S01–S03 auth/revocation
 //!   - `gateway`  G01–G10 Gateway discovery
+//!   - `live`     opt-in LIVE smoke against a real external Gateway (never in CI)
 
 mod context;
 mod core;
 mod gateway;
 pub(crate) mod helpers;
+mod live;
 mod network;
 mod relay;
 mod security;
@@ -41,6 +43,7 @@ pub use types::{ScenarioDef, ScenarioFn};
 
 pub use core::scenarios;
 pub use gateway::gateway_scenarios;
+pub use live::run_gateway_live;
 pub use network::network_scenarios;
 pub use relay::relay_scenarios;
 pub use security::security_scenarios;

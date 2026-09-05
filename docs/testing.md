@@ -211,6 +211,40 @@ Sisters. G01–G05, G07–G10 are process scenarios; G06 is a deterministic
 Discovery scenarios use `--gateway` with a short `--gateway-interval` and never
 pass `--iroh-peer`; assertions use introspection (peers converged), not logs.
 
+## Gateway live smoke (`gateway-live-verify`)
+
+Distinct from `gateway-verify`: an **explicit opt-in**, low-volume smoke against
+a **real, deployed public Gateway**. It is never wired into `verify`,
+`gateway-verify`, or regular CI, and never runs automatically.
+
+```bash
+cargo run -p testament -- gateway-live-verify \
+  --gateway https://<your-gateway> \
+  --authority-key-file <local authority trust store>
+```
+
+It runs exactly one chain: two isolated test Sisters that know only the Gateway
+URL (no `--peer` / `--iroh-peer`, no mDNS), on one real Network, each doing a
+**single** Gateway cycle (`--gateway-interval 3600` relies on `tokio::interval`'s
+immediate first tick) — **≈6 Gateway HTTP requests** on the happy path (never a
+fixed guarantee; failures/restarts change it). Success is a black-box
+introspection check (`live-a` sees `live-b` and vice-versa) within a bounded
+window, then teardown. It does not poll the Gateway, retry-loop it, or re-run on
+failure.
+
+- The Gateway **must** be deployed with `NETWORK_ID = 00000000-0000-0000-0000-0000000000ff`
+  (`testament::types::LIVE_TEST_NETWORK`), otherwise the required-membership check
+  fails with no P2P.
+- `--authority-key-file` points at a **local** operator NetworkAuthority trust
+  store (a `NetworkAuthorityStore`-style directory, or a `network-authority-key`
+  file beside its `.bin`). It is read only to mint two ephemeral test
+  memberships; the Authority private key is never committed, printed, or sent to
+  the Gateway. It must be the authority whose **public** key the Gateway is
+  configured with, and whose `network_id` matches the constant above.
+- Test Sisters are per-run (fresh keys each run), isolated under
+  `.testament/runs/live-<id>/`; the live Gateway's `peers` directory is **not**
+  mutated beyond the two test records, which expire on the Gateway's TTL.
+
 ## CI gate
 
 The baseline gate is:

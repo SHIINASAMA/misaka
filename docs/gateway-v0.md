@@ -326,3 +326,20 @@ Plus the Cloudflare packaging gate (`.github/workflows/cloudflare-gateway.yml`):
 gzip < 3 MiB. On a `push` to `main`, once every gate above passes, the same
 workflow runs `npx wrangler deploy` to publish the Worker (see
 [Production deployment pipeline](#production-deployment-pipeline)).
+
+### Live smoke — `testament gateway-live-verify` (opt-in, never in CI)
+
+`gateway-verify` above is deterministic and uses the **native** reference host.
+It cannot prove a real Cloudflare deployment works. For that, `gateway-live-verify`
+is an explicit, operator-only smoke against a **real public Gateway**: two
+isolated test Sisters that know only the Gateway URL (no `--peer` /
+`--iroh-peer`, no mDNS), on one real Network, each doing a **single** Gateway
+cycle (`--gateway-interval 3600`) — **≈6 Gateway HTTP requests** on the happy
+path. Success is black-box introspection (each Sister sees the other's id), then
+teardown. It never polls or retry-loops the Gateway and is not a CI job.
+
+Because it must present membership the Gateway will accept, the Gateway is
+deployed with `NETWORK_ID = 00000000-0000-0000-0000-0000000000ff` and the
+operator supplies the matching **local** Authority trust store via
+`--authority-key-file` (private key never leaves the operator's machine, never
+touches the Gateway). Details: [docs/testing.md](testing.md#gateway-live-smoke-gateway-live-verify).
