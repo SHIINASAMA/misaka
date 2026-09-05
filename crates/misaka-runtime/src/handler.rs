@@ -307,6 +307,27 @@ pub(crate) async fn dispatch_envelope(
 
         MessageType::JobResponse => {
             let result: JobResultData = bincode::deserialize(&env.data)?;
+            // §6: only resolve a pending job that this Sister actually owns.
+            // A pending is keyed by the (now unguessable, UUID) job id, but the
+            // `creator` field guards against a peer delivering a result that
+            // claims to be for someone else's submission. The authenticated
+            // sender (§1) is who it claims; we intentionally do NOT require the
+            // sender to equal the originally-directed executor, because a job may
+            // legitimately be forwarded or work-stolen to a different Sister —
+            // the result still names the true creator. Pinning the whole
+            // executor chain needs a transfer-notification design (deferred with
+            // the job-identity work), so id + creator + authenticated sender is
+            // the practical, transfer-safe binding.
+            if result.creator != node.identity.id.as_u64() {
+                tracing::debug!(
+                    event = "job_result_ignored",
+                    sister_id = node.identity.id.as_u64(),
+                    job_creator = result.creator,
+                    job_id = %result.job_id,
+                    "dropping a JobResponse for a job this Sister did not create"
+                );
+                return Ok(None);
+            }
             tracing::info!(
                 event = "job_result_received",
                 sister_id = node.identity.id.as_u64(),
@@ -503,5 +524,64 @@ mod tests {
     async fn legacy_tcp_dispatch_has_no_peer_binding() {
         let env = Envelope::new(NetworkId::default(), MessageType::Ping, 9, 0, vec![]);
         assert!(dispatch_envelope(&node(), env, None).await.is_ok());
+    }
+
+    // S06: a JobResponse for a job this Sister did not create must not resolve
+    // its pending, even if the (unguessable) job id were somehow known.
+    #[tokio::test]
+    async fn job_response_for_another_creators_job_is_ignored() {
+        let node = node(); // this node's identity id = 1
+        let (sender_peer, _key) = peer_two(); // authenticated sender is Sister #2
+        node.jobs.reserve_pending("job-live");
+
+        let foreign = misaka_core::protocol::JobResultData {
+            job_id: "job-live".into(),
+            creator: 99, // someone else's job
+            executor: 2,
+            output: "x".into(),
+            exit_code: 0,
+            success: true,
+            started_at: 0,
+            finished_at: 1,
+        };
+        let env = Envelope::new(
+            NetworkId::default(),
+            MessageType::JobResponse,
+            2,
+            0,
+            bincode::serialize(&foreign).unwrap(),
+        );
+        // Rejected-by-ownership: the pending must survive (not resolved).
+        let _ = dispatch_envelope(&node, env, Some(sender_peer.clone()))
+            .await
+            .unwrap();
+        assert!(
+            node.jobs.resolve_pending("job-live").is_some(),
+            "a foreign-creator JobResponse wrongly resolved our pending"
+        );
+
+        // The correct result (creator == us) resolves it.
+        let ours = misaka_core::protocol::JobResultData {
+            job_id: "job-live".into(),
+            creator: 1,
+            executor: 2,
+            output: "ok".into(),
+            exit_code: 0,
+            success: true,
+            started_at: 0,
+            finished_at: 1,
+        };
+        let env = Envelope::new(
+            NetworkId::default(),
+            MessageType::JobResponse,
+            2,
+            0,
+            bincode::serialize(&ours).unwrap(),
+        );
+        dispatch_envelope(&node, env, Some(sender_peer))
+            .await
+            .unwrap();
+        // After the accepted result, the pending is gone.
+        assert!(node.jobs.resolve_pending("job-live").is_none());
     }
 }

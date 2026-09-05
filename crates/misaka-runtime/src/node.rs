@@ -737,7 +737,7 @@ impl SisterNode {
     /// 提交一个任务（就地执行；不返回 JobResultData，执行逻辑由 executor loop 处理）。
     /// run -l 子命令专用：把任务塞进本地队列即可。
     pub async fn submit_local(&self, command: &str) -> crate::Result<()> {
-        let job_id = format!("job-{}-{}", now_secs(), rand_int() % 10000);
+        let job_id = new_job_id();
         let mut job = LocalJob::new(job_id, command.to_string());
         job.creator = self.identity.id.as_u64();
         self.jobs.enqueue(job).await;
@@ -780,7 +780,7 @@ impl SisterNode {
             self.spawn_response_listener().await?
         };
 
-        let job_id = format!("job-{}-{}", now_secs(), rand_int() % 10000);
+        let job_id = new_job_id();
         let creator = self.identity.id.as_u64();
         let creator_addr = my_listen.to_string();
         let job_data = JobData {
@@ -841,7 +841,7 @@ impl SisterNode {
 
     /// 同步在本地执行任务并返回结果 (供 `run` 独立进程使用)。
     pub async fn run_local_sync(&self, command: &str) -> JobResultData {
-        let job_id = format!("job-{}-{}", now_secs(), rand_int() % 10000);
+        let job_id = new_job_id();
         self.execute_and_record_public(&job_id, command).await
     }
 
@@ -1164,9 +1164,12 @@ pub(crate) fn now_secs() -> u64 {
         .as_secs()
 }
 
-fn rand_int() -> u64 {
-    use rand::Rng;
-    rand::thread_rng().gen::<u64>()
+/// A globally unique, unguessable job id (a random 128-bit UUID). Job results
+/// are correlated by this id across a single protocol generation, so it must not
+/// be guessable: a 4-digit suffix let a rogue Sister guess an in-flight pending
+/// job and inject a fake result.
+fn new_job_id() -> String {
+    format!("job-{}", uuid::Uuid::new_v4())
 }
 
 #[cfg(test)]
