@@ -1,0 +1,23 @@
+name = "misaka-gateway-cloudflare"
+main = "build/worker/shim.mjs"
+compatibility_date = "2026-09-01"
+
+[build]
+command = "worker-build --release"
+
+# One Durable Object per Network holds the signed-PeerRecord directory and the
+# nonce-replay set in DO SQLite storage (strongly-consistent single writer).
+[[durable_objects.bindings]]
+name = "GATEWAY_DIRECTORY"
+class_name = "GatewayDirectory"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["GatewayDirectory"]
+
+# Public configuration, not secrets. One Gateway deployment serves one Network.
+# `NETWORK_AUTHORITY_PUBLIC_KEY` is the hex-encoded Authority PUBLIC key; the
+# private half never leaves the Network owner's machine.
+[vars]
+NETWORK_ID = "00000000-0000-0000-0000-000000000000"
+NETWORK_AUTHORITY_PUBLIC_KEY = "0000000000000000000000000000000000000000000000000000000000000000"

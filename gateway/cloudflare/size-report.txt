@@ -1,0 +1,35 @@
+Cloudflare Gateway v0 - packaging + size report
+=================================================
+
+Toolchain:
+  rustc               1.98.0
+  worker / worker-build 0.8.5
+  wasm-bindgen        0.2.127
+  wrangler            4.129.0
+
+Pipeline (all PASS):
+  wasm32 compile  ->  worker-build --release  ->  wrangler deploy --dry-run --outdir dist
+  runtime boot (miniflare --local):
+    GET /verify              -> 200 {"valid":true}          (real misaka-core crypto)
+    GET /.well-known/misaka  -> 200 GatewayInfo (env-parsed)
+
+Platform primitives used (from worker 0.8.5 first-class Rust bindings):
+  - Durable Object with SQLite storage (one instance per Network) as the
+    directory + nonce-replay set. Sequence-monotonicity and replay are single
+    atomic SQL statements; TTL is a column + DO Alarm for GC.
+  - misaka-core crypto (verify_request / PeerRecord::verify) runs in the worker;
+    the platform does the storage/coordination, not the trust validation.
+
+Artifacts:
+  Total Upload:                  722.84 KiB
+  Final gzip upload (Wrangler):  263.48 KiB   <-- acceptance value
+Cloudflare Free gzip limit:      3 MiB (3072 KiB)
+
+Result: PASS   (gzip 263.48 KiB << 3 MiB, EXCELLENT tier < 1 MiB)
+
+Notes:
+  - `strip = true` is intentionally omitted (wasm-bindgen >= 0.2.125 needs the
+    externref table; cloudflare/workers-rs#1014). lto=true, codegen-units=1 kept;
+    worker-build's wasm-opt strips names regardless.
+  - getrandom + uuid select the wasm js entropy backend via feature unification
+    in this crate's Cargo.toml; misaka-core is unchanged.

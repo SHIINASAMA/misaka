@@ -28,7 +28,7 @@ use misaka_core::{
     announce_body_bytes, peers_body_bytes, record_matches_membership, verify_request,
     GatewayAnnounceRequest, GatewayAuth, GatewayAuthError, GatewayInfo, GatewayPeersRequest,
     GatewayPeersResponse, MembershipCertificate, NetworkAuthority, NetworkId, PeerRecord,
-    SisterPublicKey,
+    SisterPublicKey, DEFAULT_AUTH_WINDOW_SECS, DEFAULT_NONCE_TTL_SECS, DEFAULT_RECORD_TTL_SECS,
 };
 use rand::RngCore;
 use thiserror::Error;
@@ -60,9 +60,9 @@ impl GatewayConfig {
     pub fn new(authority: NetworkAuthority) -> Self {
         Self {
             authority,
-            record_ttl_secs: 600,
-            auth_window_secs: 300,
-            nonce_ttl_secs: 900,
+            record_ttl_secs: DEFAULT_RECORD_TTL_SECS,
+            auth_window_secs: DEFAULT_AUTH_WINDOW_SECS,
+            nonce_ttl_secs: DEFAULT_NONCE_TTL_SECS,
             now: Arc::new(unix_now),
         }
     }
@@ -129,24 +129,29 @@ impl Gateway {
         Ok(key)
     }
 
-    /// Insert or refresh a directory entry, refusing to downgrade the sequence.
+    /// Insert or refresh a directory entry. This host is a self-host/test
+    /// stand-in, so its write rule mirrors the Cloudflare directory's
+    /// `ON CONFLICT … WHERE excluded.sequence > peers.sequence` here in Rust;
+    /// the production rule is enforced atomically by DO SQL, not duplicated in
+    /// the shared crate.
     fn upsert(&self, record: &PeerRecord, membership: &MembershipCertificate) {
         let now = self.now();
         let mut members = self.members.lock().unwrap();
         let sister_id = record.sister_id.as_u64();
-        match members.get_mut(&sister_id) {
-            Some(entry) if entry.record.sequence >= record.sequence && entry.expires_at > now => {}
-            _ => {
-                members.insert(
-                    sister_id,
-                    DirectoryEntry {
-                        record: record.clone(),
-                        membership_serial: membership.serial,
-                        expires_at: now + self.config.record_ttl_secs,
-                    },
-                );
-            }
+        let stale = members
+            .get(&sister_id)
+            .is_some_and(|entry| entry.expires_at > now && entry.record.sequence > record.sequence);
+        if stale {
+            return;
         }
+        members.insert(
+            sister_id,
+            DirectoryEntry {
+                record: record.clone(),
+                membership_serial: membership.serial,
+                expires_at: now + self.config.record_ttl_secs,
+            },
+        );
     }
 
     /// Snapshot the live directory (used by `/v1/peers` and by introspection).

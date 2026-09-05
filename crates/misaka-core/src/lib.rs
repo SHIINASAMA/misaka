@@ -17,7 +17,8 @@ pub mod protocol;
 pub use gateway::{
     announce_body_bytes, peers_body_bytes, record_matches_membership, verify_request,
     GatewayAnnounceRequest, GatewayAuth, GatewayAuthError, GatewayInfo, GatewayPeersRequest,
-    GatewayPeersResponse, GATEWAY_PROTOCOL_VERSION,
+    GatewayPeersResponse, DEFAULT_AUTH_WINDOW_SECS, DEFAULT_NONCE_TTL_SECS,
+    DEFAULT_RECORD_TTL_SECS, GATEWAY_PROTOCOL_VERSION,
 };
 
 pub use identity::{

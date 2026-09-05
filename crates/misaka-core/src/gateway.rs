@@ -291,6 +291,22 @@ pub fn record_matches_membership(record: &PeerRecord, membership: &MembershipCer
         && record.sister_public_key == membership.sister_public_key
 }
 
+// ---------------------------------------------------------------------------
+// Shared directory timing constants. These are configuration values, NOT
+// policy: the Cloudflare host enforces monotonic sequence, nonce replay, TTL,
+// and GC declaratively through Durable Object SQLite (one atomic statement
+// each) rather than through a reusable Rust state machine. The native server is
+// a self-host/test stand-in with its own equivalent storage.
+// ---------------------------------------------------------------------------
+
+/// How long an accepted record stays queryable before it must be renewed.
+pub const DEFAULT_RECORD_TTL_SECS: u64 = 600;
+/// Accepted skew between a request auth timestamp and the current time.
+pub const DEFAULT_AUTH_WINDOW_SECS: u64 = 300;
+/// How long a spent nonce keeps blocking replays (covers the window on both
+/// sides of a skewed clock).
+pub const DEFAULT_NONCE_TTL_SECS: u64 = 900;
+
 #[cfg(test)]
 mod tests {
     use super::*;

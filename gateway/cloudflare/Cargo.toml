@@ -1,12 +1,13 @@
 [package]
-name = "cf-gateway-spike"
+name = "misaka-gateway-cloudflare"
 version = "0.1.0"
 edition = "2021"
-description = "Cloudflare Gateway packaging spike: prove misaka-core reaches a Workers Wasm bundle"
+description = "Cloudflare Workers reference implementation of the Misaka Gateway v0 discovery service"
 
-# Standalone workspace: keeps `[profile.release]` below effective (workspace
-# members inherit profiles from the root only) and leaves the repo root
-# Cargo.toml untouched. `misaka-core` is still consumed as a path dependency.
+# Standalone workspace: keeps `[profile.release]` effective (workspace members
+# inherit profiles from the root only) and isolates the wasm build from the
+# native cargo workspace. `misaka-core` is consumed as a path dependency, the
+# same crate the native `misaka-gatewayd` and the runtime client depend on.
 [workspace]
 
 [lib]
@@ -14,11 +15,14 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 worker = "0.8"
+wasm-bindgen = "0.2"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+js-sys = "0.3"
 misaka-core = { path = "../../crates/misaka-core" }
 # misaka-core pulls `getrandom` transitively via `rand`/`ed25519-dalek`.
-# On wasm32-unknown-unknown the JS (WebCrypto) backend must be selected; enable
-# it here so the whole dependency graph unifies on a buildable backend.
+# On wasm32-unknown-unknown the JS (WebCrypto) backend must be selected so the
+# whole dependency graph unifies on a buildable backend.
 getrandom = { version = "0.2", features = ["js"] }
 # misaka-core pulls `uuid` transitively (NetworkId). Its `v4` path needs a
 # randomness source on wasm32-unknown-unknown; route it through the js backend.
