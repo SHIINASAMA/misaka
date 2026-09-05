@@ -659,7 +659,10 @@ async fn async_main() -> Result<(), MisakaError> {
                 allow_unauthenticated_operations: insecure_development,
                 peer_record,
                 gateways,
-                gateway_interval: std::time::Duration::from_secs(gateway_interval),
+                // Floor at 1s: `tokio::time::interval(0)` would spin the gateway
+                // loop continuously (a footgun if `--gateway-interval 0` is
+                // passed), hammering every Gateway. Never allow sub-second.
+                gateway_interval: std::time::Duration::from_secs(gateway_interval.max(1)),
                 data_dir,
                 heartbeat_interval: std::time::Duration::from_secs(heartbeat),
                 peer_timeout: std::time::Duration::from_secs(peer_timeout),
