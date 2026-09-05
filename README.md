@@ -40,8 +40,10 @@ See [docs/gateway-v0.md](docs/gateway-v0.md) for the wire contract, the Cloudfla
 Durable-Object deployment, and the multi-Gateway discovery loop.
 
 The Cloudflare Gateway is deployed from GitHub Actions after the Cloudflare
-Gateway CI gates pass on `main`. `NETWORK_ID` and `NETWORK_AUTHORITY_PUBLIC_KEY`
-stay in Cloudflare (never in GitHub); the CI carries only deploy credentials. See
+Gateway CI gates pass on `main`. Deployment configuration — including
+`NETWORK_ID` and `NETWORK_AUTHORITY_PUBLIC_KEY` — lives in GitHub Actions
+secrets (a single source), never as committed files; GitHub pushes them to the
+Worker at deploy time via `wrangler deploy --secrets-file`. See
 `docs/gateway-v0.md`.
 
 ## Quick start

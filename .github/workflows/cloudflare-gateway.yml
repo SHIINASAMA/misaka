@@ -2,9 +2,8 @@ name: Cloudflare Gateway v0
 
 # Isolated from the main CI: `gateway/cloudflare` is its own cargo workspace
 # (see its Cargo.toml `[workspace]`), so the root `cargo --workspace` jobs
-# neither build nor lint it. This job proves the Cloudflare reference Gateway —
-# misaka-core crypto + a Durable Object (SQLite) directory — packages into a
-# deployable Worker bundle and actually runs the crypto path, under 3 MiB gzip.
+# neither build nor lint it. This job builds + tests the Cloudflare reference
+# Gateway and, on a push to main after every gate passes, deploys it.
 
 on:
   push:
@@ -109,17 +108,25 @@ jobs:
           echo "Result: PASS"
 
       - name: Deploy to Cloudflare
-        # Real deploy ONLY on push to main, and only after every build/test/gate
-        # above has passed (a prior failure aborts the job before this runs).
-        # PRs, non-main pushes, and workflow_dispatch never deploy. Failure here
-        # fails the workflow (no continue-on-error). Network-specific values are
-        # NOT provided here — they live as Cloudflare Worker secrets (see
-        # wrangler.toml [secrets].required); GitHub carries only credentials.
+        # Real deploy ONLY on push to main, after every gate above passed.
+        # PRs, other branches and workflow_dispatch never deploy; a deploy
+        # failure fails the job (no continue-on-error). The single source of
+        # deployment configuration is GitHub Actions secrets: all four values
+        # are injected at deploy time via a secrets file, so `wrangler deploy
+        # --dry-run` and the Miniflare test fixtures are unaffected and
+        # `[secrets].required` is satisfied by the file (no first-deploy deadlock).
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: npx wrangler deploy
+          NETWORK_ID: ${{ secrets.NETWORK_ID }}
+          NETWORK_AUTHORITY_PUBLIC_KEY: ${{ secrets.NETWORK_AUTHORITY_PUBLIC_KEY }}
+        run: |
+          umask 077
+          printf 'NETWORK_ID=%s\nNETWORK_AUTHORITY_PUBLIC_KEY=%s\n' \
+            "$NETWORK_ID" "$NETWORK_AUTHORITY_PUBLIC_KEY" > gateway-secrets.env
+          npx wrangler deploy --secrets-file gateway-secrets.env
+          rm -f gateway-secrets.env
 
       - name: Upload dist artifact
         if: always()

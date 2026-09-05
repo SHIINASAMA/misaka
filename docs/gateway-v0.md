@@ -171,35 +171,30 @@ crypto path as a build guard so the linker can never strip it.
 ## Deployment configuration
 
 The Gateway **implementation** is generic; the values that point it at a
-specific Network are **deployment configuration** and never enter Git. The
-repository declares only the required binding names:
-
-```text
-Repository                          Cloudflare deployment
-  Gateway protocol                    NETWORK_ID
-  Worker implementation               NETWORK_AUTHORITY_PUBLIC_KEY
-  Durable Object schema
-  wrangler config + required
-  secret names  ───────────────────▶
-```
+specific Network are **deployment configuration**. None of them are committed
+source — they live in a secret store, never in a file in the repository. The
+repository declares only the required binding **names** (`wrangler.toml`'s
+`[secrets].required`), which is what the code reads via `env.var(...)`.
 
 - `NETWORK_ID` is not cryptographically secret, but it is a specific Network's
   deployment metadata.
 - `NETWORK_AUTHORITY_PUBLIC_KEY` is a public key (no confidentiality), but is
   likewise Network-specific deployment configuration.
-- Both are managed as Cloudflare **secrets** for deployment isolation /
-  repository hygiene, not secrecy of the values themselves.
-- The Network Authority **private key is never deployed to a Gateway** — only
-  the public key is, to verify member certificates.
+- They are handled as secrets purely for **deployment isolation / repository
+  hygiene**, not because the values are confidential.
+- The Network Authority **private key is never available anywhere near a
+  Gateway** — not in the repo, not in GitHub, not in Cloudflare. Only the public
+  key is, so the Gateway can verify member certificates.
 - One Gateway deployment serves **one** Network; different deployments can serve
   different Networks and share no directory state.
 
-Where the values come from, per environment:
+Single source of truth for deployment configuration: **GitHub Actions secrets**.
+The repository tracks none of these files/values.
 
-| Environment | Source | In Git? |
+| Environment | Source of `NETWORK_ID` / `NETWORK_AUTHORITY_PUBLIC_KEY` | Committed? |
 |---|---|---|
-| Production | Cloudflare Worker secrets (set once, out of band) | No |
-| Local dev   | `gateway/cloudflare/.dev.vars` (gitignored)            | No |
+| Production | GitHub Actions **secrets**, injected into `wrangler deploy --secrets-file` by CI | No |
+| Local dev  | `gateway/cloudflare/.dev.vars` (gitignored)             | No |
 | CI tests   | explicit `--var` fixtures in the workflow / `do-sql.sh`  | Yes (test values) |
 
 `.dev.vars.example` (committed, empty values) documents the required names.
@@ -217,7 +212,7 @@ GitHub Actions (cloudflare-gateway.yml)
         ↓
 worker-build → wrangler dry-run → Miniflare boot → DO SQL tests → gzip < 3 MiB
         ↓   (all gates must pass first)
-npx wrangler deploy
+npx wrangler deploy --secrets-file   (GitHub secrets → NETWORK_ID / AUTHORITY pubkey)
         ↓
 Cloudflare Worker
 ```
@@ -229,33 +224,30 @@ second time (via `[build] command`) — kept simple intentionally.
 Configuration ownership:
 
 ```text
-GitHub Actions            Cloudflare Worker
-├── CLOUDFLARE_API_TOKEN  ├── NETWORK_ID
-└── CLOUDFLARE_ACCOUNT_ID └── NETWORK_AUTHORITY_PUBLIC_KEY
+GitHub Actions secrets (single source)         Cloudflare Worker (runtime)
+├── CLOUDFLARE_API_TOKEN                        ├── NETWORK_ID        ┐ supplied
+├── CLOUDFLARE_ACCOUNT_ID                       └── NETWORK_..._KEY   ┘ by --secrets-file
+├── NETWORK_ID
+└── NETWORK_AUTHORITY_PUBLIC_KEY
 
-Repository → no real deployment values
+Repository (Git) → no deployment values at all
 ```
 
-- Both `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` are GitHub Actions
-  **secrets**.
-- `NETWORK_ID` / `NETWORK_AUTHORITY_PUBLIC_KEY` are **never** copied into GitHub.
-  The Gateway reads them from Cloudflare at runtime; `wrangler deploy` uploads
-  code and bindings only.
-
-Because `[secrets].required` declares those two, the very first deploy fails
-until they exist on the Worker. Set them once, out of band:
-
-```bash
-cd gateway/cloudflare
-npx wrangler secret put NETWORK_ID
-npx wrangler secret put NETWORK_AUTHORITY_PUBLIC_KEY
-```
+- The deploy step writes `NETWORK_ID` / `NETWORK_AUTHORITY_PUBLIC_KEY` from
+  GitHub secrets into a mode-`0700` temp file and runs
+  `npx wrangler deploy --secrets-file`, then removes it. Because the values are
+  provided at deploy time, `[secrets].required` is satisfied even on the **first**
+  deploy — no out-of-band "set once on Cloudflare" bootstrap, no first-deploy
+  deadlock.
+- GitHub carries all four as **secrets**; `wrangler deploy` still pushes only
+  code + bindings to Cloudflare, and the Gateway reads the values via
+  `env.var(...)` at runtime.
 
 `authority_from_env()` has no fallback (no zero NetworkId, no default key): a
 missing or malformed value fails fast. `wrangler deploy --dry-run` and
 `wrangler dev --local` do not enforce `[secrets].required`, so the pre-deploy
-gates pass without production secrets. A local `npx wrangler deploy` remains a
-manual / recovery path, not the recommended production flow.
+gates run without any production secrets. A local `npx wrangler deploy` remains
+a manual / recovery path, not the recommended production flow.
 
 ## Native reference host — `crates/misaka-gatewayd`
 
