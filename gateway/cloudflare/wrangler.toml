@@ -3,7 +3,11 @@ main = "build/worker/shim.mjs"
 compatibility_date = "2026-09-01"
 
 [build]
-command = "worker-build --release"
+# Cloudflare's Workers Builds image has `cargo` but not the `worker-build` CLI
+# (and may lack the wasm32 target), so provision both before building — this is
+# Cloudflare's documented Rust build command. Each step is a no-op where already
+# satisfied, so GitHub CI (which pre-installs them) is unaffected.
+command = "rustup target add wasm32-unknown-unknown && cargo install -q --locked worker-build --version 0.8.5 && worker-build --release"
 
 # One Durable Object per Network holds the signed-PeerRecord directory and the
 # nonce-replay set in DO SQLite storage (strongly-consistent single writer).
