@@ -13,3 +13,4 @@ thiserror.workspace = true
 tokio.workspace = true
 clap.workspace = true
 rcgen.workspace = true
+reqwest = { workspace = true, features = ["blocking"] }

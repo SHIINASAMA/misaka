@@ -1151,3 +1151,73 @@ fn rand_int() -> u64 {
     use rand::Rng;
     rand::thread_rng().gen::<u64>()
 }
+
+#[cfg(test)]
+mod gateway_tests {
+    use super::SisterNode;
+    use crate::config::RuntimeConfig;
+    use misaka_core::{
+        IrohEndpointId, NetworkId, PeerRecord, SisterIdentity, SisterKeyPair, TransportBinding,
+    };
+
+    fn node() -> SisterNode {
+        let dir = std::env::temp_dir().join(format!("misaka-gw-node-{}", std::process::id()));
+        let config = RuntimeConfig {
+            network_id: NetworkId::default(),
+            data_dir: dir,
+            discovery: crate::config::DiscoveryMode::Off,
+            ..Default::default()
+        };
+        let identity = SisterIdentity::new(
+            1,
+            "tester".to_string(),
+            "host".to_string(),
+            "platform".to_string(),
+            "0.0.0".to_string(),
+            31700,
+        );
+        SisterNode::new(identity, [0u8; 32], config)
+    }
+
+    fn valid_record(network_id: NetworkId, endpoint: &str) -> PeerRecord {
+        let key = SisterKeyPair::from_bytes([5u8; 32]);
+        let binding = TransportBinding::sign(
+            network_id,
+            42,
+            IrohEndpointId::from_bytes([9u8; 32]),
+            1,
+            &key,
+        );
+        PeerRecord::issue(network_id, 42, endpoint.to_string(), binding, 1, &key)
+    }
+
+    /// G06: a Sister never trusts a Gateway-supplied locator without
+    /// re-verifying it. Each reject happens before any Iroh dial.
+    #[tokio::test]
+    async fn bootstrap_rejects_untrusted_records() {
+        let node = node();
+
+        // (a) Foreign network.
+        let foreign = valid_record(NetworkId::generate(), "iroh://x");
+        assert!(
+            node.bootstrap_peer_record(foreign).await.is_err(),
+            "foreign-network record must be rejected"
+        );
+
+        // (b) Tampered signature.
+        let mut forged = valid_record(node.config.network_id, "iroh://x");
+        forged.sister_signature = misaka_core::SisterSignature::from_bytes([0u8; 64]);
+        assert!(
+            node.bootstrap_peer_record(forged).await.is_err(),
+            "record failing self-verification must be rejected"
+        );
+
+        // (c) Endpoint does not match the record's own TransportBinding (a
+        //     Gateway redirect cannot point us at a different key).
+        let redirected = valid_record(node.config.network_id, "tcp://127.0.0.1:1");
+        assert!(
+            node.bootstrap_peer_record(redirected).await.is_err(),
+            "endpoint/TransportBinding disagreement must be rejected"
+        );
+    }
+}

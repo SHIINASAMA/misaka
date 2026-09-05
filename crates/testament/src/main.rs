@@ -5,7 +5,8 @@ use testament::run_manager::{
     set_current_run,
 };
 use testament::scenario::{
-    network_scenarios, relay_scenarios, scenarios, security_scenarios, Context, ScenarioDef,
+    gateway_scenarios, network_scenarios, relay_scenarios, scenarios, security_scenarios, Context,
+    ScenarioDef,
 };
 use testament::types::{Manifest, RunLayout, SisterEntry};
 
@@ -107,6 +108,13 @@ enum Command {
     #[command(name = "operator-verify")]
     OperatorVerify,
 
+    /// Run Gateway v0 discovery scenarios (G01-G10).
+    #[command(name = "gateway-verify")]
+    GatewayVerify {
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Remove all run directories.
     Clean,
 }
@@ -123,6 +131,9 @@ fn main() {
         }
         Command::SecurityVerify { json } => {
             verify_definitions(json, security_scenarios(), "security scenarios")
+        }
+        Command::GatewayVerify { json } => {
+            verify_definitions(json, gateway_scenarios(), "gateway scenarios")
         }
         Command::Run { scenario, json } => run_one(&scenario, json),
         Command::Up { sisters, json } => up(sisters, json),
