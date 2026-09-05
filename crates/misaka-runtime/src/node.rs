@@ -284,6 +284,24 @@ impl SisterNode {
     /// Hello is pinned to the record's Sister id, and only then is it stored. A
     /// compromised Gateway therefore cannot point us at — or have us accept — a
     /// Sister other than the one the record cryptographically names.
+    /// Cheap, dial-free validation of a Gateway-supplied `PeerRecord`: correct
+    /// Network, self-verifying signature, and an endpoint that matches its own
+    /// signed `TransportBinding`. Used to keep an invalid candidate from winning
+    /// the multi-Gateway sequence merge (§8). `bootstrap_peer_record` re-checks
+    /// all of this before dialing; this only filters what is worth merging.
+    pub(crate) fn peer_record_usable(&self, record: &PeerRecord) -> bool {
+        if record.network_id != self.config.network_id || !record.verify() {
+            return false;
+        }
+        match record.endpoint_addr.parse::<NetworkEndpoint>() {
+            Ok(NetworkEndpoint::Iroh(addr)) => {
+                IrohEndpointId::from_bytes(*addr.id.as_bytes())
+                    == record.transport_binding.iroh_endpoint_id
+            }
+            _ => false,
+        }
+    }
+
     pub async fn bootstrap_peer_record(&self, record: PeerRecord) -> crate::Result<()> {
         if record.network_id != self.config.network_id || !record.verify() {
             return Err(crate::Error::Other(
@@ -387,14 +405,19 @@ impl SisterNode {
                 match client.peers().await {
                     Ok(records) => {
                         for record in records {
-                            merged
-                                .entry(record.sister_id.as_u64())
-                                .and_modify(|current| {
-                                    if record.sequence > current.sequence {
-                                        *current = record.clone();
-                                    }
-                                })
-                                .or_insert(record);
+                            // §8: only a basic-valid candidate may compete for the
+                            // highest sequence. A malformed/foreign record from one
+                            // Gateway must not suppress a valid record for the same
+                            // Sister from another. This is availability hardening,
+                            // not Byzantine consensus.
+                            if !self.peer_record_usable(&record) {
+                                tracing::debug!(
+                                    sister_id = record.sister_id.as_u64(),
+                                    "discarding an invalid Gateway PeerRecord before merge"
+                                );
+                                continue;
+                            }
+                            merge_gateway_candidate(&mut merged, record);
                         }
                     }
                     Err(error) => tracing::warn!(%base, %error, "gateway peer fetch failed"),
@@ -405,8 +428,13 @@ impl SisterNode {
                     continue; // never bootstrap ourselves
                 }
                 let sequence = record.sequence;
-                if known.get(&id).is_some_and(|&seq| seq >= sequence) {
-                    continue; // already connected at this or a newer sequence
+                // §9: skip a same-or-older sequence only while the peer is
+                // currently known. If it was pruned/went offline and returns with
+                // the same sequence, that must still be a recovery path — a
+                // "seen once" marker must not permanently suppress re-bootstrap.
+                let live = self.peers.get(id).await.is_some();
+                if !should_rebootstrap(known.get(&id).copied(), sequence, live) {
+                    continue;
                 }
                 // Only remember the attempt on success; a transient failure must
                 // stay retryable on the next cycle (same sequence).
@@ -1172,6 +1200,38 @@ fn new_job_id() -> String {
     format!("job-{}", uuid::Uuid::new_v4())
 }
 
+/// Whether a Gateway-sourced PeerRecord for a Sister should (re)bootstrap.
+///
+/// `known` is the sequence we last successfully bootstrapped. A strictly newer
+/// sequence always proceeds. A same-or-older sequence proceeds ONLY when the
+/// peer is not currently known — so a Sister that was pruned/went offline and
+/// returns with its original sequence is reconnectable, instead of a "seen once"
+/// marker suppressing it forever (§9).
+fn should_rebootstrap(known: Option<u64>, sequence: u64, live: bool) -> bool {
+    match known {
+        None => true,
+        Some(last) => sequence > last || !live,
+    }
+}
+
+/// Keep the highest-sequence `PeerRecord` per Sister during multi-Gateway
+/// merge. Only records that already passed [`SisterNode::peer_record_usable`]
+/// reach here, so an invalid high-sequence record cannot displace a valid lower
+/// one (§8).
+fn merge_gateway_candidate(
+    merged: &mut std::collections::HashMap<u64, PeerRecord>,
+    record: PeerRecord,
+) {
+    merged
+        .entry(record.sister_id.as_u64())
+        .and_modify(|current| {
+            if record.sequence > current.sequence {
+                *current = record.clone();
+            }
+        })
+        .or_insert(record);
+}
+
 #[cfg(test)]
 mod gateway_tests {
     use super::SisterNode;
@@ -1209,6 +1269,87 @@ mod gateway_tests {
             &key,
         );
         PeerRecord::issue(network_id, 42, endpoint.to_string(), binding, 1, &key)
+    }
+
+    /// A record for Sister 42 on `network_id` with a chosen sequence and a
+    /// self-consistent Iroh endpoint that matches its own TransportBinding.
+    fn record_with_seq(
+        network_id: NetworkId,
+        sequence: u64,
+        endpoint: &str,
+        endpoint_id: IrohEndpointId,
+    ) -> PeerRecord {
+        let key = SisterKeyPair::from_bytes([5u8; 32]);
+        let binding = TransportBinding::sign(network_id, 42, endpoint_id, sequence, &key);
+        PeerRecord::issue(
+            network_id,
+            42,
+            endpoint.to_string(),
+            binding,
+            sequence,
+            &key,
+        )
+    }
+
+    // S09: an invalid high-sequence record from one Gateway must not suppress a
+    // valid lower-sequence record from another. Validation precedes the merge.
+    #[test]
+    fn merge_discards_invalid_high_sequence_before_valid_lower() {
+        let node = node();
+        let network_id = node.config.network_id;
+        // A real, parseable Iroh endpoint whose id matches the binding.
+        let secret = iroh::SecretKey::generate();
+        let endpoint_id = IrohEndpointId::from_bytes(*secret.public().as_bytes());
+        let endpoint =
+            misaka_network::NetworkEndpoint::Iroh(iroh::EndpointAddr::new(secret.public()))
+                .to_string();
+
+        let valid = record_with_seq(network_id, 10, &endpoint, endpoint_id);
+        // Same Sister + endpoint, higher sequence, but foreign Network → invalid.
+        let invalid = record_with_seq(NetworkId::generate(), 999, &endpoint, endpoint_id);
+        assert!(
+            node.peer_record_usable(&valid),
+            "valid record must be usable"
+        );
+        assert!(
+            !node.peer_record_usable(&invalid),
+            "foreign high-seq record must be unusable"
+        );
+
+        // Order-independent: whichever arrives, only the valid one is merged.
+        for order in [
+            [valid.clone(), invalid.clone()],
+            [invalid.clone(), valid.clone()],
+        ] {
+            let mut merged = std::collections::HashMap::new();
+            for record in order {
+                if node.peer_record_usable(&record) {
+                    super::merge_gateway_candidate(&mut merged, record);
+                }
+            }
+            let kept = merged.get(&42).expect("a valid record must survive");
+            assert_eq!(
+                kept.sequence, 10,
+                "valid seq 10 must win over an invalid seq 999"
+            );
+        }
+    }
+
+    /// S10: a peer that was pruned/offline and returns with the same PeerRecord
+    /// sequence must be reconnectable — the "seen" marker only suppresses while
+    /// the peer is live.
+    #[test]
+    fn same_sequence_peer_reconnects_after_it_is_no_longer_live() {
+        // Never bootstrapped → proceed.
+        assert!(super::should_rebootstrap(None, 5, true));
+        // Newer sequence → proceed regardless of liveness.
+        assert!(super::should_rebootstrap(Some(5), 6, true));
+        // Same sequence, still live → skip (no churn).
+        assert!(!super::should_rebootstrap(Some(5), 5, true));
+        // Same sequence, no longer live → re-bootstrap (the recovery path).
+        assert!(super::should_rebootstrap(Some(5), 5, false));
+        // Older sequence, not live → still re-bootstrap to recover.
+        assert!(super::should_rebootstrap(Some(9), 5, false));
     }
 
     /// G06: a Sister never trusts a Gateway-supplied locator without
