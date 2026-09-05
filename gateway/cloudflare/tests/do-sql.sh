@@ -89,4 +89,8 @@ grep -q "\"sister_id\":$SISTER_ID" /tmp/do_body \
   && fail "record still present after its renewed TTL elapsed"
 note "control TTL expiry: got [$(cat /tmp/do_body | grep -o "\"sister_id\":[0-9]*" | tr '\n' ' ')]"
 
+if [ "$fails" -ne 0 ]; then
+  echo "=== workerd stderr (for debugging) ==="
+  tail -40 /tmp/do_wrangler.log 2>/dev/null || true
+fi
 if [ "$fails" -eq 0 ]; then note "ALL DO SQL TESTS PASSED"; exit 0; else note "$fails test(s) failed"; exit 1; fi
