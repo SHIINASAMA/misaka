@@ -108,6 +108,10 @@ enum Command {
         #[arg(long)]
         gateway: Vec<String>,
 
+        /// Seconds between Gateway announce/fetch cycles.
+        #[arg(long, default_value_t = 120)]
+        gateway_interval: u64,
+
         /// Set the local nickname.
         #[arg(long)]
         nickname: Option<String>,
@@ -478,6 +482,7 @@ async fn async_main() -> Result<(), MisakaError> {
             peer,
             iroh_peer,
             gateway,
+            gateway_interval,
             nickname,
             discovery,
             heartbeat,
@@ -654,6 +659,7 @@ async fn async_main() -> Result<(), MisakaError> {
                 allow_unauthenticated_operations: insecure_development,
                 peer_record,
                 gateways,
+                gateway_interval: std::time::Duration::from_secs(gateway_interval),
                 data_dir,
                 heartbeat_interval: std::time::Duration::from_secs(heartbeat),
                 peer_timeout: std::time::Duration::from_secs(peer_timeout),
