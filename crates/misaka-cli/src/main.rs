@@ -19,6 +19,7 @@ use serde::{de::DeserializeOwned, Serialize};
 use sha2::{Digest, Sha256};
 
 use misaka_runtime::error::MisakaError;
+use misaka_runtime::gateway_store::GatewayStore;
 use misaka_runtime::human_identity_store::HumanIdentityStore;
 use misaka_runtime::identity_store::IdentityStore;
 use misaka_runtime::membership_store::MembershipStore;
@@ -96,9 +97,16 @@ enum Command {
         peer: Vec<String>,
 
         /// Iroh endpoint used to bootstrap the authenticated control plane;
-        /// may be repeated when the local backend is Iroh.
+        /// may be repeated when the local backend is Iroh. This is a debug /
+        /// recovery escape hatch; normal discovery goes through a Gateway.
         #[arg(long)]
         iroh_peer: Vec<String>,
+
+        /// Gateway base URL to announce to and discover through; may be
+        /// repeated. Merged with Gateways configured via
+        /// `misaka network gateway add`.
+        #[arg(long)]
+        gateway: Vec<String>,
 
         /// Set the local nickname.
         #[arg(long)]
@@ -381,6 +389,39 @@ enum NetworkCommand {
         /// Invite JSON file produced by `misaka network invite`.
         invite: PathBuf,
     },
+
+    /// Manage the Gateways this Sister announces to and discovers through.
+    #[command(subcommand)]
+    Gateway(GatewayAction),
+}
+
+#[derive(Subcommand)]
+enum GatewayAction {
+    /// Add a Gateway base URL (e.g. https://gateway.example.com).
+    Add { url: String },
+
+    /// List configured Gateways.
+    List,
+
+    /// Remove a configured Gateway.
+    Remove { url: String },
+
+    /// Run a native reference Gateway server for one Network. Serves the same
+    /// v0 wire contract as the Cloudflare deployment; intended for self-hosting
+    /// and deterministic tests. Needs only PUBLIC configuration.
+    Serve {
+        /// Address to bind (host:port).
+        #[arg(long, default_value = "127.0.0.1:8443")]
+        bind: String,
+
+        /// The Network this Gateway serves.
+        #[arg(long)]
+        network_id: String,
+
+        /// Hex-encoded Network Authority PUBLIC key (never the private half).
+        #[arg(long)]
+        authority_public_key: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -436,6 +477,7 @@ async fn async_main() -> Result<(), MisakaError> {
             stream_trust_cert,
             peer,
             iroh_peer,
+            gateway,
             nickname,
             discovery,
             heartbeat,
@@ -594,6 +636,13 @@ async fn async_main() -> Result<(), MisakaError> {
                 "off" => misaka_runtime::config::DiscoveryMode::Off,
                 _ => misaka_runtime::config::DiscoveryMode::Mdns,
             };
+            let mut gateways = GatewayStore::load(&data_dir);
+            for url in gateway {
+                let url = url.trim().trim_end_matches('/').to_string();
+                if !url.is_empty() && !gateways.iter().any(|existing| existing == &url) {
+                    gateways.push(url);
+                }
+            }
             let config = misaka_runtime::config::RuntimeConfig {
                 network_id,
                 listen_port: port,
@@ -604,6 +653,7 @@ async fn async_main() -> Result<(), MisakaError> {
                 authenticated_session,
                 allow_unauthenticated_operations: insecure_development,
                 peer_record,
+                gateways,
                 data_dir,
                 heartbeat_interval: std::time::Duration::from_secs(heartbeat),
                 peer_timeout: std::time::Duration::from_secs(peer_timeout),
@@ -882,6 +932,68 @@ async fn async_main() -> Result<(), MisakaError> {
                         "reason": record.reason,
                     })
                 );
+            }
+            NetworkCommand::Gateway(action) => {
+                let data_dir = IdentityStore::config_dir()
+                    .map_err(|error| MisakaError::Other(error.to_string()))?;
+                match action {
+                    GatewayAction::Add { url } => {
+                        let changed = GatewayStore::add(&data_dir, &url)
+                            .map_err(|error| MisakaError::Other(error.to_string()))?;
+                        let url = url.trim_end_matches('/');
+                        println!(
+                            "{}",
+                            serde_json::json!({
+                                "gateway": url,
+                                "result": if changed { "added" } else { "already configured" },
+                            })
+                        );
+                    }
+                    GatewayAction::Remove { url } => {
+                        let changed = GatewayStore::remove(&data_dir, &url)
+                            .map_err(|error| MisakaError::Other(error.to_string()))?;
+                        let url = url.trim_end_matches('/');
+                        println!(
+                            "{}",
+                            serde_json::json!({
+                                "gateway": url,
+                                "result": if changed { "removed" } else { "not configured" },
+                            })
+                        );
+                    }
+                    GatewayAction::List => {
+                        for gateway in GatewayStore::load(&data_dir) {
+                            println!("{gateway}");
+                        }
+                    }
+                    GatewayAction::Serve {
+                        bind,
+                        network_id,
+                        authority_public_key,
+                    } => {
+                        let network_id = NetworkId::parse(&network_id).map_err(|error| {
+                            MisakaError::Other(format!("invalid --network-id: {error}"))
+                        })?;
+                        let authority =
+                            misaka_gatewayd::authority_from_hex(network_id, &authority_public_key)
+                                .map_err(MisakaError::Other)?;
+                        let bind: SocketAddr = bind.parse().map_err(|error| {
+                            MisakaError::Other(format!("invalid --bind: {error}"))
+                        })?;
+                        let config = misaka_gatewayd::GatewayConfig::new(authority);
+                        let server = misaka_gatewayd::GatewayServer::bind(config, bind)
+                            .await
+                            .map_err(|error| MisakaError::Other(error.to_string()))?;
+                        eprintln!(
+                            "[Misaka] gateway serving Network {network_id} on http://{}",
+                            server.local_addr()
+                        );
+                        server
+                            .run()
+                            .await
+                            .map_err(|error| MisakaError::Other(error.to_string()))?;
+                    }
+                }
             }
         },
 

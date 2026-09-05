@@ -15,6 +15,8 @@ pub mod crypto;
 pub mod discovery;
 pub mod error;
 pub mod executor;
+pub mod gateway_client;
+pub mod gateway_store;
 pub mod handle;
 pub mod handler;
 pub mod human_identity_store;

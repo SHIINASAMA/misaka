@@ -1,5 +1,6 @@
 use crate::config::{RuntimeConfig, StreamBackend};
 use crate::crypto::Crypto;
+use crate::gateway_client::GatewayClient;
 use crate::job_manager::JobManager;
 use crate::network::PeerTransport;
 use crate::peer_registry::PeerRegistry;
@@ -236,6 +237,17 @@ impl SisterNode {
     /// identity is learned from the authenticated Hello response; no legacy
     /// TCP control listener is required.
     pub async fn add_known_iroh_peer(&self, endpoint: NetworkEndpoint) -> crate::Result<()> {
+        self.connect_iroh(endpoint, None).await
+    }
+
+    /// Connect to an Iroh endpoint and run the authenticated Hello. When
+    /// `expected_sister_id` is set, the handshake is pinned to that Sister, so a
+    /// peer presenting a different (or unsigned) identity is rejected.
+    async fn connect_iroh(
+        &self,
+        endpoint: NetworkEndpoint,
+        expected_sister_id: Option<u64>,
+    ) -> crate::Result<()> {
         let NetworkEndpoint::Iroh(endpoint) = endpoint else {
             return Err(crate::Error::Other(
                 "Iroh bootstrap requires an iroh:// endpoint".to_string(),
@@ -251,13 +263,147 @@ impl SisterNode {
             NetworkEndpoint::Iroh(endpoint),
             self.config.network_id,
             self.config.authenticated_session.as_ref(),
-            &self.hello_envelope()?,
+            &self.hello_envelope_to(expected_sister_id.unwrap_or(0))?,
             true,
         )
         .await
         .map_err(|error| crate::Error::Network(error.to_string()))?
         .ok_or_else(|| crate::Error::Network("Iroh Hello returned no response".to_string()))?;
         self.record_hello_reply(reply).await
+    }
+
+    /// Bootstrap the authenticated Iroh control plane from a signed `PeerRecord`
+    /// obtained from a Gateway. This is the v0 discovery path and the reason the
+    /// Gateway exists — a Sister never touches a raw `iroh://` string itself.
+    ///
+    /// The record is never trusted on faith: it is re-verified, its advertised
+    /// endpoint is cross-checked against its own signed `TransportBinding`, the
+    /// Hello is pinned to the record's Sister id, and only then is it stored. A
+    /// compromised Gateway therefore cannot point us at — or have us accept — a
+    /// Sister other than the one the record cryptographically names.
+    pub async fn bootstrap_peer_record(&self, record: PeerRecord) -> crate::Result<()> {
+        if record.network_id != self.config.network_id || !record.verify() {
+            return Err(crate::Error::Other(
+                "rejecting invalid or foreign PeerRecord".to_string(),
+            ));
+        }
+        let endpoint: NetworkEndpoint = record.endpoint_addr.parse().map_err(|error| {
+            crate::Error::Other(format!("invalid PeerRecord endpoint: {error}"))
+        })?;
+        // The dial target must be the endpoint the record itself signed, so a
+        // tampered locator cannot redirect the connection.
+        let endpoint_matches = match &endpoint {
+            NetworkEndpoint::Iroh(addr) => {
+                IrohEndpointId::from_bytes(*addr.id.as_bytes())
+                    == record.transport_binding.iroh_endpoint_id
+            }
+            NetworkEndpoint::Tcp(_) => false,
+        };
+        if !endpoint_matches {
+            return Err(crate::Error::Other(
+                "PeerRecord endpoint disagrees with its TransportBinding".to_string(),
+            ));
+        }
+        self.connect_iroh(endpoint, Some(record.sister_id.as_u64()))
+            .await?;
+        self.remember_peer_record(record).await;
+        Ok(())
+    }
+
+    /// Periodic Gateway discovery: announce the local locator, then fetch and
+    /// bootstrap peers from every configured Gateway.
+    ///
+    /// Announce and fetch hit ALL gateways independently (they never talk to
+    /// each other, replicate, or reconcile); the results are merged per Sister
+    /// taking the highest `PeerRecord::sequence`. Every Gateway error is logged
+    /// as a warning and never aborts the runtime, so Gateway outage cannot take
+    /// an already-formed Network down.
+    pub async fn gateway_loop(&self) -> crate::Result<()> {
+        if self.config.gateways.is_empty() {
+            self.shutdown.cancelled().await;
+            return Ok(());
+        }
+        let Some(session) = self.config.authenticated_session.clone() else {
+            tracing::warn!(
+                "gateway discovery configured but no authenticated session is present; skipping"
+            );
+            self.shutdown.cancelled().await;
+            return Ok(());
+        };
+        let mut interval = tokio::time::interval(self.config.gateway_interval);
+        let mut known: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
+        loop {
+            tokio::select! {
+                _ = self.shutdown.cancelled() => break,
+                _ = interval.tick() => {}
+            }
+            let mut merged: std::collections::HashMap<u64, PeerRecord> =
+                std::collections::HashMap::new();
+            for base in &self.config.gateways {
+                let client = match GatewayClient::new(
+                    base,
+                    session.network_id,
+                    session.sister_id,
+                    session.sister_key.clone(),
+                    session.membership_certificate.clone(),
+                ) {
+                    Ok(client) => client,
+                    Err(error) => {
+                        tracing::warn!(%base, %error, "gateway client init failed");
+                        continue;
+                    }
+                };
+                match client.info().await {
+                    Ok(info) if info.network_id != session.network_id => {
+                        tracing::warn!(
+                            %base,
+                            expected = %session.network_id,
+                            observed = %info.network_id,
+                            "gateway serves a different Network; skipping"
+                        );
+                        continue;
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(%base, %error, "gateway info failed");
+                        continue;
+                    }
+                }
+                if let Some(local) = self.config.peer_record.as_ref() {
+                    if let Err(error) = client.announce(local).await {
+                        tracing::warn!(%base, %error, "gateway announce failed");
+                    }
+                }
+                match client.peers().await {
+                    Ok(records) => {
+                        for record in records {
+                            merged
+                                .entry(record.sister_id.as_u64())
+                                .and_modify(|current| {
+                                    if record.sequence > current.sequence {
+                                        *current = record.clone();
+                                    }
+                                })
+                                .or_insert(record);
+                        }
+                    }
+                    Err(error) => tracing::warn!(%base, %error, "gateway peer fetch failed"),
+                }
+            }
+            for (id, record) in merged {
+                if id == session.sister_id {
+                    continue; // never bootstrap ourselves
+                }
+                if known.get(&id).is_some_and(|&seq| seq >= record.sequence) {
+                    continue; // already connected at this or a newer sequence
+                }
+                known.insert(id, record.sequence);
+                if let Err(error) = self.bootstrap_peer_record(record).await {
+                    tracing::warn!(sister_id = id, %error, "gateway bootstrap failed");
+                }
+            }
+        }
+        Ok(())
     }
 
     /// 单向发送 (不等待响应)
@@ -419,11 +565,15 @@ impl SisterNode {
     }
 
     fn hello_envelope(&self) -> crate::Result<Envelope> {
+        self.hello_envelope_to(0)
+    }
+
+    fn hello_envelope_to(&self, to: u64) -> crate::Result<Envelope> {
         Ok(Envelope::new(
             self.config.network_id,
             MessageType::Hello,
             self.identity.id.as_u64(),
-            0,
+            to,
             bincode::serialize(&HelloData {
                 network_id: self.config.network_id,
                 identity: self.identity.as_ref().clone(),

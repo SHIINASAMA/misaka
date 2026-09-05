@@ -71,6 +71,12 @@ pub struct RuntimeConfig {
     pub allow_unauthenticated_operations: bool,
     /// The local signed locator shared during Network Knowledge exchange.
     pub peer_record: Option<PeerRecord>,
+    /// Gateway base URLs this Sister announces to and discovers through. Empty
+    /// means Gateway discovery is off. Multiple entries are announced to and
+    /// fetched from independently (no cross-Gateway replication).
+    pub gateways: Vec<String>,
+    /// How often to announce + fetch peers from each Gateway.
+    pub gateway_interval: Duration,
     /// 告知 peer 的对外地址 (None = 用 listen_port 在回环/本机)
     pub advertise_host: Option<IpAddr>,
     /// 数据目录 (persistent identity/peers)
@@ -111,6 +117,8 @@ impl Default for RuntimeConfig {
             authenticated_session: None,
             allow_unauthenticated_operations: false,
             peer_record: None,
+            gateways: Vec::new(),
+            gateway_interval: Duration::from_secs(120),
             advertise_host: None,
             // 数据目录在 CLI 层通过 MISAKA_CONFIG_DIR 决定；这里放默认值
             data_dir: PathBuf::from("."),

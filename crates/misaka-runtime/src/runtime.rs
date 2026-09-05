@@ -362,7 +362,14 @@ fn spawn_background_tasks(
         let _ = stealing_node.work_stealing_loop(1).await;
     });
 
-    tasks.extend([discovery, state, cleanup, executor, stealing]);
+    // Gateway discovery is self-gating: it idles until shutdown when no
+    // gateways are configured, and never aborts the runtime on Gateway errors.
+    let gateway_node = node.clone();
+    let gateway = tokio::spawn(async move {
+        let _ = gateway_node.gateway_loop().await;
+    });
+
+    tasks.extend([discovery, state, cleanup, executor, stealing, gateway]);
     if let Some(acceptor) = stream_listener {
         let stream_node = node.clone();
         tasks.push(tokio::spawn(async move {
