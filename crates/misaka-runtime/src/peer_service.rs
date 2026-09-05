@@ -108,7 +108,17 @@ impl PeerService {
             return false;
         }
         records.insert(id, record);
-        let _ = crate::peer_record_store::PeerRecordStore::save_to_dir(&self.data_dir, &records);
+        // §19: peer knowledge is a non-critical cache — a failed write is not
+        // fatal, but must be observable rather than silently dropped.
+        if let Err(error) =
+            crate::peer_record_store::PeerRecordStore::save_to_dir(&self.data_dir, &records)
+        {
+            tracing::debug!(
+                sister_id = id,
+                %error,
+                "failed to persist the peer-record cache (non-fatal)"
+            );
+        }
         true
     }
 
@@ -160,7 +170,10 @@ impl PeerService {
         for state in states {
             table.upsert(state);
         }
-        let _ = PeerStore::save_to_dir(&table, &self.data_dir);
+        // §19: peer-knowledge persistence is best-effort cache; surface failure.
+        if let Err(error) = PeerStore::save_to_dir(&table, &self.data_dir) {
+            tracing::debug!(%error, "failed to persist the peer cache (non-fatal)");
+        }
     }
 
     pub fn data_dir(&self) -> &std::path::Path {

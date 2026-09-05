@@ -19,8 +19,11 @@ pub enum StreamSecurity {
 
 /// Transport backend used by the optional long-lived stream listener.
 ///
-/// Direct TCP stays the default for compatibility. Iroh is opt-in and owns
-/// its own endpoint identity, encryption, and path selection.
+/// The `RuntimeConfig::default()` here is DirectTcp purely for internal/test
+/// construction convenience — it is NOT the user-facing default. The `misaka
+/// start` CLI defaults to Iroh (see the CLI `--stream-backend` arg); DirectTcp
+/// is retained as a compatibility / debug path. Iroh owns its own endpoint
+/// identity, encryption, and path selection.
 #[derive(Clone, Debug, Default)]
 pub enum StreamBackend {
     #[default]

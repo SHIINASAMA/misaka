@@ -760,6 +760,11 @@ async fn async_main() -> Result<(), MisakaError> {
                 }
             }
             let relay_service = if relay {
+                warn_if_open_public_relay(
+                    relay_bind,
+                    relay_access_allowlist.as_deref(),
+                    relay_bootstrap_allowlist.as_deref(),
+                );
                 let options = misaka_relay::RelayOptions {
                     bind: relay_bind,
                     http_bind: relay_http_bind,
@@ -1371,6 +1376,11 @@ async fn async_main() -> Result<(), MisakaError> {
             bootstrap_allowlist,
         } => {
             tracing_subscriber::fmt().with_target(false).init();
+            warn_if_open_public_relay(
+                bind,
+                access_allowlist.as_deref(),
+                bootstrap_allowlist.as_deref(),
+            );
             misaka_relay::RelayService::bind_with_options(misaka_relay::RelayOptions {
                 bind,
                 http_bind,
@@ -3684,6 +3694,23 @@ fn unix_now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0)
+}
+
+/// §16: warn loudly when the native relay binds a non-loopback interface with
+/// no access or bootstrap allowlist — that is open public relay access. Loopback
+/// and allowlist-configured binds are unaffected. This is a loud advisory
+/// (deterministic loopback tests still pass); requiring explicit intent to expose
+/// a relay publicly is a follow-up tied to relay authorization design.
+fn warn_if_open_public_relay(bind: SocketAddr, access: Option<&Path>, bootstrap: Option<&Path>) {
+    if !bind.ip().is_loopback() && access.is_none() && bootstrap.is_none() {
+        tracing::warn!(
+            event = "relay_open_public",
+            bind = %bind,
+            "Iroh relay is bound to a non-loopback address with NO access allowlist: \
+             any endpoint may connect and consume bandwidth. Pass --relay-access-allowlist \
+             (or an enrollment allowlist), or bind to loopback, to restrict it."
+        );
+    }
 }
 
 fn parse_membership_kind(value: &str) -> Result<MembershipKind, String> {

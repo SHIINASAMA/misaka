@@ -64,7 +64,13 @@ impl SisterNode {
     pub fn new(identity: SisterIdentity, encryption_key: [u8; 32], config: RuntimeConfig) -> Self {
         let data_dir = config.data_dir.clone();
         let port = config.listen_port;
-        let bind_host = if config.probe_only {
+        // §17: the legacy fixed-key Direct-TCP control plane fails closed to
+        // loopback by default. It only binds all interfaces when the operator
+        // explicitly asked for a non-loopback advertisement (LAN/debug intent)
+        // or runs probe-only. Iroh is the normal transport; this is the
+        // compatibility path and should not accidentally expose the fixed-key
+        // protocol on a public interface.
+        let bind_host = if config.probe_only || config.advertise_host.is_none() {
             "127.0.0.1"
         } else {
             "0.0.0.0"
