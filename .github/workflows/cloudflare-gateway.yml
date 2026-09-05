@@ -1,10 +1,10 @@
-name: Cloudflare Gateway Packaging Spike
+name: Cloudflare Gateway v0
 
-# Isolated from the main CI: `experiments/cf-gateway-spike` is its own cargo
-# workspace (see its Cargo.toml `[workspace]`), so the root `cargo --workspace`
-# jobs neither build nor lint it. This job only answers one question:
-#   can misaka-core be packaged into a Cloudflare-acceptable Worker bundle,
-#   with a real PeerRecord::verify() call retained in the Wasm, under 3 MiB gzip.
+# Isolated from the main CI: `gateway/cloudflare` is its own cargo workspace
+# (see its Cargo.toml `[workspace]`), so the root `cargo --workspace` jobs
+# neither build nor lint it. This job proves the Cloudflare reference Gateway —
+# misaka-core crypto + a Durable Object (SQLite) directory — packages into a
+# deployable Worker bundle and actually runs the crypto path, under 3 MiB gzip.
 
 on:
   push:
@@ -16,12 +16,12 @@ env:
   CF_GZIP_LIMIT_KIB: 3072
 
 jobs:
-  cf-gateway-spike:
-    name: cf-gateway-spike
+  cloudflare-gateway:
+    name: cloudflare-gateway
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: experiments/cf-gateway-spike
+        working-directory: gateway/cloudflare
     steps:
       - uses: actions/checkout@v4
 
@@ -55,29 +55,34 @@ jobs:
       - name: Bundle with Wrangler (dry run)
         run: npx wrangler deploy --dry-run --outdir dist | tee wrangler.log
 
-      - name: Verify the bundle really runs PeerRecord::verify()
-        # The Worker must actually execute the verify path, not just compile.
-        # Run it locally in the Workers runtime (miniflare) and assert the
-        # crypto/domain chain returns {"valid":true} plus the hello route.
+      - name: Verify crypto + DO boot (miniflare)
+        # Boots the Worker under the local Workers runtime (Durable Object
+        # emulated). Asserts /.well-known/misaka serves GatewayInfo parsed from
+        # env, and GET /verify runs the real misaka-core crypto ({"valid":true}).
         run: |
-          npx wrangler dev --local --port 8799 &
+          npx wrangler dev --local --port 8799 \
+            --var NETWORK_ID:03030303-0303-0303-0303-030303030303 \
+            --var NETWORK_AUTHORITY_PUBLIC_KEY:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa &
           WPID=$!
-          for i in $(seq 1 30); do
+          for i in $(seq 1 40); do
             curl -sf http://127.0.0.1:8799/ >/dev/null && break
-            sleep 2
+            sleep 1
           done
           HELLO="$(curl -s http://127.0.0.1:8799/)"
           VERIFY="$(curl -s http://127.0.0.1:8799/verify)"
+          INFO="$(curl -s http://127.0.0.1:8799/.well-known/misaka)"
           kill $WPID 2>/dev/null || true
-          echo "GET /        -> $HELLO"
-          echo "GET /verify  -> $VERIFY"
-          test "$HELLO" = "misaka gateway spike"
+          echo "GET /                  -> $HELLO"
+          echo "GET /verify            -> $VERIFY"
+          echo "GET /.well-known/misaka-> $INFO"
+          test "$HELLO" = "misaka gateway"
           echo "$VERIFY" | grep -q '"valid":true'
+          echo "$INFO" | grep -q '"protocol_version":1'
 
       - name: Emit size report
         run: |
           {
-            echo "Cloudflare Gateway Packaging Spike - size report"
+            echo "Cloudflare Gateway v0 - size report"
             echo
             echo "Wasm raw size: $(stat -c%s build/index_bg.wasm) bytes"
             echo "Final Wrangler upload:"
@@ -100,8 +105,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: cf-gateway-spike-dist
+          name: cloudflare-gateway-dist
           path: |
-            experiments/cf-gateway-spike/dist
-            experiments/cf-gateway-spike/size-report.txt
+            gateway/cloudflare/dist
+            gateway/cloudflare/size-report.txt
           if-no-files-found: warn
