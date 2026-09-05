@@ -38,6 +38,17 @@ pub fn now_secs() -> u64 {
     (Date::now() / 1000.0) as u64
 }
 
+/// Record lifetime in seconds. Defaults to [`RECORD_TTL_SECS`]; overridable via
+/// the `GATEWAY_RECORD_TTL_SECS` env var (used by the Durable Object SQL tests to
+/// exercise TTL expiry and renewal without a 10-minute wait).
+pub fn record_ttl_secs(env: &Env) -> u64 {
+    env.var("GATEWAY_RECORD_TTL_SECS")
+        .ok()
+        .and_then(|value| value.to_string().parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .unwrap_or(RECORD_TTL_SECS)
+}
+
 /// Minimal lowercase/uppercase hex decoder. `misaka-core` intentionally has no
 /// hex crate dependency; only this Gateway host needs to read a hex public key
 /// from configuration, so the helper lives here rather than in the shared crate.

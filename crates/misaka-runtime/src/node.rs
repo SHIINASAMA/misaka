@@ -394,12 +394,16 @@ impl SisterNode {
                 if id == session.sister_id {
                     continue; // never bootstrap ourselves
                 }
-                if known.get(&id).is_some_and(|&seq| seq >= record.sequence) {
+                let sequence = record.sequence;
+                if known.get(&id).is_some_and(|&seq| seq >= sequence) {
                     continue; // already connected at this or a newer sequence
                 }
-                known.insert(id, record.sequence);
+                // Only remember the attempt on success; a transient failure must
+                // stay retryable on the next cycle (same sequence).
                 if let Err(error) = self.bootstrap_peer_record(record).await {
                     tracing::warn!(sister_id = id, %error, "gateway bootstrap failed");
+                } else {
+                    known.insert(id, sequence);
                 }
             }
         }

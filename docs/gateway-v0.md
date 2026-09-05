@@ -73,8 +73,26 @@ There is deliberately **no new `misaka-gateway` crate and no crate split**: a
 packaging spike proved `misaka-core` + the crypto path bundles into a Cloudflare
 Worker at ~263 KiB gzip, well under the 3 MiB Free limit.
 
-## Wire contract — `misaka-core/src/gateway.rs`
+## v0 boundary: membership revocation
 
+The Gateway authenticates a request by verifying the `MembershipCertificate`
+against the Network Authority's public key and its validity window — but it does
+**not** consult the Network's revocation state. A Sister whose membership was
+revoked but whose certificate has not yet expired can still announce to and
+read from the directory.
+
+This is a deliberate v0 boundary, not a trust bypass: forming a real
+connection still goes through the authenticated Iroh session
+(`misaka-runtime::authenticated_session`), which **does** enforce revocation, so
+a revoked Sister cannot actually establish the P2P session. The residual risk is
+directory **information disclosure** to a revoked-but-unexpired member.
+
+Follow-up (when needed): feed the Gateway the Network's
+Authority-signed `RevocationRecord`s (the client already fetches the
+`network-revocations.json` sidecar during join) and have `verify_request` reject
+a presented membership whose serial is revoked.
+
+## Wire contract — `misaka-core/src/gateway.rs`
 Transport-agnostic DTOs, plain serde with `#[serde(default)]` on additive
 fields:
 

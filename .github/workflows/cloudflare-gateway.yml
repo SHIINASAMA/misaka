@@ -79,6 +79,11 @@ jobs:
           echo "$VERIFY" | grep -q '"valid":true'
           echo "$INFO" | grep -q '"protocol_version":1'
 
+      - name: Durable Object SQL behaviour tests
+        # Drives the real Worker/DO under miniflare: announce->peers visibility,
+        # same-sequence re-announce refreshing the TTL, and peers nonce replay.
+        run: bash tests/do-sql.sh
+
       - name: Emit size report
         run: |
           {

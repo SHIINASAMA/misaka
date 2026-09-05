@@ -1,14 +1,13 @@
 //! The Gateway directory: a single Durable Object per Network, backed by DO
 //! SQLite storage.
 //!
-//! One DO instance per Network (`get_by_name(network_id)`) means the object is
-//! a strongly-consistent single-writer actor. That makes the two genuinely
-//! racy parts of the v0 contract fall out of the platform for free, with no
-//! hand-written locking:
-//!   * "only a higher `sequence` may replace a record"  -> an upsert guarded by
-//!     `WHERE excluded.sequence > peers.sequence`;
-//!   * "a nonce may be spent only once"                  -> a UNIQUE row whose
-//!     prior existence is checked in the same actor turn.
+//! One DO instance per Network (`get_by_name(network_id)`) makes the object a
+//! strongly-consistent single-writer actor. The genuinely racy parts of the v0
+//! contract fall out of the platform for free, with no hand-written locking:
+//!   * monotonic sequence — a conditional upsert that replaces the record only
+//!     for a higher `sequence`, and merely refreshes the expiry for an equal one;
+//!   * "a nonce may be spent only once" — a UNIQUE row, consumed on BOTH the
+//!     announce and peers routes so they behave identically.
 //!
 //! All *trust* validation (`verify_request`, `PeerRecord::verify`) still runs in
 //! Rust here — the platform replaces the state store, never the cryptography.
@@ -23,7 +22,7 @@ use misaka_core::{
 };
 
 use crate::auth::{
-    authority_from_env, now_secs, AUTH_WINDOW_SECS, NONCE_TTL_SECS, RECORD_TTL_SECS,
+    authority_from_env, now_secs, record_ttl_secs, AUTH_WINDOW_SECS, NONCE_TTL_SECS,
 };
 
 /// A row of the `peers` table. `record` is the JSON-encoded signed locator.
@@ -38,11 +37,10 @@ struct MinRow {
     n: Option<i64>,
 }
 
-/// Whether a DO SQL error is a uniqueness (PRIMARY KEY) violation, which the
-/// replay guard reads as "this nonce was already spent".
-fn is_unique_conflict(error: &worker::Error) -> bool {
-    let text = error.to_string().to_ascii_lowercase();
-    text.contains("unique") || text.contains("constraint")
+/// Outcome of consuming a request nonce.
+enum Nonce {
+    Fresh,
+    Replayed,
 }
 
 #[durable_object]
@@ -77,6 +75,23 @@ impl GatewayDirectory {
         Ok(())
     }
 
+    /// Atomically spend a request nonce. A second use of a still-blocking nonce
+    /// fails on the PRIMARY KEY and is reported as replayed. Shared by both the
+    /// announce and peers routes so replay protection is uniform.
+    fn spend_nonce(storage: &Storage, nonce: &[u8; 16], now: u64) -> Result<Nonce> {
+        match storage.sql().exec(
+            "INSERT INTO nonces (nonce, expires_at) VALUES (?, ?)",
+            Some(vec![
+                SqlStorageValue::from(nonce.to_vec()),
+                SqlStorageValue::from((now + NONCE_TTL_SECS) as i64),
+            ]),
+        ) {
+            Ok(_) => Ok(Nonce::Fresh),
+            Err(error) if is_unique_conflict(&error) => Ok(Nonce::Replayed),
+            Err(error) => Err(error),
+        }
+    }
+
     async fn handle_announce(&self, mut request: Request) -> Result<Response> {
         let body = request.bytes().await?;
         let parsed: GatewayAnnounceRequest = serde_json::from_slice(&body)
@@ -95,7 +110,16 @@ impl GatewayDirectory {
         )
         .map_err(|e| worker::Error::from(format!("auth failed: {e}")))?;
 
-        // 2. A member may not announce a record for a different Sister...
+        let storage = self.state.storage();
+        Self::ensure_schema(&storage)?;
+        let record_ttl = record_ttl_secs(&self.env);
+
+        // 2. Spend the nonce (shared with /v1/peers).
+        if matches!(Self::spend_nonce(&storage, &parsed.auth.nonce, now)?, Nonce::Replayed) {
+            return Response::error("replayed nonce", 401);
+        }
+
+        // 3. A member may not announce a record for a different Sister...
         if !record_matches_membership(&parsed.record, &parsed.membership) {
             return Response::error("record identity does not match membership", 403);
         }
@@ -104,50 +128,35 @@ impl GatewayDirectory {
             return Response::error("record signature verification failed", 400);
         }
 
-        let storage = self.state.storage();
-        Self::ensure_schema(&storage)?;
-        let sql = storage.sql();
-
-        // Nonce replay: a single atomic INSERT. The PRIMARY KEY on `nonce` makes
-        // a second insert of the same (still-blocking) nonce fail in one round
-        // trip — the platform, not Rust, enforces "spent once".
-        let spent = sql.exec(
-            "INSERT INTO nonces (nonce, expires_at) VALUES (?, ?)",
-            Some(vec![
-                SqlStorageValue::from(parsed.auth.nonce.to_vec()),
-                SqlStorageValue::from((now + NONCE_TTL_SECS) as i64),
-            ]),
-        );
-        if let Err(error) = spent {
-            if is_unique_conflict(&error) {
-                return Response::error("replayed nonce", 401);
-            }
-            return Err(error);
-        }
-
-        // 4. Upsert, refusing to downgrade the sequence.
-        sql.exec(
+        // 4. Conditional upsert:
+        //    * higher sequence -> replace the record and refresh the expiry;
+        //    * equal sequence  -> keep the record, refresh last_seen/expires_at
+        //      (this is what lets a Sister's periodic re-announce renew a
+        //      still-valid locator whose sequence has not changed);
+        //    * lower sequence  -> ignore (WHERE is false).
+        storage.sql().exec(
             "INSERT INTO peers (sister_id, record, sequence, membership_serial, last_seen, expires_at)
              VALUES (?, ?, ?, ?, ?, ?)
              ON CONFLICT(sister_id) DO UPDATE SET
-                record = excluded.record,
-                sequence = excluded.sequence,
-                membership_serial = excluded.membership_serial,
                 last_seen = excluded.last_seen,
-                expires_at = excluded.expires_at
-             WHERE excluded.sequence > peers.sequence",
+                expires_at = excluded.expires_at,
+                record = CASE WHEN excluded.sequence > peers.sequence THEN excluded.record ELSE peers.record END,
+                sequence = CASE WHEN excluded.sequence > peers.sequence THEN excluded.sequence ELSE peers.sequence END,
+                membership_serial = CASE WHEN excluded.sequence > peers.sequence THEN excluded.membership_serial ELSE peers.membership_serial END
+             WHERE excluded.sequence >= peers.sequence",
             Some(vec![
-                worker::SqlStorageValue::from(parsed.record.sister_id.as_u64() as i64),
-                worker::SqlStorageValue::from(serde_json::to_string(&parsed.record).unwrap()),
-                worker::SqlStorageValue::from(parsed.record.sequence as i64),
-                worker::SqlStorageValue::from(parsed.membership.serial as i64),
-                worker::SqlStorageValue::from(now as i64),
-                worker::SqlStorageValue::from((now + RECORD_TTL_SECS) as i64),
+                SqlStorageValue::from(parsed.record.sister_id.as_u64() as i64),
+                SqlStorageValue::from(serde_json::to_string(&parsed.record).unwrap()),
+                SqlStorageValue::from(parsed.record.sequence as i64),
+                SqlStorageValue::from(parsed.membership.serial as i64),
+                SqlStorageValue::from(now as i64),
+                SqlStorageValue::from((now + record_ttl) as i64),
             ]),
         )?;
 
-        self.schedule_alarm(&storage);
-        Response::empty()
+        self.schedule_alarm(&storage).await;
+        // 204 No Content — parity with the native gatewayd announce response.
+        Ok(Response::builder().with_status(204).empty())
     }
 
     async fn handle_peers(&self, mut request: Request) -> Result<Response> {
@@ -169,11 +178,18 @@ impl GatewayDirectory {
 
         let storage = self.state.storage();
         Self::ensure_schema(&storage)?;
+
+        // Peers queries are authenticated member requests too: spend the nonce so
+        // a captured peers request cannot be replayed (parity with announce).
+        if matches!(Self::spend_nonce(&storage, &parsed.auth.nonce, now)?, Nonce::Replayed) {
+            return Response::error("replayed nonce", 401);
+        }
+
         let rows = storage
             .sql()
             .exec(
                 "SELECT record FROM peers WHERE expires_at > ?",
-                Some(vec![worker::SqlStorageValue::from(now as i64)]),
+                Some(vec![SqlStorageValue::from(now as i64)]),
             )?
             .to_array::<PeerRow>()?;
 
@@ -188,9 +204,10 @@ impl GatewayDirectory {
         Response::from_json(&GatewayPeersResponse { records })
     }
 
-    fn schedule_alarm(&self, storage: &Storage) {
-        // Best-effort GC scheduling; correctness never depends on it because
-        // reads filter on `expires_at > now`. Ignore failures.
+    /// Schedule the GC alarm for the soonest-expiring record. Best-effort for
+    /// correctness (reads already filter `expires_at > now`), but it must be
+    /// awaited so the DO actually records the alarm.
+    async fn schedule_alarm(&self, storage: &Storage) {
         if let Ok(min) = storage
             .sql()
             .exec("SELECT min(expires_at) AS n FROM peers", None)
@@ -198,10 +215,17 @@ impl GatewayDirectory {
         {
             if let Some(expires_at_secs) = min.n {
                 let offset_ms = expires_at_secs.saturating_mul(1000) - (now_secs() as i64) * 1000;
-                let _ = storage.set_alarm(offset_ms.max(0));
+                let _ = storage.set_alarm(offset_ms.max(0)).await;
             }
         }
     }
+}
+
+/// Whether a DO SQL error is a uniqueness (PRIMARY KEY) violation, which the
+/// replay guard reads as "this nonce was already spent".
+fn is_unique_conflict(error: &worker::Error) -> bool {
+    let text = error.to_string().to_ascii_lowercase();
+    text.contains("unique") || text.contains("constraint")
 }
 
 impl DurableObject for GatewayDirectory {
@@ -222,13 +246,13 @@ impl DurableObject for GatewayDirectory {
         let now = now_secs() as i64;
         storage.sql().exec(
             "DELETE FROM peers WHERE expires_at <= ?",
-            Some(vec![worker::SqlStorageValue::from(now)]),
+            Some(vec![SqlStorageValue::from(now)]),
         )?;
         storage.sql().exec(
             "DELETE FROM nonces WHERE expires_at <= ?",
-            Some(vec![worker::SqlStorageValue::from(now)]),
+            Some(vec![SqlStorageValue::from(now)]),
         )?;
-        self.schedule_alarm(&storage);
+        self.schedule_alarm(&storage).await;
         Response::ok("gc")
     }
 }
