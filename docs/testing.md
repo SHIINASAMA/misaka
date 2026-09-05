@@ -215,7 +215,9 @@ persisted state and introspection, never CLI log text.
 - `E11` a failed join leaves no partial Network state (and no staging residue).
 - `E12` a successfully joined Sister starts normally and reaches readiness.
 - `E13` the joined Sister discovers the Authority through a local native Gateway
-  and forms the authenticated Iroh connection (both directions converge).
+  and forms the authenticated Iroh connection (both directions converge); and
+  `misaka ps` reports the Iroh peer as `online` (liveness probes the authenticated
+  Iroh control plane, since the default Iroh backend disables the legacy TCP listener).
 
 The suite uses only local infrastructure (a native `network gateway serve`); it
 never depends on the production Cloudflare Gateway. `gateway-live-verify`

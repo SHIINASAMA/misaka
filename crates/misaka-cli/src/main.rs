@@ -496,9 +496,9 @@ fn main() -> Result<(), MisakaError> {
     // 1 MiB on Windows and overflows. Spawning `async_main` puts it on an
     // 8 MiB worker; the main thread merely waits on the JoinHandle.
     let task = runtime.spawn(async_main());
-    runtime
-        .block_on(task)
-        .map_err(|error| MisakaError::Other(format!("misaka task terminated abnormally: {error}")))?
+    runtime.block_on(task).map_err(|error| {
+        MisakaError::Other(format!("misaka task terminated abnormally: {error}"))
+    })?
 }
 
 async fn async_main() -> Result<(), MisakaError> {
@@ -1484,6 +1484,29 @@ async fn async_main() -> Result<(), MisakaError> {
                     MisakaError::Other("Not initialized. Run 'misaka start' first.".into())
                 })?;
             let known = PeerStore::load_from_file();
+            let data_dir =
+                IdentityStore::config_dir().map_err(|e| MisakaError::Other(e.to_string()))?;
+            let network_id = NetworkIdStore::load_or_init(&data_dir, requested_network_id)
+                .map_err(|e| MisakaError::Other(e.to_string()))?;
+            // Build an authenticated Iroh session only if the local device is an
+            // enrolled member; otherwise peer probing stays on the legacy TCP path.
+            let auth = match SisterKeyStore::load(&data_dir)
+                .map_err(|e| MisakaError::Other(e.to_string()))?
+                .as_ref()
+            {
+                Some(sister_key) => {
+                    load_authenticated_session(&data_dir, network_id, &identity, sister_key)
+                        .map_err(MisakaError::Other)?
+                }
+                None => None,
+            };
+            let ctx = PsProbeContext {
+                network_id,
+                identity: identity.clone(),
+                auth,
+                iroh_options: iroh_options.clone(),
+                data_dir,
+            };
             let (active_streams, stream_summary) = match introspect {
                 Some(addr) => {
                     let snapshot = fetch_introspection(addr).await?;
@@ -1491,7 +1514,7 @@ async fn async_main() -> Result<(), MisakaError> {
                 }
                 None => (Vec::new(), NetworkStreamSummary::default()),
             };
-            let report = network_ps(identity, known, active_streams, stream_summary).await;
+            let report = network_ps(identity, known, active_streams, stream_summary, ctx).await;
             if json {
                 println!(
                     "{}",
@@ -1574,11 +1597,25 @@ struct NetworkPsReport {
     stream_summary: NetworkStreamSummary,
 }
 
+/// Context for `misaka ps` peer-liveness probing. The normal runtime control
+/// plane is Iroh (the default backend disables the legacy TCP listener), so a
+/// peer is probed over the authenticated Iroh control channel when the local
+/// device is an enrolled member and the peer advertises an Iroh endpoint. The
+/// legacy TCP Ping/Pong probe remains the fallback for direct-TCP peers.
+struct PsProbeContext {
+    network_id: NetworkId,
+    identity: misaka_core::SisterIdentity,
+    auth: Option<misaka_runtime::authenticated_session::AuthenticatedSessionConfig>,
+    iroh_options: IrohTransportOptions,
+    data_dir: std::path::PathBuf,
+}
+
 async fn network_ps(
     identity: misaka_core::SisterIdentity,
     known: Vec<misaka_core::PeerBlueprint>,
     active_streams: Vec<ActiveStreamSnapshot>,
     stream_summary: NetworkStreamSummary,
+    ctx: PsProbeContext,
 ) -> NetworkPsReport {
     let self_id = identity.id.as_u64();
     let mut sisters = vec![NetworkPsEntry {
@@ -1592,19 +1629,38 @@ async fn network_ps(
     }];
     let mut seen = std::collections::HashSet::new();
     seen.insert(self_id);
-    let probe_identity = identity.clone();
+    // Bind one ephemeral Iroh client only when an authenticated Iroh probe is
+    // actually possible for at least one peer; otherwise skip the cost entirely.
+    let iroh_backend = if ctx.auth.is_some()
+        && known.iter().any(|peer| {
+            peer.stream_endpoints
+                .iter()
+                .any(|endpoint| endpoint.starts_with("iroh://"))
+        }) {
+        // Bind with the *local persisted* Iroh identity so the connection's
+        // endpoint id matches this device's transport binding; otherwise the
+        // Authority rejects the authenticated probe as an endpoint mismatch.
+        bind_iroh_backend(&ctx.data_dir, ctx.iroh_options.clone())
+            .await
+            .ok()
+    } else {
+        None
+    };
     let mut probes = tokio::task::JoinSet::new();
     for (index, peer) in known.into_iter().enumerate() {
         if !seen.insert(peer.id) {
             continue;
         }
-        let address = peer.addr.clone();
-        let identity = probe_identity.clone();
+        let backend = iroh_backend.clone();
+        let ctx = PsProbeContext {
+            network_id: ctx.network_id,
+            identity: ctx.identity.clone(),
+            auth: ctx.auth.clone(),
+            iroh_options: ctx.iroh_options.clone(),
+            data_dir: ctx.data_dir.clone(),
+        };
         probes.spawn(async move {
-            let online = match address.parse::<SocketAddr>() {
-                Ok(addr) => probe_peer(&identity, addr).await,
-                Err(_) => false,
-            };
+            let online = probe_peer_liveness(&peer, &ctx, backend.as_ref()).await;
             (index, peer, online)
         });
     }
@@ -1613,6 +1669,9 @@ async fn network_ps(
         if let Ok((index, peer, online)) = result {
             probed.push((index, peer, online));
         }
+    }
+    if let Some(backend) = iroh_backend.as_ref() {
+        backend.close().await;
     }
     probed.sort_by_key(|(index, _, _)| *index);
     for (_, peer, online) in probed {
@@ -1663,6 +1722,64 @@ async fn fetch_introspection(addr: SocketAddr) -> Result<IntrospectionSnapshot, 
     .map_err(|error| MisakaError::Other(format!("read introspection {addr}: {error}")))?;
     serde_json::from_slice(&bytes)
         .map_err(|error| MisakaError::Other(format!("decode introspection {addr}: {error}")))
+}
+
+/// Determine whether one peer is live. Prefers the authenticated Iroh control
+/// plane (the default runtime transport) when the local device is enrolled and
+/// the peer advertises an Iroh endpoint; falls back to the legacy TCP Ping/Pong
+/// probe for direct-TCP peers. A peer that has an Iroh endpoint but does not
+/// answer is treated as offline and is *not* probed over the (disabled) TCP
+/// control plane.
+async fn probe_peer_liveness(
+    peer: &misaka_core::PeerBlueprint,
+    ctx: &PsProbeContext,
+    iroh_backend: Option<&misaka_network::IrohBackend>,
+) -> bool {
+    let iroh_endpoints: Vec<NetworkEndpoint> = peer
+        .stream_endpoints
+        .iter()
+        .filter_map(|endpoint| endpoint.parse::<NetworkEndpoint>().ok())
+        .filter(|endpoint| matches!(endpoint, NetworkEndpoint::Iroh(_)))
+        .collect();
+    if let (Some(backend), Some(auth)) = (iroh_backend, ctx.auth.as_ref()) {
+        if iroh_endpoints.is_empty() {
+            // Enrolled, but this peer offers no Iroh endpoint: fall through to TCP.
+        } else {
+            for endpoint in &iroh_endpoints {
+                let ping = Envelope::new(
+                    ctx.network_id,
+                    MessageType::Ping,
+                    ctx.identity.id.as_u64(),
+                    0,
+                    vec![],
+                );
+                let online = tokio::time::timeout(
+                    Duration::from_millis(3000),
+                    misaka_runtime::control_channel::send(
+                        backend,
+                        endpoint.clone(),
+                        ctx.network_id,
+                        Some(auth),
+                        &ping,
+                        true,
+                    ),
+                )
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .flatten()
+                .is_some_and(|response| response.msg_type == MessageType::Pong);
+                if online {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+    match peer.addr.parse::<SocketAddr>() {
+        Ok(addr) => probe_peer(&ctx.identity, addr).await,
+        Err(_) => false,
+    }
 }
 
 async fn probe_peer(identity: &misaka_core::SisterIdentity, addr: SocketAddr) -> bool {

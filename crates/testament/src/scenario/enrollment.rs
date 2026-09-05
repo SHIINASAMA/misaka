@@ -468,9 +468,36 @@ fn e13_joined_sister_discovers_authority_through_gateway(
             std::thread::sleep(Duration::from_millis(200));
         }
     })();
+    // Regression guard: `misaka ps` must report the discovered peer as online.
+    // The normal Iroh backend disables the legacy TCP control listener, so peer
+    // liveness has to be probed over the authenticated Iroh control channel.
+    let ps_outcome = outcome.and_then(|()| {
+        let a_id = ctx.introspect("e13a")?.identity.id.as_u64();
+        let report: Value = ctx
+            .run_cli("e13b", &["ps", "--json"])?
+            .parse()
+            .map_err(|error| {
+                ScenarioError::assertion(format!("ps --json not decodable: {error}"))
+            })?;
+        let a_online = report["sisters"]
+            .as_array()
+            .map(|entries| {
+                entries.iter().any(|entry| {
+                    entry["id"].as_u64() == Some(a_id) && entry["status"].as_str() == Some("online")
+                })
+            })
+            .unwrap_or(false);
+        if a_online {
+            Ok(())
+        } else {
+            Err(ScenarioError::assertion(
+                "`misaka ps` did not report the Iroh peer as online",
+            ))
+        }
+    });
     ctx.teardown();
     stop_gateway(process)?;
-    outcome
+    ps_outcome
 }
 
 // --- Local native Gateway helpers (public config only) ---------------------
