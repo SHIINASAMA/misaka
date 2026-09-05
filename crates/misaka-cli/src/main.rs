@@ -1679,7 +1679,10 @@ async fn network_ps(
             id: peer.id,
             nickname: peer.nickname,
             address: Some(peer.addr),
-            stream: peer.stream_endpoints.first().cloned(),
+            stream: peer
+                .stream_endpoints
+                .first()
+                .map(|endpoint| endpoint_display(endpoint)),
             path: peer
                 .stream_endpoints
                 .first()
@@ -1804,16 +1807,64 @@ async fn probe_peer(identity: &misaka_core::SisterIdentity, addr: SocketAddr) ->
         .is_some_and(|response| response.msg_type == MessageType::Pong)
 }
 
+/// Compact, human-safe rendering of a transport endpoint. A raw Iroh locator is
+/// `iroh://<full EndpointAddr JSON>` (relay URL + every bound address), which is
+/// hundreds of characters and shatters any fixed-width layout. For display we
+/// keep only the scheme and a short prefix of the stable EndpointId. TCP
+/// endpoints are already short and pass through.
+fn endpoint_display(raw: &str) -> String {
+    match raw.parse::<NetworkEndpoint>() {
+        Ok(NetworkEndpoint::Iroh(addr)) => {
+            let id = addr.id.to_string();
+            let prefix: String = id.chars().take(10).collect();
+            format!("iroh:{prefix}")
+        }
+        Ok(NetworkEndpoint::Tcp(addr)) => addr.to_string(),
+        Err(_) => {
+            // Unparseable: truncate defensively rather than dump the raw blob.
+            let mut head: String = raw.chars().take(16).collect();
+            if raw.chars().count() > 16 {
+                head.push('…');
+            }
+            head
+        }
+    }
+}
+
+/// Truncate `text` to at most `width` display columns, padding to `width` with a
+/// trailing space, so a long value can never overflow a table column.
+fn fit(text: &str, width: usize) -> String {
+    let mut chars = text.chars();
+    let taken: String = chars.by_ref().take(width).collect();
+    if chars.next().is_some() {
+        // more remained: reserve the final column for the ellipsis
+        let mut truncated: String = taken.chars().take(width.saturating_sub(1)).collect();
+        truncated.push('…');
+        format!("{truncated:<width$}", width = width)
+    } else {
+        format!("{taken:<width$}", width = width)
+    }
+}
+
 fn print_network_ps(report: &NetworkPsReport) {
-    println!("SISTER               CONTROL             STREAM              PATH     STATUS");
+    println!(
+        "SISTER                         CONTROL             STREAM              PATH     STATUS"
+    );
     for sister in &report.sisters {
-        let name = format!("#{} \"{}\"", sister.id, sister.nickname);
+        // Nickname is the human key; the numeric id is needed for
+        // `misaka connect '#id'`, so the SISTER column is padded (not
+        // truncated) while the transport columns are hard-capped. The Iroh
+        // stream has already been compacted by `endpoint_display`.
+        let name = format!("#{id} \"{nick}\"", id = sister.id, nick = sister.nickname);
         let address = sister.address.as_deref().unwrap_or("local");
         let stream = sister.stream.as_deref().unwrap_or("-");
         let path = sister.path.as_deref().unwrap_or("-");
         println!(
-            "{:<20} {:<19} {:<19} {:<8} {}",
-            name, address, stream, path, sister.status
+            "{name:<30} {} {} {:<8} {}",
+            fit(address, 21),
+            fit(stream, 22),
+            path,
+            sister.status
         );
     }
     let online = report
@@ -1836,7 +1887,11 @@ fn print_network_ps(report: &NetworkPsReport) {
                     .map(|rtt| format!("{rtt}ms"))
                     .unwrap_or_else(|| "-".to_string()),
                 stream.path_switches,
-                stream.remote_endpoint.as_deref().unwrap_or("-"),
+                stream
+                    .remote_endpoint
+                    .as_deref()
+                    .map(endpoint_display)
+                    .unwrap_or_else(|| "-".to_string()),
                 stream.tx_bytes,
                 stream.rx_bytes,
                 stream.connected_for_ms,

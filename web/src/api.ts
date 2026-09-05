@@ -54,3 +54,21 @@ export function formatUptime(seconds: number): string {
   const hours = Math.floor(minutes / 60);
   return `${hours}h ${minutes % 60}m`;
 }
+
+// A raw Iroh endpoint is `iroh://<full EndpointAddr JSON>` (relay URL + every
+// bound address) — hundreds of characters that shatter any fixed-width layout.
+// For display keep only the scheme and a short prefix of the stable EndpointId;
+// TCP endpoints are already short. Mirrors the CLI's `endpoint_display`.
+export function formatEndpoint(raw: string | null | undefined): string {
+  if (!raw) return "—";
+  if (raw.startsWith("iroh://")) {
+    try {
+      const parsed = JSON.parse(raw.slice("iroh://".length)) as { id?: string };
+      const id = parsed.id ?? "";
+      return id ? `iroh:${id.slice(0, 10)}` : "iroh";
+    } catch {
+      return "iroh";
+    }
+  }
+  return raw.replace(/^tcp:\/\//, "");
+}
