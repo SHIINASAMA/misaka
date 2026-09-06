@@ -130,11 +130,12 @@ fn t04_remote_exec(ctx: &mut Context) -> Result<(), ScenarioError> {
 
 fn t05_work_stealing(ctx: &mut Context) -> Result<(), ScenarioError> {
     // A 执行长任务；B 空闲并通过 manual peer 拓扑请求 A 的积压任务；C 是原始提交者。
+    // C 必须保持运行:remote `misaka run` 经运行中的本地 Sister(C)的 loopback API +
+    // 认证 Iroh(C 此处为 DirectTcp 后端 = 显式兼容选择,非降级)提交,不得再从被停止的
+    // 一次性进程提交。C 也可能成为窃取者,故结果只断言"被 a 的某个兄弟节点完成"。
     ctx.start_sister("a", "alpha", &[])?;
     let a_addr = ctx.peer_addr("a")?;
     ctx.start_sister("b", "beta", &[a_addr])?;
-    // 仅用临时 Sister 初始化提交者身份和 peer store，任务提交前停止它，
-    // 避免提交者自己参与 work stealing。
     ctx.start_sister("c", "creator", &[a_addr])?;
     let creator_config = PathBuf::from(
         ctx.entries
@@ -143,7 +144,6 @@ fn t05_work_stealing(ctx: &mut Context) -> Result<(), ScenarioError> {
             .config_dir
             .clone(),
     );
-    ctx.stop_sister("c")?;
 
     let a_id = ctx.introspect("a")?.identity.id.as_u64();
     let b_id = ctx.introspect("b")?.identity.id.as_u64();
@@ -216,21 +216,32 @@ fn t05_work_stealing(ctx: &mut Context) -> Result<(), ScenarioError> {
         "stolen job result",
     )?;
 
-    let b_after = observer::wait_until(b_introspect, Duration::from_secs(8), |snapshot| {
-        snapshot
-            .jobs
-            .iter()
-            .any(|job| job.command == "printf second-ok" && job.status == "completed")
-    })
-    .ok_or_else(|| ScenarioError::assertion("b did not complete the stolen job"))?;
-    let completed_job = b_after
-        .jobs
-        .iter()
-        .find(|job| job.command == "printf second-ok")
-        .ok_or_else(|| {
-            ScenarioError::assertion("completed job not retained in B's introspection")
-        })?;
-    assert::assert_job_state(&b_after, &completed_job.id, "completed")?;
+    // The stolen job must complete on SOME sibling of A (b, or the now-running
+    // creator c if it stole it first). What matters: it left A's queue and its
+    // result reached the creator (asserted above).
+    let c_introspect = introspect_addr_of(ctx, "c")?;
+    let done = std::time::Instant::now() + Duration::from_secs(8);
+    let mut completed = false;
+    while std::time::Instant::now() < done {
+        for ia in [b_introspect, c_introspect] {
+            if observer::fetch(ia, Duration::from_millis(300)).is_ok_and(|s| {
+                s.jobs
+                    .iter()
+                    .any(|job| job.command == "printf second-ok" && job.status == "completed")
+            }) {
+                completed = true;
+            }
+        }
+        if completed {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    if !completed {
+        return Err(ScenarioError::assertion(
+            "no sibling of A completed the stolen job",
+        ));
+    }
 
     let first_output = first
         .wait_timeout(Duration::from_secs(15))
@@ -262,7 +273,8 @@ fn t06_automatic_scheduling(ctx: &mut Context) -> Result<(), ScenarioError> {
             .config_dir
             .clone(),
     );
-    ctx.stop_sister("c")?;
+    // C stays running: remote `misaka run` must relay through a running local
+    // Sister (its own DirectTcp backend is an explicit compatibility choice).
 
     let a_id = ctx.introspect("a")?.identity.id.as_u64();
     let a_introspect = introspect_addr_of(ctx, "a")?;
@@ -301,7 +313,7 @@ fn t07_work_stealing_bookkeeping(ctx: &mut Context) -> Result<(), ScenarioError>
             .config_dir
             .clone(),
     );
-    ctx.stop_sister("c")?;
+    // C stays running so remote `run` relays through a live local Sister.
     let a_id = ctx.introspect("a")?.identity.id.as_u64();
     let b_id = ctx.introspect("b")?.identity.id.as_u64();
     let a_introspect = introspect_addr_of(ctx, "a")?;

@@ -740,6 +740,7 @@ async fn async_main() -> Result<(), MisakaError> {
                 },
                 ..Default::default()
             };
+            let api_result_timeout = config.job_timeout;
             let runtime = SisterRuntime::new(
                 identity,
                 default_encryption_key(),
@@ -796,6 +797,14 @@ async fn async_main() -> Result<(), MisakaError> {
                 let _ = std::fs::write(
                     dir.join("api-endpoint"),
                     api_server.local_addr().to_string(),
+                );
+                // The Job-result bound the running Sister will hold its HTTP
+                // response open for (`config.job_timeout`). A separate `misaka
+                // run` reads this so it waits for a legitimate long Job instead
+                // of aborting at some shorter fixed client deadline.
+                let _ = std::fs::write(
+                    dir.join("api-result-timeout"),
+                    api_result_timeout.as_secs().to_string(),
                 );
             }
             let api_task = tokio::spawn(api_server.run(shutdown.token()));
@@ -1577,55 +1586,29 @@ async fn async_main() -> Result<(), MisakaError> {
                 ..Default::default()
             };
             let node = SisterNode::new(identity, default_encryption_key(), config);
-            // Normal remote path: route through the running local Sister so the
-            // Job is submitted and returned over the authenticated Iroh control
-            // plane. A transient CLI Iroh endpoint would collide with the running
-            // Sister's identity, so the running Sister is the rendezvous. Only
-            // when no local Sister API is reachable do we fall back to the
-            // in-process DirectTcp compatibility path below (not a downgrade from
-            // a FAILED Iroh submission — that is reported as an error).
-            if !local {
-                match try_run_via_running_sister(&node.config.data_dir, &command, sister).await {
-                    RunAttempt::Printed(result) => {
-                        print_result(&result);
-                        return Ok(());
-                    }
-                    RunAttempt::Failed(message) => {
-                        return Err(MisakaError::Other(message));
-                    }
-                    RunAttempt::NoLocalSister => {}
-                }
-            }
-            // §5: pick the concrete executor BEFORE issuing a Human
-            // Authorization, so the authorization is always bound to that Sister
-            // (never a target=None Network-wide bearer capability).
             if local {
                 println!("[Misaka] run --local: {}", command);
                 // 独立进程：不启动完整 runtime，直接同步执行并输出结果
                 let result = node.run_local_sync(&command).await;
                 print_result(&result);
-            } else {
-                // Directed (`--sister B`) or scheduler-chosen executor.
-                let executor = match sister {
-                    Some(sid) => sid,
-                    None => node.choose_executor().await,
-                };
-                if executor == node.identity.id.as_u64() {
-                    // Scheduler chose local (or no peer): run here, no remote
-                    // authorization needed.
-                    println!("[Misaka] run (local via scheduler): {}", command);
-                    let result = node.run_local_sync(&command).await;
-                    print_result(&result);
-                    return Ok(());
+                return Ok(());
+            }
+            // Remote Job submission is EXCLUSIVELY the authenticated-Iroh path
+            // through the running local Sister's loopback API. It must never
+            // implicitly construct a one-shot DirectTcp Sister, bind a legacy TCP
+            // callback port, route by PeerState.addr, or downgrade to DirectTcp
+            // after an Iroh failure. Every failure mode fails closed. (§1/§2/§5)
+            match try_run_via_running_sister(&node.config.data_dir, &command, sister).await {
+                RunAttempt::Printed(result) => print_result(&result),
+                RunAttempt::Failed(message) => return Err(MisakaError::Other(message)),
+                RunAttempt::NoLocalSister => {
+                    return Err(MisakaError::Other(
+                        "no running local Sister is available for remote Job submission; \
+                     start one with `misaka start` (remote Jobs run over the \
+                     authenticated Iroh control plane through the running Sister)"
+                            .to_string(),
+                    ))
                 }
-                let authorization =
-                    load_cli_command_authorization(network_id, Some(executor), &command)
-                        .map_err(MisakaError::Other)?;
-                println!("[Misaka] run --sister #{executor}: {}", command);
-                let result = node
-                    .submit_to_sister_authorized(executor, &command, authorization)
-                    .await?;
-                print_result(&result);
             }
         }
     }
@@ -3423,19 +3406,6 @@ fn join_network_invite(
     Ok(())
 }
 
-fn load_cli_command_authorization(
-    network_id: NetworkId,
-    target: Option<u64>,
-    command: &str,
-) -> Result<Option<CommandAuthorization>, String> {
-    load_cli_authorization(
-        network_id,
-        target,
-        Permission::JobSubmit,
-        vec![format!("command={command}")],
-    )
-}
-
 fn load_cli_authorization(
     network_id: NetworkId,
     target: Option<u64>,
@@ -3768,12 +3738,35 @@ fn running_sister_api_addr(data_dir: &Path) -> Option<SocketAddr> {
     addr.ip().is_loopback().then_some(addr)
 }
 
+/// The running local Sister's Job-result bound (seconds), recorded at `start`
+/// alongside `api-endpoint`. The CLI relay must hold its HTTP response open at
+/// least this long: a Job that legitimately runs longer than a fixed client
+/// wait would otherwise be reported as failed while still executing on the
+/// executor. Absent the marker (older Sister, or a `run` against a config dir
+/// with no recorded bound), the server default `job_timeout` applies.
+fn running_sister_result_timeout(data_dir: &Path) -> Duration {
+    let fallback = Duration::from_secs(60);
+    let Ok(value) = std::fs::read_to_string(data_dir.join("api-result-timeout")) else {
+        return fallback;
+    };
+    let Ok(secs) = value.trim().parse::<u64>() else {
+        return fallback;
+    };
+    if secs == 0 {
+        return fallback;
+    }
+    Duration::from_secs(secs)
+}
+
 /// A minimal loopback HTTP POST (the Misaka API is loopback-only). Returns the
 /// status and response body, or `None` on any transport error (no Sister there).
+/// The result-read deadline is the running Sister's Job-result bound: a Job is
+/// allowed to execute up to that long before the API returns its result.
 async fn http_post_json(
     addr: SocketAddr,
     path: &str,
     body: &serde_json::Value,
+    result_timeout: Duration,
 ) -> Option<(u16, String)> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut stream = tokio::time::timeout(
@@ -3788,7 +3781,7 @@ async fn http_post_json(
         "POST {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(result_timeout, async {
         stream.write_all(request.as_bytes()).await.ok()?;
         stream.flush().await.ok()?;
         let mut bytes = Vec::new();
@@ -3811,7 +3804,9 @@ async fn try_run_via_running_sister(
         return RunAttempt::NoLocalSister;
     };
     let body = serde_json::json!({ "command": command, "sister": sister });
-    let Some((status, resp)) = http_post_json(addr, "/api/v1/jobs", &body).await else {
+    let result_timeout = running_sister_result_timeout(data_dir);
+    let Some((status, resp)) = http_post_json(addr, "/api/v1/jobs", &body, result_timeout).await
+    else {
         return RunAttempt::NoLocalSister;
     };
     if (200..300).contains(&status) {
