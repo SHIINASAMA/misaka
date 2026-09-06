@@ -396,6 +396,26 @@ fn spawn_background_tasks(
 const MAX_IROH_SESSIONS: usize = 512;
 const MAX_IROH_STREAMS: usize = 2048;
 const AUTH_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+/// Bound on how long an authenticated peer may take to name its service
+/// (control / transfer / tunnel) after the handshake. Without this a valid
+/// member could authenticate, then stall, and hold a bounded stream slot forever.
+const SERVICE_PREFIX_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Read the 4-byte service-selection prefix under `timeout`. Returns `None` if
+/// the peer stalls or errors — the caller then drops the stream (releasing the
+/// semaphore permit via the enclosing task) and dispatches no service. No retry.
+/// Factored with an injectable duration so tests need not sleep the real bound.
+async fn read_service_prefix(
+    stream: &mut misaka_network::NetworkStream,
+    timeout: std::time::Duration,
+) -> Option<[u8; 4]> {
+    let mut prefix = [0u8; 4];
+    match tokio::time::timeout(timeout, stream.read_exact(&mut prefix)).await {
+        Ok(Ok(_)) => Some(prefix),
+        Ok(Err(_)) => None,
+        Err(_elapsed) => None,
+    }
+}
 
 async fn stream_accept_loop(node: SisterNode, listener: misaka_network::NetworkListener) {
     let mut sessions = JoinSet::new();
@@ -603,16 +623,19 @@ async fn serve_iroh_stream(
         );
         return;
     }
-    let mut prefix = [0u8; 4];
-    if let Err(error) = stream.read_exact(&mut prefix).await {
-        tracing::debug!(
-            event = "iroh_stream_prefix_failed",
-            sister_id = node.identity.id.as_u64(),
-            error = %error,
-            "Iroh logical stream closed before service dispatch"
-        );
-        return;
-    }
+    // §1: an authenticated member must name its service under a bound, or it
+    // holds a stream slot (and semaphore permit) forever.
+    let prefix = match read_service_prefix(&mut stream, SERVICE_PREFIX_TIMEOUT).await {
+        Some(prefix) => prefix,
+        None => {
+            tracing::debug!(
+                event = "iroh_stream_prefix_timeout",
+                sister_id = node.identity.id.as_u64(),
+                "Iroh stream dropped: service prefix not received in time"
+            );
+            return;
+        }
+    };
     if prefix == *crate::control_channel::CONTROL_MAGIC {
         if let Err(error) = crate::control_channel::serve(&node, stream, peer).await {
             tracing::warn!(
@@ -1636,6 +1659,22 @@ mod tests {
         ));
         // Untargeted → rejected (no longer permitted for remote side effects).
         assert!(!super::authorization_bound_to_local(&build(None), 5));
+    }
+
+    // §1: an authenticated peer that never names a service must be dropped once
+    // the prefix timeout fires — not hold the stream (and permit) forever. Uses
+    // paused time so the test is instant and non-flaky.
+    #[tokio::test(start_paused = true)]
+    async fn stalled_service_prefix_times_out() {
+        let (duplex, _idle_peer) = tokio::io::duplex(64);
+        let mut stream = misaka_network::NetworkStream::from_stream(duplex);
+        let started = tokio::time::Instant::now();
+        let result =
+            super::read_service_prefix(&mut stream, std::time::Duration::from_millis(200)).await;
+        assert!(result.is_none(), "stalled prefix must time out to None");
+        // Paused time auto-advances when the task awaits a timeout, so this
+        // completes deterministically without real wall-clock sleeping.
+        assert!(started.elapsed() >= std::time::Duration::from_millis(200));
     }
 
     use super::{iroh_session_accept_loop, SisterRuntime};
