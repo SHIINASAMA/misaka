@@ -46,6 +46,22 @@ impl JobManager {
         self.queue.pop()
     }
 
+    /// Pop the next job this Sister may hand to `requester` under work stealing.
+    ///
+    /// §8/§9: a Human-authorized job runs only on its authorized target, so it is
+    /// NOT stealable by an unrelated Sister. An un-authorized job is stealable
+    /// only when `allow_unauthenticated` (explicit development/test mode). This
+    /// deliberately avoids authorization delegation / chains / re-signing, which
+    /// are separate future designs.
+    pub fn pop_transferable(
+        &self,
+        requester: u64,
+        allow_unauthenticated: bool,
+    ) -> Option<LocalJob> {
+        self.queue
+            .pop_where(|job| job_transferable(job, requester, allow_unauthenticated))
+    }
+
     pub fn push_back(&self, job: LocalJob) {
         self.queue.push(job);
     }
@@ -147,6 +163,22 @@ impl JobManager {
     }
 }
 
+/// Whether `requester` may take over `job` via work stealing.
+///
+/// - Authorization names the requester as its destination Sister → transferable.
+/// - Authorization present but bound elsewhere (or `target == None`) → NOT
+///   transferable to this requester.
+/// - No authorization → transferable only in explicit insecure-development mode.
+fn job_transferable(job: &LocalJob, requester: u64, allow_unauthenticated: bool) -> bool {
+    match job.authorization.as_ref() {
+        Some(authorization) => matches!(
+            &authorization.target,
+            Some(misaka_core::Principal::Sister(id)) if id.as_u64() == requester
+        ),
+        None => allow_unauthenticated,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -211,5 +243,79 @@ mod tests {
         let receiver = manager.reserve_pending("two");
         manager.cancel_pending("two");
         assert!(receiver.await.is_err());
+    }
+
+    // JH05 / §8 / §9: work stealing must respect the authorization target.
+    #[tokio::test]
+    async fn pop_transferable_respects_authorization_target() {
+        use misaka_core::{CommandAuthorization, NetworkId, Principal, SisterId};
+
+        let manager = JobManager::new();
+
+        // Job authorized for Sister B.
+        let mut for_b = job("for-b");
+        for_b.authorization = Some(CommandAuthorization {
+            network_id: NetworkId::default(),
+            issuer: for_b_dummy_issuer(),
+            membership: for_b_dummy_membership(),
+            role: misaka_core::Role::Operator,
+            permission: misaka_core::Permission::JobSubmit,
+            target: Some(Principal::Sister(SisterId(2))),
+            constraints: vec![],
+            issued_at: 0,
+            expires_at: u64::MAX,
+            nonce: [0u8; 16],
+            signature: for_b_dummy_sig(),
+        });
+        // A job authorized for B must NOT be stolen by requester C (3), nor by an
+        // unrelated peer, but IS transferable to B (2).
+        manager.enqueue(for_b.clone()).await;
+        assert!(
+            manager.pop_transferable(3, false).is_none(),
+            "C stole B's job"
+        );
+        assert_eq!(
+            manager.queue_len(),
+            1,
+            "queue corrupted when refusing a peer"
+        );
+        let taken = manager
+            .pop_transferable(2, false)
+            .expect("B can take its job");
+        assert_eq!(taken.id, "for-b");
+
+        // No authorization → stealable only in explicit insecure-development mode.
+        manager.enqueue(job("plain")).await;
+        assert!(manager.pop_transferable(9, false).is_none());
+        let stolen = manager
+            .pop_transferable(9, true)
+            .expect("plain job stealable in insecure mode");
+        assert_eq!(stolen.id, "plain");
+    }
+
+    // Small helpers to build an authorization struct for the predicate test
+    // (fields other than `target` are irrelevant to `job_transferable`).
+    fn for_b_dummy_issuer() -> misaka_core::HumanIdentity {
+        let key = misaka_core::HumanKeyPair::generate();
+        misaka_core::HumanIdentity::new(
+            misaka_core::HumanId::generate(),
+            "op".into(),
+            key.public_key(),
+        )
+    }
+    fn for_b_dummy_membership() -> misaka_core::HumanMembershipCertificate {
+        let issuer = for_b_dummy_issuer();
+        misaka_core::HumanMembershipCertificate {
+            network_id: misaka_core::NetworkId::default(),
+            human: issuer,
+            role: misaka_core::Role::Operator,
+            issued_at: 0,
+            expires_at: None,
+            serial: 1,
+            authority_signature: misaka_core::AuthoritySignature::from_bytes([0u8; 64]),
+        }
+    }
+    fn for_b_dummy_sig() -> misaka_core::HumanSignature {
+        misaka_core::HumanSignature::from_bytes([0u8; 64])
     }
 }

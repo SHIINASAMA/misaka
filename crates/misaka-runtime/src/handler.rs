@@ -30,6 +30,21 @@ fn sender_matches_peer(peer: Option<&AuthenticatedPeer>, claimed: u64) -> bool {
     peer.is_none_or(|peer| peer.sister_id.as_u64() == claimed)
 }
 
+/// Build the envelope a Sister (`sender_id`) uses to forward an existing Job to
+/// `executor`. The transport `from` is ALWAYS the forwarding Sister — the
+/// immediate authenticated sender — never the logical creator (which stays in
+/// `JobData.creator` inside the unchanged `data`). Forwarding must not
+/// impersonate the creator at the transport layer, since only `sender_id`
+/// authenticated this stream.
+fn job_forward_envelope(
+    network_id: misaka_core::NetworkId,
+    sender_id: u64,
+    executor: u64,
+    data: Vec<u8>,
+) -> Envelope {
+    Envelope::new(network_id, MessageType::Job, sender_id, executor, data)
+}
+
 pub(crate) async fn dispatch(
     node: &SisterNode,
     env: Envelope,
@@ -197,6 +212,16 @@ pub(crate) async fn dispatch_envelope(
 
         MessageType::Job => {
             let job: JobData = bincode::deserialize(&env.data)?;
+            let local_id = node.identity.id.as_u64();
+            // Where will this actually run? Forward only when a specific remote
+            // executor is named AND we can reach it; otherwise we run it here.
+            let will_forward = job.executor != 0
+                && job.executor != local_id
+                && node.peers.get(job.executor).await.is_some();
+            // The Sister the authorization must name for this hop: the executor
+            // when forwarding, or us when executing locally.
+            let expected_target = if will_forward { job.executor } else { local_id };
+
             require_side_effect_authorization(
                 job.authorization.as_ref(),
                 node.config.allow_unauthenticated_operations,
@@ -212,18 +237,12 @@ pub(crate) async fn dispatch_envelope(
                             .to_string(),
                     )
                 })?;
-                let target_ok = match authorization.target.as_ref() {
-                    None => true,
-                    Some(Principal::Sister(id)) => {
-                        id.as_u64()
-                            == if job.executor == 0 {
-                                node.identity.id.as_u64()
-                            } else {
-                                job.executor
-                            }
-                    }
-                    Some(Principal::Human(_)) => false,
-                };
+                // §4/§6: a production JobSubmit authorization MUST be bound to a
+                // concrete destination Sister. `target == None` is no longer a
+                // Network-wide bearer capability, and `target == someOtherSister`
+                // must not run here.
+                let target_ok = authorization.target
+                    == Some(Principal::Sister(misaka_core::SisterId(expected_target)));
                 let command = job.full_command();
                 let constraints_ok = authorization.constraints.iter().all(|constraint| {
                     constraint
@@ -231,6 +250,7 @@ pub(crate) async fn dispatch_envelope(
                         .is_some_and(|expected| expected == command)
                 });
                 if authorization.permission != Permission::JobSubmit
+                    || authorization.network_id != node.config.network_id
                     || !authorization.verify(&authority, now_secs())
                     || !target_ok
                     || !constraints_ok
@@ -252,7 +272,9 @@ pub(crate) async fn dispatch_envelope(
                         "human job authorization membership has been revoked".to_string(),
                     ));
                 }
-                if job.executor == 0 || job.executor == node.identity.id.as_u64() {
+                // §7: an intermediate forwarder verifies but does NOT consume the
+                // destination's nonce — only the Sister that executes does.
+                if !will_forward {
                     let _nonce_guard = node.authorization_nonce_lock.lock().await;
                     crate::authorization_nonce_store::AuthorizationNonceStore::record(
                         &node.config.data_dir,
@@ -262,11 +284,8 @@ pub(crate) async fn dispatch_envelope(
                     .map_err(|error| crate::Error::Protocol(error.to_string()))?;
                 }
             }
-            // 若指定了 executor 且不是本机 → 转发
-            if job.executor != 0
-                && job.executor != node.identity.id.as_u64()
-                && node.peers.get(job.executor).await.is_some()
-            {
+            if will_forward {
+                // 转发到指定 executor(本机不执行)
                 tracing::info!(
                     event = "job_forwarded",
                     sister_id = node.identity.id.as_u64(),
@@ -276,10 +295,9 @@ pub(crate) async fn dispatch_envelope(
                 );
                 node.send_fire_to_peer(
                     job.executor,
-                    &Envelope::new(
+                    &job_forward_envelope(
                         node.config.network_id,
-                        MessageType::Job,
-                        env.from,
+                        local_id,
                         job.executor,
                         env.data.clone(),
                     ),
@@ -299,7 +317,7 @@ pub(crate) async fn dispatch_envelope(
                 event = "job_queued",
                 sister_id = node.identity.id.as_u64(),
                 job_id = %job_id,
-                creator = env.from,
+                creator = job.creator,
                 command = %full_cmd,
                 "job queued"
             );
@@ -343,10 +361,16 @@ pub(crate) async fn dispatch_envelope(
         }
 
         MessageType::JobRequest => {
-            // Work Stealing: 有人来要活。给一个本地排队中的任务。
+            // Work stealing: offer only a job this requester is actually
+            // authorized to run (§8/§9). A Human-authorized job bound to another
+            // Sister is never taken here; an un-authorized job only in explicit
+            // insecure-development mode.
             let requester = env.from;
             let peer_known = node.peers.get(requester).await.is_some();
-            if let Some(job) = node.jobs.pop() {
+            if let Some(job) = node
+                .jobs
+                .pop_transferable(requester, node.config.allow_unauthenticated_operations)
+            {
                 if peer_known {
                     let job_data = JobData {
                         id: job.id.clone(),
@@ -418,12 +442,16 @@ pub(crate) async fn dispatch_envelope(
 
 #[cfg(test)]
 mod tests {
-    use super::{dispatch_envelope, require_side_effect_authorization};
+    use super::{dispatch_envelope, job_forward_envelope, require_side_effect_authorization};
     use crate::authenticated_session::AuthenticatedPeer;
     use crate::config::{DiscoveryMode, RuntimeConfig};
     use crate::node::SisterNode;
     use misaka_core::protocol::{HelloData, StateData};
-    use misaka_core::{Envelope, MessageType, NetworkId, SisterId, SisterIdentity, SisterKeyPair};
+    use misaka_core::{
+        CommandAuthorization, Envelope, HumanId, HumanIdentity, HumanKeyPair,
+        HumanMembershipCertificate, MessageType, NetworkId, Permission, Principal, Role, SisterId,
+        SisterIdentity, SisterKeyPair,
+    };
 
     #[test]
     fn missing_job_authorization_is_rejected_without_explicit_development_mode() {
@@ -524,6 +552,171 @@ mod tests {
     async fn legacy_tcp_dispatch_has_no_peer_binding() {
         let env = Envelope::new(NetworkId::default(), MessageType::Ping, 9, 0, vec![]);
         assert!(dispatch_envelope(&node(), env, None).await.is_ok());
+    }
+
+    /// A node whose data dir holds a real authority descriptor, so a signed
+    /// Human authorization can be validated (target is what we are testing).
+    fn node_with_authority() -> (SisterNode, misaka_core::AuthorityKeyPair) {
+        let dir =
+            std::env::temp_dir().join(format!("misaka-handler-auth-{}", uuid::Uuid::new_v4()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let network_id = NetworkId::default();
+        let (authority, authority_key) = misaka_core::NetworkAuthority::generate(network_id);
+        crate::network_authority_store::NetworkAuthorityStore::install_descriptor(&dir, &authority)
+            .unwrap();
+        let node = SisterNode::new(
+            SisterIdentity::new(1, "node".into(), "h".into(), "p".into(), "v".into(), 31700),
+            [0u8; 32],
+            RuntimeConfig {
+                network_id,
+                data_dir: dir,
+                discovery: DiscoveryMode::Off,
+                ..Default::default()
+            },
+        );
+        (node, authority_key)
+    }
+
+    /// A JobSubmit authorization signed by a valid human + membership, targeted
+    /// to `target` (None ⇒ an unbound, network-wide capability).
+    fn job_authorization(
+        authority_key: &misaka_core::AuthorityKeyPair,
+        target: Option<u64>,
+    ) -> misaka_core::CommandAuthorization {
+        let network_id = NetworkId::default();
+        let authority = misaka_core::NetworkAuthority {
+            network_id,
+            authority_public_key: authority_key.public_key(),
+        };
+        let hkey = HumanKeyPair::generate();
+        let human = HumanIdentity::new(HumanId::generate(), "op".into(), hkey.public_key());
+        let membership = HumanMembershipCertificate::issue(
+            &authority,
+            authority_key,
+            human.clone(),
+            Role::Operator,
+            0,
+            None,
+            1,
+        );
+        CommandAuthorization::issue(
+            network_id,
+            human,
+            membership,
+            Role::Operator,
+            Permission::JobSubmit,
+            target.map(|id| Principal::Sister(SisterId(id))),
+            vec!["command=printf hi".into()],
+            0,
+            u64::MAX,
+            rand::random(),
+            &hkey,
+        )
+    }
+
+    // JH01: a production JobSubmit authorization with target=None is rejected.
+    #[tokio::test]
+    async fn job_submit_without_target_is_rejected() {
+        let (node, authority_key) = node_with_authority();
+        let (peer, _key) = peer_two(); // authenticated sender Sister #2
+        let authorization = job_authorization(&authority_key, None);
+        let job = misaka_core::JobData {
+            id: "job-x".into(),
+            creator: 2,
+            executor: 1, // this node
+            creator_addr: "127.0.0.1:1".into(),
+            command: "printf hi".into(),
+            arguments: vec![],
+            created_at: 0,
+            authorization: Some(authorization),
+        };
+        let env = Envelope::new(
+            NetworkId::default(),
+            MessageType::Job,
+            2,
+            1,
+            bincode::serialize(&job).unwrap(),
+        );
+        assert!(dispatch_envelope(&node, env, Some(peer)).await.is_err());
+    }
+
+    // JH02 / JH03: a job authorized for Sister B must not execute on Sister C.
+    #[tokio::test]
+    async fn job_authorized_for_another_sister_is_rejected() {
+        let (node, authority_key) = node_with_authority(); // node id = 1
+        let (peer, _key) = peer_two(); // authenticated sender Sister #2
+                                       // Authorization targets Sister #9; this node is #1 and cannot reach #9,
+                                       // so it would execute locally — but the target is not it → reject.
+        let authorization = job_authorization(&authority_key, Some(9));
+        let job = misaka_core::JobData {
+            id: "job-y".into(),
+            creator: 2,
+            executor: 1,
+            creator_addr: "127.0.0.1:1".into(),
+            command: "printf hi".into(),
+            arguments: vec![],
+            created_at: 0,
+            authorization: Some(authorization),
+        };
+        let env = Envelope::new(
+            NetworkId::default(),
+            MessageType::Job,
+            2,
+            1,
+            bincode::serialize(&job).unwrap(),
+        );
+        assert!(dispatch_envelope(&node, env, Some(peer)).await.is_err());
+    }
+
+    // JH04: forwarding a Job must send it with the forwarding Sister as the
+    // transport sender, while the logical creator survives inside the payload.
+    #[test]
+    fn forwarding_uses_sender_identity_and_preserves_creator() {
+        let creator = misaka_core::JobData {
+            id: "job-j4".into(),
+            creator: 7,  // logical creator C
+            executor: 3, // intended executor B
+            creator_addr: "127.0.0.1:1".into(),
+            command: "printf hi".into(),
+            arguments: vec![],
+            created_at: 0,
+            authorization: None,
+        };
+        let data = bincode::serialize(&creator).unwrap();
+        // Sister A (id 1) forwards to B (id 3).
+        let forwarded = job_forward_envelope(NetworkId::default(), 1, 3, data.clone());
+        // Transport sender is A, not the creator C.
+        assert_eq!(forwarded.from, 1);
+        assert_eq!(forwarded.to, 3);
+        // Creator survives unchanged inside the payload.
+        let carried: misaka_core::JobData = bincode::deserialize(&forwarded.data).unwrap();
+        assert_eq!(carried.creator, 7);
+    }
+
+    // JH06: a JobSubmit authorization targeted to THIS node executes (accepted).
+    #[tokio::test]
+    async fn job_authorized_for_this_sister_is_accepted() {
+        let (node, authority_key) = node_with_authority();
+        let (peer, _key) = peer_two();
+        let authorization = job_authorization(&authority_key, Some(1)); // == node id
+        let job = misaka_core::JobData {
+            id: "job-ok".into(),
+            creator: 2,
+            executor: 1,
+            creator_addr: "127.0.0.1:1".into(),
+            command: "printf hi".into(),
+            arguments: vec![],
+            created_at: 0,
+            authorization: Some(authorization),
+        };
+        let env = Envelope::new(
+            NetworkId::default(),
+            MessageType::Job,
+            2,
+            1,
+            bincode::serialize(&job).unwrap(),
+        );
+        assert!(dispatch_envelope(&node, env, Some(peer)).await.is_ok());
     }
 
     // S06: a JobResponse for a job this Sister did not create must not resolve

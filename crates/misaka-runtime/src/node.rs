@@ -727,20 +727,27 @@ impl SisterNode {
         self.submit_job_authorized(command, None).await
     }
 
+    /// Run the scheduler and return the concrete executor for a network job
+    /// (self id if it chooses local). Exposed so a Human Authorization can be
+    /// bound to the chosen Sister *before* submission (§5).
+    pub async fn choose_executor(&self) -> u64 {
+        let peer_data = self.peers.all().await;
+        let local = { self.local_state.read().await.clone() };
+        let target = self.scheduler.choose(&peer_data, &local);
+        let creator = self.identity.id.as_u64();
+        match target {
+            Some(id) if id != creator => id,
+            _ => creator,
+        }
+    }
+
     pub async fn submit_job_authorized(
         &self,
         command: &str,
         authorization: Option<CommandAuthorization>,
     ) -> crate::Result<JobResultData> {
-        // 选目标
-        let peer_data = self.peers.all().await;
-        let local = { self.local_state.read().await.clone() };
-        let target = self.scheduler.choose(&peer_data, &local);
         let creator = self.identity.id.as_u64();
-        let executor = match target {
-            Some(id) if id != creator => id,
-            _ => creator,
-        };
+        let executor = self.choose_executor().await;
 
         if executor != creator {
             tracing::info!(

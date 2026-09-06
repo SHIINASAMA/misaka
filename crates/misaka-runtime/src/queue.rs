@@ -22,6 +22,15 @@ impl JobQueue {
         self.inner.lock().unwrap().pop_front()
     }
 
+    /// Remove and return the first job satisfying `predicate`, leaving all others
+    /// in order. Lets the work-stealing path take only jobs a requester is
+    /// actually allowed to run, without dequeuing (and losing) others.
+    pub fn pop_where(&self, predicate: impl Fn(&LocalJob) -> bool) -> Option<LocalJob> {
+        let mut queue = self.inner.lock().unwrap();
+        let index = queue.iter().position(predicate)?;
+        queue.remove(index)
+    }
+
     pub fn len(&self) -> usize {
         self.inner.lock().unwrap().len()
     }

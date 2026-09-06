@@ -57,3 +57,63 @@ connection, so multiple forwarded connections do not reuse a nonce.
 The no-human-material compatibility path remains available only through the
 explicit `--insecure-development` startup flag used by local Testament
 scenarios. It is not an authenticated deployment mode.
+
+## Job transport identity vs logical creator
+
+These three fields mean different things and must not be conflated:
+
+```text
+Envelope.from      = the Sister that authenticated and sent THIS stream (immediate transport sender)
+JobData.creator    = the Sister that originally created the Job (logical owner; survives forwarding)
+JobData.executor   = the Sister intended/currently expected to run the Job
+```
+
+When a Job is forwarded (e.g. C creates it, A relays to B, B runs it), the hop
+A→B sends `Envelope.from = A` — A is who authenticated that stream. It must NOT
+put C into `Envelope.from`; C did not authenticate A→B, and the authenticated
+control plane rejects a sender that disagrees with the authenticated peer. The
+logical creator C stays in `JobData.creator`. `JobData.creator` is never
+rewritten by forwarding. The result path keeps the same discipline: the executor
+B returns `Envelope.from = B`, `JobResultData.creator = C`,
+`JobResultData.executor = B`.
+
+## Production JobSubmit is always Sister-targeted
+
+A `JobSubmit` Human Authorization must name a concrete destination Sister:
+
+```text
+target = Some(Principal::Sister(executor))
+```
+
+`target = None` is no longer accepted for a remote production Job — it was
+effectively a Network-wide bearer capability for the command, and nonce
+replay-protection is per-Sister, so the same signed authorization could otherwise
+run on multiple Sisters. The CLI therefore resolves the executor (directed
+`--sister B`, or the scheduler for plain `misaka run`) BEFORE issuing the
+authorization, and binds it to that Sister.
+
+Enforcement at execution: a Sister runs a Human-authorized Job only if
+`permission == JobSubmit`, `target == Some(Sister(self))`, the authority
+signature/NetworkId are valid, the human membership is valid and not locally
+revoked, the exact `command=` constraint matches, and the nonce was not already
+consumed locally. A Job whose `target` names a DIFFERENT Sister is not executed
+here.
+
+An intermediate relay Sister verifies the authorization is signature- and
+Network-valid and that `target == Job.executor`, then forwards it unchanged
+WITHOUT consuming the nonce. Only the Sister that actually executes consumes the
+nonce. This preserves target binding without any re-signing.
+
+## Work stealing is target-respecting (temporary limitation)
+
+A Job authorized to Sister A is NOT stealable by Sister B: work stealing only
+hands a requester a Job whose authorization names that requester (or an
+unauthorized Job, when `--insecure-development` explicitly permits it). The
+queue is never corrupted — a Job the requester is not authorized for stays
+queued.
+
+This is an intentional, temporary limitation. It is preferable to silently
+granting broader authority. Cross-Sister Job execution — delegated authorization,
+authorization chains, a Sister re-signing a Human command, a scheduler-held
+authority, or Network-wide nonce state — is NOT implemented here and is a
+separate future design.

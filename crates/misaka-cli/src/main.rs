@@ -1568,27 +1568,35 @@ async fn async_main() -> Result<(), MisakaError> {
                 ..Default::default()
             };
             let node = SisterNode::new(identity, default_encryption_key(), config);
-            let authorization = if local {
-                None
-            } else {
-                load_cli_command_authorization(network_id, sister, &command)
-                    .map_err(MisakaError::Other)?
-            };
-
+            // §5: pick the concrete executor BEFORE issuing a Human
+            // Authorization, so the authorization is always bound to that Sister
+            // (never a target=None Network-wide bearer capability).
             if local {
                 println!("[Misaka] run --local: {}", command);
                 // 独立进程：不启动完整 runtime，直接同步执行并输出结果
                 let result = node.run_local_sync(&command).await;
                 print_result(&result);
-            } else if let Some(sid) = sister {
-                println!("[Misaka] run --sister #{}: {}", sid, command);
-                let result = node
-                    .submit_to_sister_authorized(sid, &command, authorization)
-                    .await?;
-                print_result(&result);
             } else {
-                println!("[Misaka] run (network): {}", command);
-                let result = node.submit_job_authorized(&command, authorization).await?;
+                // Directed (`--sister B`) or scheduler-chosen executor.
+                let executor = match sister {
+                    Some(sid) => sid,
+                    None => node.choose_executor().await,
+                };
+                if executor == node.identity.id.as_u64() {
+                    // Scheduler chose local (or no peer): run here, no remote
+                    // authorization needed.
+                    println!("[Misaka] run (local via scheduler): {}", command);
+                    let result = node.run_local_sync(&command).await;
+                    print_result(&result);
+                    return Ok(());
+                }
+                let authorization =
+                    load_cli_command_authorization(network_id, Some(executor), &command)
+                        .map_err(MisakaError::Other)?;
+                println!("[Misaka] run --sister #{executor}: {}", command);
+                let result = node
+                    .submit_to_sister_authorized(executor, &command, authorization)
+                    .await?;
                 print_result(&result);
             }
         }
