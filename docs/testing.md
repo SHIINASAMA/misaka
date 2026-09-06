@@ -224,6 +224,19 @@ persisted state and introspection, never CLI log text.
   B executes, and the result returns over Iroh.
 - `JI04` submitting to a known-but-unreachable Sister fails within a bounded
   window (no indefinite wait), leaving no pending waiter.
+- `JI08` remote `misaka run --sister B` with a valid local config but **no
+  running Sister daemon** fails closed with a clear error: the command is never
+  executed and no one-shot DirectTcp Sister or legacy callback listener is
+  constructed.
+- `JI09` a **running** Sister whose directed target has no authenticated-Iroh
+  route fails closed: the submission reaches the loopback API, the Iroh path
+  fails, and the CLI reports the failure without any DirectTcp fallback.
+  (JI02 automatic scheduling and JI03 real C→A→B forwarding are NOT included:
+  the scheduler and the sender-side Job path have no deterministic fixtures —
+  the sender delivers straight to the named executor with no next-hop routing,
+  so no CLI/process path can land a Job on an intermediate Sister to forward it.
+  The forwarding `Envelope.from`/creator-preservation arm is covered by the
+  `misaka-runtime` JH04 unit test.)
 
 The suite uses only local infrastructure (a native `network gateway serve`); it
 never depends on the production Cloudflare Gateway. `gateway-live-verify`

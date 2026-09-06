@@ -295,6 +295,9 @@ fn run_one(scenario: &str, json: bool) -> i32 {
     let mut ctx = Context::new(run_id, layout.clone());
     let Some(def) = scenarios()
         .into_iter()
+        .chain(enrollment_scenarios())
+        .chain(gateway_scenarios())
+        .chain(security_scenarios())
         .chain(network_scenarios())
         .chain(relay_scenarios())
         .find(|d| d.name == scenario)

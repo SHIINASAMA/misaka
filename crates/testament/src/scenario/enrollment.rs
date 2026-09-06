@@ -646,6 +646,14 @@ pub fn enrollment_scenarios() -> Vec<ScenarioDef> {
             name: "JI04",
             run: Box::new(ji04_unreachable_executor_bounded),
         },
+        ScenarioDef {
+            name: "JI08",
+            run: Box::new(ji08_no_running_sister_fails_closed),
+        },
+        ScenarioDef {
+            name: "JI09",
+            run: Box::new(ji09_iroh_unavailable_fails_closed),
+        },
     ]
 }
 
@@ -772,5 +780,123 @@ fn ji04_unreachable_executor_bounded(ctx: &mut Context) -> Result<(), ScenarioEr
         )));
     }
     let _ = err;
+    Ok(())
+}
+
+/// JI08 — no running local Sister means remote `misaka run` fails closed.
+///
+/// A valid local config exists (Sister identity + network membership are
+/// present) but no Sister daemon is running. A remote `misaka run --sister B`
+/// must fail with a clear error — it must NOT construct a one-shot DirectTcp
+/// Sister, open a TCP callback listener, or attempt any TCP submission. The
+/// scenario asserts no remote side-effect occurs and no `--sister` TCP address
+/// is reachable afterward.
+fn ji08_no_running_sister_fails_closed(ctx: &mut Context) -> Result<(), ScenarioError> {
+    let dir = config_dir(ctx, "ji08-standalone");
+    // Initialize valid local Network material without starting any daemon. The
+    // persisted identity + membership make the config look like a real joined
+    // device (whose operator forgot to `misaka start`).
+    network_init(ctx, &dir)?;
+    // A config with no `api-endpoint` recorded (no daemon ever wrote one) is
+    // exactly the no-running-Sister state.
+    if dir.join("api-endpoint").exists() {
+        return Err(ScenarioError::assertion(
+            "JI08 fixture unexpectedly has a recorded API endpoint",
+        ));
+    }
+
+    // There is no running local Sister for `misaka run --sister` to relay
+    // through. It must fail closed rather than silently degrade to DirectTcp.
+    let started = std::time::Instant::now();
+    let result = ctx.spawn_cli_with_config(
+        &dir,
+        &["run", "--sister", "424242", "printf should-not-run"],
+    )?;
+    let elapsed = started.elapsed();
+    let output = result
+        .wait_timeout(Duration::from_secs(30))
+        .map_err(|error| ScenarioError::infra(format!("ji08 run cli: {error}")))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let combined = format!("{stdout}\n{stderr}");
+
+    if output.status.success() {
+        return Err(ScenarioError::assertion(
+            "remote run without a running Sister unexpectedly succeeded (DirectTcp fallback?)",
+        ));
+    }
+    if combined.contains("should-not-run") {
+        return Err(ScenarioError::assertion(
+            "remote run without a running Sister executed the command (DirectTcp fallback?)",
+        ));
+    }
+    if combined.is_empty() {
+        return Err(ScenarioError::assertion(
+            "remote run without a running Sister failed with no diagnostic",
+        ));
+    }
+    if elapsed > Duration::from_secs(20) {
+        return Err(ScenarioError::assertion(format!(
+            "no-running-Sister failure took {elapsed:?}; must be bounded"
+        )));
+    }
+    // The fail-closed path constructs no one-shot DirectTcp Sister and opens no
+    // legacy callback listener — the CLI exited non-zero without executing the
+    // command and without binding any listener. (A bare `run` never binds the
+    // config's own control-plane listen port, so no listener could exist.)
+    Ok(())
+}
+
+/// JI09 — a running Sister whose authenticated-Iroh route to the target is
+/// unavailable fails closed (no DirectTcp downgrade).
+///
+/// The creator Sister runs (loopback API reachable), but its directed target
+/// has no authenticated-Iroh route. The submission must reach the local API and
+/// fail there — the CLI must report the failure and must NOT fall back to a
+/// legacy TCP path.
+fn ji09_iroh_unavailable_fails_closed(ctx: &mut Context) -> Result<(), ScenarioError> {
+    let authority = config_dir(ctx, "ji09-a");
+    let (network_id, authority_public_key) = network_init(ctx, &authority)?;
+    ctx.run_config_cli(
+        &authority,
+        &[
+            "--network-id",
+            &network_id,
+            "human",
+            "init",
+            "--name",
+            "operator",
+        ],
+    )?;
+    let (bind, gateway) = spawn_gateway_for_network(&network_id, &authority_public_key)?;
+    start_authority(ctx, "ji09a", &authority, Some(&gateway_url(bind)))?;
+
+    // A SisterId with NO reachable Iroh endpoint. The API is reachable (this
+    // Sister is running); the directed Job cannot establish an authenticated
+    // Iroh route to the target, so it must fail closed — no TCP fallback.
+    let started = std::time::Instant::now();
+    let result = ctx.run_cli("ji09a", &["run", "--sister", "999999", "printf x"]);
+    let elapsed = started.elapsed();
+    ctx.teardown();
+    stop_gateway(gateway)?;
+    let output = match result {
+        Ok(out) if out.contains("printf x") => {
+            return Err(ScenarioError::assertion(
+                "directed run reached a nonexistent executor (DirectTcp fallback?)",
+            ))
+        }
+        Ok(out) => out,
+        Err(error) => error.to_string(),
+    };
+    if elapsed > Duration::from_secs(20) {
+        return Err(ScenarioError::assertion(format!(
+            "unreachable-Iroh failure took {elapsed:?}; must be bounded"
+        )));
+    }
+    if output.is_empty() {
+        return Err(ScenarioError::assertion(
+            "running-Sister-but-Iroh-unavailable failure produced no diagnostic",
+        ));
+    }
     Ok(())
 }

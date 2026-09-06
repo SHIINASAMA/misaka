@@ -77,6 +77,16 @@ rewritten by forwarding. The result path keeps the same discipline: the executor
 B returns `Envelope.from = B`, `JobResultData.creator = C`,
 `JobResultData.executor = B`.
 
+Today a normal remote submission is delivered directly to the named executor
+(no next-hop routing: `submit_to_sister_authorized` sends straight to the
+executor's endpoint), so no CLI/process path produces a forwarding hop yet. The
+rules above are the contract a hop must honor WHEN one occurs: a received Job
+whose `executor` is a reachable different Sister is forwarded by the handler
+with `Envelope.from` = the forwarding Sister, the authorization verified without
+consuming the destination nonce. That arm is covered by the `misaka-runtime`
+JH04 forwarding-identity unit test; a real C→A→B E2E would need a sender-side
+routing capability (deferred).
+
 ## Production JobSubmit is always Sister-targeted
 
 A `JobSubmit` Human Authorization must name a concrete destination Sister:
