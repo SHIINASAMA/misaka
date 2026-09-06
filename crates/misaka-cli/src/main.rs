@@ -789,6 +789,15 @@ async fn async_main() -> Result<(), MisakaError> {
             let api_server = misaka_api::bind(runtime.handle(), api_addr)
                 .await
                 .map_err(|error| MisakaError::Other(error.to_string()))?;
+            // Record the bound loopback API address so a separate `misaka run`
+            // can route Jobs through this running Sister over authenticated Iroh
+            // (and so `misaka ps` can find it) even on an ephemeral `--api-port 0`.
+            if let Ok(dir) = IdentityStore::config_dir() {
+                let _ = std::fs::write(
+                    dir.join("api-endpoint"),
+                    api_server.local_addr().to_string(),
+                );
+            }
             let api_task = tokio::spawn(api_server.run(shutdown.token()));
             let result = runtime.run().await;
             signal_task.abort();
@@ -1568,6 +1577,25 @@ async fn async_main() -> Result<(), MisakaError> {
                 ..Default::default()
             };
             let node = SisterNode::new(identity, default_encryption_key(), config);
+            // Normal remote path: route through the running local Sister so the
+            // Job is submitted and returned over the authenticated Iroh control
+            // plane. A transient CLI Iroh endpoint would collide with the running
+            // Sister's identity, so the running Sister is the rendezvous. Only
+            // when no local Sister API is reachable do we fall back to the
+            // in-process DirectTcp compatibility path below (not a downgrade from
+            // a FAILED Iroh submission — that is reported as an error).
+            if !local {
+                match try_run_via_running_sister(&node.config.data_dir, &command, sister).await {
+                    RunAttempt::Printed(result) => {
+                        print_result(&result);
+                        return Ok(());
+                    }
+                    RunAttempt::Failed(message) => {
+                        return Err(MisakaError::Other(message));
+                    }
+                    RunAttempt::NoLocalSister => {}
+                }
+            }
             // §5: pick the concrete executor BEFORE issuing a Human
             // Authorization, so the authorization is always bound to that Sister
             // (never a target=None Network-wide bearer capability).
@@ -3719,6 +3747,86 @@ fn warn_if_open_public_relay(bind: SocketAddr, access: Option<&Path>, bootstrap:
              any endpoint may connect and consume bandwidth. Pass --relay-access-allowlist \
              (or an enrollment allowlist), or bind to loopback, to restrict it."
         );
+    }
+}
+
+/// Outcome of trying to run a Job through the running local Sister's API.
+enum RunAttempt {
+    /// The running Sister returned a Job result (normal authenticated Iroh path).
+    Printed(misaka_core::protocol::JobResultData),
+    /// The running Sister reported a failure (submit/timeout/error).
+    Failed(String),
+    /// No reachable local Sister API — caller may use the in-process compat path.
+    NoLocalSister,
+}
+
+/// Address of the running local Sister's loopback API: the address it recorded
+/// at startup (handles ephemeral `--api-port 0`), else the default 31702.
+fn running_sister_api_addr(data_dir: &Path) -> Option<SocketAddr> {
+    let value = std::fs::read_to_string(data_dir.join("api-endpoint")).ok()?;
+    let addr = value.trim().parse::<SocketAddr>().ok()?;
+    addr.ip().is_loopback().then_some(addr)
+}
+
+/// A minimal loopback HTTP POST (the Misaka API is loopback-only). Returns the
+/// status and response body, or `None` on any transport error (no Sister there).
+async fn http_post_json(
+    addr: SocketAddr,
+    path: &str,
+    body: &serde_json::Value,
+) -> Option<(u16, String)> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::time::timeout(
+        Duration::from_millis(1500),
+        tokio::net::TcpStream::connect(addr),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    let body = body.to_string();
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        stream.write_all(request.as_bytes()).await.ok()?;
+        stream.flush().await.ok()?;
+        let mut bytes = Vec::new();
+        stream.read_to_end(&mut bytes).await.ok()?;
+        let text = String::from_utf8(bytes).ok()?;
+        let (head, resp_body) = text.split_once("\r\n\r\n")?;
+        let status = head.split_whitespace().nth(1)?.parse::<u16>().ok()?;
+        Some((status, resp_body.to_string()))
+    })
+    .await
+    .ok()?
+}
+
+async fn try_run_via_running_sister(
+    data_dir: &Path,
+    command: &str,
+    sister: Option<u64>,
+) -> RunAttempt {
+    let Some(addr) = running_sister_api_addr(data_dir) else {
+        return RunAttempt::NoLocalSister;
+    };
+    let body = serde_json::json!({ "command": command, "sister": sister });
+    let Some((status, resp)) = http_post_json(addr, "/api/v1/jobs", &body).await else {
+        return RunAttempt::NoLocalSister;
+    };
+    if (200..300).contains(&status) {
+        match serde_json::from_str(&resp) {
+            Ok(result) => RunAttempt::Printed(result),
+            Err(error) => RunAttempt::Failed(format!("malformed job response: {error}")),
+        }
+    } else {
+        // Distinguish "no such running Sister" from a real job failure by the
+        // status; a 502 from the API is a genuine submit/result error.
+        let message = serde_json::from_str::<serde_json::Value>(&resp)
+            .ok()
+            .and_then(|v| v["error"].as_str().map(|s| s.to_string()))
+            .unwrap_or(resp);
+        RunAttempt::Failed(format!("job via running Sister failed: {message}"))
     }
 }
 

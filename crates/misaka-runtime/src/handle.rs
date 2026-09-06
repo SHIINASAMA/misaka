@@ -49,6 +49,19 @@ impl SisterHandle {
     fn ping_envelope(network_id: NetworkId, from: u64, to: u64) -> Envelope {
         Envelope::new(network_id, MessageType::Ping, from, to, vec![])
     }
+
+    /// Submit a Job as the running Sister: resolve the executor (directed or
+    /// scheduler-chosen), issue a target-bound Human Authorization from local
+    /// material, and carry it over the authenticated Iroh control plane. The
+    /// eventual `JobResultData` is returned (submission and result are distinct;
+    /// the caller of the HTTP endpoint awaits until result or timeout).
+    pub async fn submit_job(
+        &self,
+        command: &str,
+        sister: Option<u64>,
+    ) -> Result<misaka_core::protocol::JobResultData> {
+        self.node.submit_job_remote(command, sister).await
+    }
 }
 
 #[cfg(test)]

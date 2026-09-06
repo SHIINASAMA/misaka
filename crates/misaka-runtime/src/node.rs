@@ -14,7 +14,8 @@ use crate::stream_registry::StreamRegistry;
 use misaka_core::introspection::{IntrospectionSnapshot, ResourceSnapshot};
 use misaka_core::protocol::*;
 use misaka_core::{
-    CommandAuthorization, IrohEndpointId, NetworkId, PeerRecord, PeerState, SisterIdentity,
+    CommandAuthorization, IrohEndpointId, NetworkId, PeerRecord, PeerState, Principal,
+    SisterIdentity,
 };
 use misaka_network::NetworkEndpoint;
 use std::net::SocketAddr;
@@ -739,6 +740,101 @@ impl SisterNode {
             Some(id) if id != creator => id,
             _ => creator,
         }
+    }
+
+    /// Build a target-bound JobSubmit Human Authorization from the local
+    /// operator material (human identity/key/membership + Network authority) in
+    /// this Sister's data dir, mirroring the CLI. Returns `None` when no human
+    /// material is present (compatibility / local execution). The authorization
+    /// is always bound to `target` — never `target = None` (§14).
+    pub fn build_job_submit_authorization(
+        &self,
+        target: u64,
+        command: &str,
+    ) -> crate::Result<Option<CommandAuthorization>> {
+        use crate::human_identity_store::HumanIdentityStore;
+        use crate::revocation_store::RevocationStore;
+        let dir = &self.config.data_dir;
+        let network_id = self.config.network_id;
+        let human = HumanIdentityStore::load(dir)
+            .map_err(|error| crate::Error::Other(error.to_string()))?;
+        let human_key = HumanIdentityStore::load_key(dir)
+            .map_err(|error| crate::Error::Other(error.to_string()))?;
+        let membership = HumanIdentityStore::load_membership(dir)
+            .map_err(|error| crate::Error::Other(error.to_string()))?;
+        if human.is_none() && human_key.is_none() && membership.is_none() {
+            return Ok(None);
+        }
+        let (Some(human), Some(human_key), Some(membership)) = (human, human_key, membership)
+        else {
+            return Err(crate::Error::Protocol(
+                "human authorization requires human-identity.json, human-identity-key, and human-membership.bin"
+                    .to_string(),
+            ));
+        };
+        let authority = crate::network_authority_store::NetworkAuthorityStore::load(dir)
+            .map_err(|error| crate::Error::Other(error.to_string()))?
+            .ok_or_else(|| {
+                crate::Error::Protocol("human authorization requires network.json".to_string())
+            })?;
+        let now = now_secs();
+        if authority.network_id != network_id
+            || membership.human != human
+            || !membership.verify(&authority, now)
+            || human_key.public_key() != human.public_key
+        {
+            return Err(crate::Error::Protocol(
+                "local human identity or membership is invalid".to_string(),
+            ));
+        }
+        if RevocationStore::is_revoked(
+            dir,
+            &authority,
+            network_id,
+            misaka_core::MembershipKind::Human,
+            membership.serial,
+        )
+        .map_err(|error| crate::Error::Other(error.to_string()))?
+        {
+            return Err(crate::Error::Protocol(
+                "local Human membership has been revoked".to_string(),
+            ));
+        }
+        Ok(Some(CommandAuthorization::issue(
+            network_id,
+            human,
+            membership.clone(),
+            membership.role,
+            misaka_core::Permission::JobSubmit,
+            Some(Principal::Sister(misaka_core::SisterId(target))),
+            vec![format!("command={command}")],
+            now,
+            now.saturating_add(300),
+            rand::random(),
+            &human_key,
+        )))
+    }
+
+    /// Resolve the executor (directed or scheduler-chosen), issue a target-bound
+    /// authorization, and submit — the single entry point the loopback API uses
+    /// so a running Sister submits over authenticated Iroh (§3/§5).
+    pub async fn submit_job_remote(
+        &self,
+        command: &str,
+        sister: Option<u64>,
+    ) -> crate::Result<JobResultData> {
+        let creator = self.identity.id.as_u64();
+        let executor = match sister {
+            Some(sid) => sid,
+            None => self.choose_executor().await,
+        };
+        if executor == creator {
+            // Scheduler chose local (or directed at self): run here, no auth.
+            return Ok(self.execute_and_record(&new_job_id(), command).await);
+        }
+        let authorization = self.build_job_submit_authorization(executor, command)?;
+        self.submit_to_sister_authorized(executor, command, authorization)
+            .await
     }
 
     pub async fn submit_job_authorized(

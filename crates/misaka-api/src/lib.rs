@@ -4,6 +4,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use misaka_core::introspection::{IntrospectionSnapshot, PeerSnapshot};
+use misaka_core::protocol::JobResultData;
 use misaka_runtime::{ShutdownToken, SisterHandle};
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};
@@ -116,6 +117,7 @@ pub fn router(handle: SisterHandle) -> Router {
         .route("/api/v1/sisters", get(sisters))
         .route("/api/v1/sisters/{id}", get(sister))
         .route("/api/v1/streams", get(streams))
+        .route("/api/v1/jobs", post(submit_job))
         .route("/api/v1/sisters/{id}/ping", post(ping))
         .with_state(handle)
 }
@@ -213,6 +215,31 @@ async fn streams(
             .map(StreamResponse::from)
             .collect(),
     ))
+}
+
+/// Body of `POST /api/v1/jobs`: submit a Job through the running Sister over the
+/// authenticated Iroh control plane. `sister` selects a directed executor; omit
+/// it for scheduler-chosen execution.
+#[derive(Debug, Deserialize)]
+pub struct JobSubmitRequest {
+    pub command: String,
+    #[serde(default)]
+    pub sister: Option<u64>,
+}
+
+async fn submit_job(
+    State(handle): State<SisterHandle>,
+    Json(request): Json<JobSubmitRequest>,
+) -> Result<Json<JobResultData>, ApiError> {
+    let result = handle
+        .submit_job(&request.command, request.sister)
+        .await
+        .map_err(|error| {
+            // A submission/routing failure is reported distinctly from a
+            // successful-but-no-result timeout (whose message says "timed out").
+            ApiError::new(StatusCode::BAD_GATEWAY, error.to_string())
+        })?;
+    Ok(Json(result))
 }
 
 async fn ping(
@@ -350,6 +377,23 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(streams.status(), StatusCode::OK);
+
+        let job = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/jobs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "command": "printf j", "sister": 999 }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // The route is registered (it attempts the job; #999 is unknown so it is
+        // reported as a submit/routing failure, not a 404 method-not-allowed).
+        assert_ne!(job.status(), StatusCode::NOT_FOUND);
+        let _ = to_bytes(job.into_body(), 4096).await.unwrap();
 
         let ping = app
             .oneshot(
