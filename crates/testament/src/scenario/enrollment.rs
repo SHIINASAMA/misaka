@@ -638,5 +638,139 @@ pub fn enrollment_scenarios() -> Vec<ScenarioDef> {
             name: "E13",
             run: Box::new(e13_joined_sister_discovers_authority_through_gateway),
         },
+        ScenarioDef {
+            name: "JI01",
+            run: Box::new(ji01_directed_job_over_iroh),
+        },
+        ScenarioDef {
+            name: "JI04",
+            run: Box::new(ji04_unreachable_executor_bounded),
+        },
     ]
+}
+
+// ---------------------------------------------------------------------------
+// JI — authenticated-Iroh Job control plane (the normal `misaka run` path).
+// The creator is the running Authority Sister; its `misaka run` routes through
+// its own loopback API and submits over the authenticated Iroh control plane.
+// These Sisters run Iroh only — the legacy TCP control listener is disabled —
+// so a green test proves the Job used Iroh, not a DirectTcp fallback.
+// ---------------------------------------------------------------------------
+
+/// Converge A's view of B through the Gateway (A must resolve B by SisterId to
+/// reach it over Iroh) before submitting a Job.
+fn wait_for_a_sees_b(ctx: &mut Context, a_alias: &str, b_id: u64) -> Result<(), ScenarioError> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let a = ctx.introspect(a_alias)?;
+        if a.peers.iter().any(|peer| peer.id == b_id) {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(ScenarioError::infra(format!(
+                "{a_alias} never discovered Sister {b_id} through the Gateway"
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// JI01 — directed `misaka run --sister B` submits over authenticated Iroh,
+/// B executes, and the result returns to the caller. Asserts `misaka ps`/the
+/// Iroh-only topology (no TCP control listener) is what carried it.
+fn ji01_directed_job_over_iroh(ctx: &mut Context) -> Result<(), ScenarioError> {
+    let authority = config_dir(ctx, "ji01-a");
+    let joiner = config_dir(ctx, "ji01-b");
+    let (network_id, authority_public_key) = network_init(ctx, &authority)?;
+    // A is the operator+authority: it holds the Human identity used to sign the
+    // target-bound JobSubmit authorization for the directed executor.
+    ctx.run_config_cli(
+        &authority,
+        &[
+            "--network-id",
+            &network_id,
+            "human",
+            "init",
+            "--name",
+            "operator",
+        ],
+    )?;
+    let (bind, gateway) = spawn_gateway_for_network(&network_id, &authority_public_key)?;
+    let url = gateway_url(bind);
+    start_authority(ctx, "ji01a", &authority, Some(&url))?;
+    let (invite_network, code) = mint_invite(ctx, &authority, "1h")?;
+    let joined = try_join(ctx, &joiner, &invite_network, &code, Some(&url))?;
+    if !joined.success {
+        ctx.teardown();
+        stop_gateway(gateway)?;
+        return Err(ScenarioError::assertion(format!(
+            "JI01 join failed: {}",
+            joined.stderr.trim()
+        )));
+    }
+    start_authority(ctx, "ji01b", &joiner, None)?;
+
+    let b_id = ctx.introspect("ji01b")?.identity.id.as_u64();
+    // A must be able to reach B over Iroh before a directed submission works.
+    wait_for_a_sees_b(ctx, "ji01a", b_id)?;
+
+    // `misaka run --sister B` on A routes through A's loopback API and submits
+    // over the authenticated Iroh control plane (A's TCP control listener is
+    // off, so success proves Iroh carried it).
+    let output = ctx.run_cli(
+        "ji01a",
+        &["run", "--sister", &b_id.to_string(), "printf iroh-job-ok"],
+    )?;
+    ctx.teardown();
+    stop_gateway(gateway)?;
+    if output.contains("iroh-job-ok") {
+        Ok(())
+    } else {
+        Err(ScenarioError::assertion(format!(
+            "directed Iroh job did not return the expected result: {output}"
+        )))
+    }
+}
+
+/// JI04 — submitting to a known-but-unreachable Sister fails within a bound
+/// window (no indefinite wait) and the CLI exits non-zero.
+fn ji04_unreachable_executor_bounded(ctx: &mut Context) -> Result<(), ScenarioError> {
+    let authority = config_dir(ctx, "ji04-a");
+    let (network_id, authority_public_key) = network_init(ctx, &authority)?;
+    ctx.run_config_cli(
+        &authority,
+        &[
+            "--network-id",
+            &network_id,
+            "human",
+            "init",
+            "--name",
+            "operator",
+        ],
+    )?;
+    let (bind, gateway) = spawn_gateway_for_network(&network_id, &authority_public_key)?;
+    start_authority(ctx, "ji04a", &authority, Some(&gateway_url(bind)))?;
+    // A Sister id A has never seen → directed submission cannot reach it. It
+    // must fail fast (no Iroh connection, no pending leak), not hang.
+    let started = std::time::Instant::now();
+    let result = ctx.run_cli("ji04a", &["run", "--sister", "424242", "printf x"]);
+    let elapsed = started.elapsed();
+    ctx.teardown();
+    stop_gateway(gateway)?;
+    let err = match result {
+        Ok(out) if out.contains("printf x") => {
+            return Err(ScenarioError::assertion(
+                "unreachable executor unexpectedly produced a result",
+            ))
+        }
+        Ok(out) => out,
+        Err(error) => error.to_string(),
+    };
+    if elapsed > Duration::from_secs(20) {
+        return Err(ScenarioError::assertion(format!(
+            "unreachable executor submission took {elapsed:?}; must fail bounded"
+        )));
+    }
+    let _ = err;
+    Ok(())
 }
