@@ -1,5 +1,9 @@
 # Contributor and Agent Guide
 
+> **If you are resuming this repository after a pause, read
+> `docs/HANDOFF.md` first** — it records the unpushed commits, the work that
+> was in flight, and the deliberately-open design items at the last pause.
+
 ## Scope
 
 Keep Misaka Network decentralized: every runtime node is a Sister, and no component may introduce a master/slave role. Preserve the dependency direction:
