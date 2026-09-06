@@ -521,7 +521,7 @@ mod direct_tcp {
     }
 
     async fn client_handshake(stream: &mut TcpStream, network_id: NetworkId) -> Result<()> {
-        let mut request = [0u8; HANDSHAKE_LEN];
+        let mut request = [0u8; super::HANDSHAKE_LEN];
         request[..MAGIC.len()].copy_from_slice(MAGIC);
         request[MAGIC.len()] = PROTOCOL_VERSION;
         request[MAGIC.len() + 1..].copy_from_slice(network_id.as_bytes());
@@ -541,7 +541,7 @@ mod direct_tcp {
         let request = read_handshake(stream).await?;
         validate_handshake(&request)?;
         validate_network_id(&request, network_id)?;
-        let mut response = [0u8; HANDSHAKE_LEN];
+        let mut response = [0u8; super::HANDSHAKE_LEN];
         response[..MAGIC.len()].copy_from_slice(MAGIC);
         response[MAGIC.len()] = PROTOCOL_VERSION;
         response[MAGIC.len() + 1..].copy_from_slice(network_id.as_bytes());
@@ -555,7 +555,7 @@ mod direct_tcp {
     }
 
     async fn read_handshake(stream: &mut TcpStream) -> Result<[u8; HANDSHAKE_LEN]> {
-        let mut handshake = [0u8; HANDSHAKE_LEN];
+        let mut handshake = [0u8; super::HANDSHAKE_LEN];
         stream
             .read_exact(&mut handshake)
             .await
@@ -849,6 +849,12 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
+            // Read the client's request before replying and closing, so the
+            // socket shuts down cleanly (FIN) rather than RST-ing on a platform
+            // (Windows) that discards the still-buffered reply when unread peer
+            // data is outstanding at close. Mirrors the real server_handshake.
+            let mut request = [0u8; super::HANDSHAKE_LEN];
+            stream.read_exact(&mut request).await.unwrap();
             stream.write_all(b"NOT_MISAKA!!\x01").await.unwrap();
         });
 
@@ -863,6 +869,11 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
+            // Drain the request first (see invalid_magic_is_rejected) so the
+            // bad-version reply is actually delivered to the client on every
+            // platform instead of being lost to a Windows RST-on-close.
+            let mut request = [0u8; super::HANDSHAKE_LEN];
+            stream.read_exact(&mut request).await.unwrap();
             let mut handshake = [0u8; 13 + 1 + 16];
             handshake[..13].copy_from_slice(b"MISAKA_STREAM");
             handshake[13] = 0x7f;
