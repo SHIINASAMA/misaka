@@ -218,6 +218,12 @@ persisted state and introspection, never CLI log text.
   and forms the authenticated Iroh connection (both directions converge); and
   `misaka ps` reports the Iroh peer as `online` (liveness probes the authenticated
   Iroh control plane, since the default Iroh backend disables the legacy TCP listener).
+- `JI01` directed `misaka run --sister B` over the running Sister's loopback API
+  and the authenticated Iroh control plane (the Sisters are Iroh-only — the legacy
+  TCP control listener is disabled — so a green run proves the Job used Iroh),
+  B executes, and the result returns over Iroh.
+- `JI04` submitting to a known-but-unreachable Sister fails within a bounded
+  window (no indefinite wait), leaving no pending waiter.
 
 The suite uses only local infrastructure (a native `network gateway serve`); it
 never depends on the production Cloudflare Gateway. `gateway-live-verify`

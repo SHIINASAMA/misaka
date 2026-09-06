@@ -117,3 +117,33 @@ granting broader authority. Cross-Sister Job execution — delegated authorizati
 authorization chains, a Sister re-signing a Human command, a scheduler-held
 authority, or Network-wide nonce state — is NOT implemented here and is a
 separate future design.
+
+## Job control transport: authenticated Iroh
+
+The normal Job control path runs over the authenticated Iroh control plane, not
+the legacy TCP control listener:
+
+```text
+misaka run  →  loopback API of the RUNNING local Sister (POST /api/v1/jobs)
+           →  target-bound Human Authorization built from local material
+           →  authenticated Iroh control channel  →  target Sister
+           →  optional forwarding (each hop keeps Envelope.from = that hop's sender)
+           →  executor runs it
+           →  JobResponse returns over authenticated Iroh to the owning Sister
+           →  the loopback API resolves and the CLI prints the result
+```
+
+- The one-shot `misaka run` is short-lived and is NOT the Iroh rendezvous — it
+  delegates to the running Sister (which owns the stable Iroh endpoint, peer
+  table, pending result, and local Human identity). A transient CLI Iroh endpoint
+  would collide with the running Sister's own identity, so it is not used. The
+  running Sister records its loopback API address in `api-endpoint`.
+- If no running local Sister is reachable, `misaka run` falls back to the
+  in-process **DirectTcp** path (compatibility/debug only). A FAILED Iroh
+  submission is reported as an error and never silently downgrades to TCP.
+- `JobData.creator_addr` is legacy DirectTcp callback metadata; the Iroh path
+  ignores it and routes the result by the creator's SisterId over the
+  authenticated control channel. No security decision depends on it.
+- `JobResponse` is asynchronous relative to submission. The caller bounded-waits
+  on a result timeout; a timeout means "submitted, result unknown", never "did
+  not run". There is no exactly-once execution guarantee.
