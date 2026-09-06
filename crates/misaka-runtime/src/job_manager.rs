@@ -245,6 +245,31 @@ mod tests {
         assert!(receiver.await.is_err());
     }
 
+    // JI07 / JI06: a pending waiter resolves at most once; a duplicate result or
+    // a late result after cancel is ignored (no panic, no double-resolve).
+    #[test]
+    fn pending_resolves_once_ignores_duplicate_and_late() {
+        let manager = JobManager::new();
+        let _rx = manager.reserve_pending("job");
+        // First result resolves it (removes the waiter).
+        assert!(manager.resolve_pending("job").is_some());
+        // Duplicate: nothing left to resolve.
+        assert!(manager.resolve_pending("job").is_none());
+        // Late after an explicit cancel: still no waiter, no panic.
+        let _rx = manager.reserve_pending("late");
+        manager.cancel_pending("late");
+        assert!(manager.resolve_pending("late").is_none());
+    }
+
+    // §11: a submission that fails before delivery must not leak a waiter.
+    #[test]
+    fn cancel_removes_pending_waiter() {
+        let manager = JobManager::new();
+        let _rx = manager.reserve_pending("sub");
+        manager.cancel_pending("sub");
+        assert!(manager.resolve_pending("sub").is_none());
+    }
+
     // JH05 / §8 / §9: work stealing must respect the authorization target.
     #[tokio::test]
     async fn pop_transferable_respects_authorization_target() {

@@ -74,36 +74,57 @@ pub(crate) async fn run(node: &SisterNode) -> crate::Result<()> {
                 "queued job execution finished"
             );
 
-            // 远端委派来的任务：回送结果给 creator
+            // Return the result to the logical creator for a remotely-delegated
+            // job. The transport used depends on the control plane in use.
             if job.creator != node.identity.id.as_u64() {
-                if let Some(creator_addr) = job.creator_addr {
-                    if let Ok(addr) = creator_addr.parse::<SocketAddr>() {
-                        let env = misaka_core::Envelope::new(
-                            node.config.network_id,
-                            misaka_core::MessageType::JobResponse,
-                            node.identity.id.as_u64(),
-                            job.creator,
-                            bincode::serialize(&job_result)?,
+                let iroh = matches!(
+                    &node.config.stream_backend,
+                    crate::config::StreamBackend::Iroh(_)
+                );
+                let env = misaka_core::Envelope::new(
+                    node.config.network_id,
+                    misaka_core::MessageType::JobResponse,
+                    // § transport identity: `from` is THIS Sister (the actual
+                    // sender/executor); the logical creator stays in
+                    // `job_result.creator`.
+                    node.identity.id.as_u64(),
+                    job.creator,
+                    bincode::serialize(&job_result)?,
+                );
+                if iroh {
+                    // Normal path: reach the creator over the authenticated Iroh
+                    // control channel by SisterId. `creator_addr` is legacy
+                    // DirectTcp callback metadata and is intentionally NOT used
+                    // here — an Iroh delivery failure must NOT silently downgrade
+                    // to a TCP callback to an unauthenticated address. The caller
+                    // simply times out and must treat the command as "submitted,
+                    // result unknown", never "not executed".
+                    if let Err(error) = node.send_fire_to_peer(job.creator, &env).await {
+                        tracing::warn!(
+                            event = "job_result_route_unreachable",
+                            job_id = %job.id,
+                            creator = job.creator,
+                            executor = node.identity.id.as_u64(),
+                            %error,
+                            "could not return job result over Iroh; the caller will time out (command may still have executed)"
                         );
-                        let delivered = if matches!(
-                            &node.config.stream_backend,
-                            crate::config::StreamBackend::Iroh(_)
-                        ) {
-                            node.send_fire_to_peer(job.creator, &env).await
-                        } else {
-                            // The standalone `run --sister` command owns a
-                            // temporary response listener. Direct TCP must
-                            // preserve that callback address rather than
-                            // sending the result to the long-running Sister.
-                            node.send_fire(addr, &env).await
-                        };
-                        if delivered.is_err()
-                            && matches!(
-                                &node.config.stream_backend,
-                                crate::config::StreamBackend::Iroh(_)
-                            )
-                        {
+                    }
+                } else {
+                    // DirectTcp compatibility: use the creator's callback address.
+                    match job
+                        .creator_addr
+                        .as_ref()
+                        .and_then(|addr| addr.parse::<SocketAddr>().ok())
+                    {
+                        Some(addr) => {
                             let _ = node.send_fire(addr, &env).await;
+                        }
+                        None => {
+                            tracing::warn!(
+                                event = "job_result_route_missing_addr",
+                                job_id = %job.id,
+                                "DirectTcp job has no usable creator callback address"
+                            );
                         }
                     }
                 }
