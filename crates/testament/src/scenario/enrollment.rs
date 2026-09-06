@@ -741,7 +741,8 @@ fn ji01_directed_job_over_iroh(ctx: &mut Context) -> Result<(), ScenarioError> {
 }
 
 /// JI04 — submitting to a known-but-unreachable Sister fails within a bound
-/// window (no indefinite wait) and the CLI exits non-zero.
+/// window (no indefinite wait), the CLI exits non-zero with a real diagnostic,
+/// no legacy TCP path was attempted, and no Job leaks onto the running Sister.
 fn ji04_unreachable_executor_bounded(ctx: &mut Context) -> Result<(), ScenarioError> {
     let authority = config_dir(ctx, "ji04-a");
     let (network_id, authority_public_key) = network_init(ctx, &authority)?;
@@ -758,17 +759,21 @@ fn ji04_unreachable_executor_bounded(ctx: &mut Context) -> Result<(), ScenarioEr
     )?;
     let (bind, gateway) = spawn_gateway_for_network(&network_id, &authority_public_key)?;
     start_authority(ctx, "ji04a", &authority, Some(&gateway_url(bind)))?;
-    // A Sister id A has never seen → directed submission cannot reach it. It
-    // must fail fast (no Iroh connection, no pending leak), not hang.
+    // A Sister id A has never seen → directed submission cannot reach it over
+    // the authenticated Iroh control plane. It must fail fast (no Iroh
+    // connection, no pending leak), not hang or downgrade to a TCP path.
     let started = std::time::Instant::now();
     let result = ctx.run_cli("ji04a", &["run", "--sister", "424242", "printf x"]);
     let elapsed = started.elapsed();
+    // After the failure the running Sister must hold no queued/running Job: the
+    // command never executed anywhere and the pending waiter was cleaned up.
+    let snapshot = ctx.introspect("ji04a")?;
     ctx.teardown();
     stop_gateway(gateway)?;
-    let err = match result {
+    let diagnostic = match result {
         Ok(out) if out.contains("printf x") => {
             return Err(ScenarioError::assertion(
-                "unreachable executor unexpectedly produced a result",
+                "unreachable executor unexpectedly produced a result (DirectTcp fallback?)",
             ))
         }
         Ok(out) => out,
@@ -779,7 +784,22 @@ fn ji04_unreachable_executor_bounded(ctx: &mut Context) -> Result<(), ScenarioEr
             "unreachable executor submission took {elapsed:?}; must fail bounded"
         )));
     }
-    let _ = err;
+    if diagnostic.trim().is_empty() {
+        return Err(ScenarioError::assertion(
+            "unreachable executor failure produced no diagnostic",
+        ));
+    }
+    let leaked = snapshot
+        .jobs
+        .iter()
+        .any(|job| job.command.contains("printf x"));
+    if leaked || snapshot.queue_depth != 0 {
+        return Err(ScenarioError::assertion(format!(
+            "unreachable executor submission leaked state onto the running Sister (jobs={}, queue_depth={})",
+            snapshot.jobs.len(),
+            snapshot.queue_depth
+        )));
+    }
     Ok(())
 }
 
