@@ -850,7 +850,6 @@ impl SisterNode {
                 event = "job_submitted",
                 sister_id = self.identity.id.as_u64(),
                 executor,
-                command = %command,
                 "job submitted to peer"
             );
         }
@@ -875,13 +874,13 @@ impl SisterNode {
     /// run -l 子命令专用：把任务塞进本地队列即可。
     pub async fn submit_local(&self, command: &str) -> crate::Result<()> {
         let job_id = new_job_id();
-        let mut job = LocalJob::new(job_id, command.to_string());
+        let mut job = LocalJob::new(job_id.clone(), command.to_string());
         job.creator = self.identity.id.as_u64();
         self.jobs.enqueue(job).await;
         tracing::info!(
             event = "job_created",
             sister_id = self.identity.id.as_u64(),
-            command = %command,
+            job_id = %job_id,
             "local job queued"
         );
         Ok(())
@@ -990,11 +989,13 @@ impl SisterNode {
     /// 在本地执行并记录任务状态，返回结果
     async fn execute_and_record(&self, job_id: &str, command: &str) -> JobResultData {
         let started = now_secs();
-        self.jobs.mark_running(job_id, started).await;
+        let mut job = LocalJob::new(job_id.to_string(), command.to_string());
+        job.creator = self.identity.id.as_u64();
+        self.jobs.start_inline(job, started).await;
         tracing::info!(
             event = "job_started",
             sister_id = self.identity.id.as_u64(),
-            command = %command,
+            job_id = %job_id,
             "job execution started"
         );
         let result = crate::executor::execute_blocking(command.to_string()).await;
@@ -1019,7 +1020,7 @@ impl SisterNode {
                 job_id = %job_id,
                 success = true,
                 exit_code = result.exit_code,
-                output = %result.full_output(),
+                output_bytes = job_result.output.len(),
                 "local job finished"
             );
         } else {
@@ -1029,7 +1030,7 @@ impl SisterNode {
                 job_id = %job_id,
                 success = false,
                 exit_code = result.exit_code,
-                output = %result.full_output(),
+                output_bytes = job_result.output.len(),
                 "local job failed"
             );
         }
@@ -1339,6 +1340,65 @@ fn merge_gateway_candidate(
             }
         })
         .or_insert(record);
+}
+
+#[cfg(test)]
+mod local_job_tests {
+    use super::SisterNode;
+    use crate::config::{DiscoveryMode, RuntimeConfig};
+    use misaka_core::{JobStatus, SisterIdentity};
+
+    #[tokio::test]
+    async fn inline_entry_points_record_results_without_queueing_duplicate_work() {
+        let config = RuntimeConfig {
+            data_dir: std::env::temp_dir().join(format!("misaka-inline-{}", uuid::Uuid::new_v4())),
+            discovery: DiscoveryMode::Off,
+            ..Default::default()
+        };
+        let identity = SisterIdentity::new(
+            42,
+            "local".into(),
+            "host".into(),
+            "test".into(),
+            "0.1".into(),
+            0,
+        );
+        let node = SisterNode::new(identity, [0u8; 32], config);
+        // Keep scheduler selection deterministic without sampling host load.
+        node.local_state.write().await.cpu_usage = 0.0;
+
+        let local = node.run_local_sync("echo inline-result").await;
+        let scheduled = node
+            .submit_job_remote("echo inline-result", None)
+            .await
+            .unwrap();
+        let directed = node.submit_job_remote("exit 7", Some(42)).await.unwrap();
+
+        assert_eq!(local.output.trim(), "inline-result");
+        assert_eq!(scheduled.output.trim(), "inline-result");
+        assert_eq!(directed.exit_code, 7);
+
+        for (result, expected_status) in [
+            (local, JobStatus::Completed),
+            (scheduled, JobStatus::Completed),
+            (directed, JobStatus::Failed),
+        ] {
+            let recorded = node.jobs.job(&result.job_id).await.unwrap();
+            assert_eq!(recorded.creator, 42);
+            assert_eq!(recorded.status, expected_status);
+            assert_eq!(recorded.started_at, Some(result.started_at));
+            assert_eq!(recorded.finished_at, Some(result.finished_at));
+            assert_eq!(
+                recorded.result_output.as_deref(),
+                Some(result.output.as_str())
+            );
+        }
+        assert_eq!(node.jobs.job_snapshots().await.len(), 3);
+        assert_eq!(node.jobs.count_running().await, 0);
+        assert_eq!(node.jobs.count_queued().await, 0);
+        assert!(node.jobs.pop().is_none());
+        assert!(!node.jobs.is_busy().await);
+    }
 }
 
 #[cfg(test)]

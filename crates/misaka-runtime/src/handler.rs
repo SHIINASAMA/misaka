@@ -308,7 +308,7 @@ pub(crate) async fn dispatch_envelope(
             // 本机执行
             let job_id = job.id.clone();
             let full_cmd = job.full_command();
-            let mut local_job = crate::state::LocalJob::new(job_id.clone(), full_cmd.clone());
+            let mut local_job = crate::state::LocalJob::new(job_id.clone(), full_cmd);
             local_job.creator = job.creator;
             local_job.creator_addr = Some(job.creator_addr.clone());
             local_job.authorization = job.authorization;
@@ -318,7 +318,6 @@ pub(crate) async fn dispatch_envelope(
                 sister_id = node.identity.id.as_u64(),
                 job_id = %job_id,
                 creator = job.creator,
-                command = %full_cmd,
                 "job queued"
             );
         }

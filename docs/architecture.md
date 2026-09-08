@@ -55,7 +55,7 @@ peer/job state.
   and identity-derived peer recording. It does not own network transport;
   `SisterNode` keeps the wire operation boundary.
 - **`JobManager`**: owns `JobQueue`, `LocalJob` metadata, status transitions,
-  and pending remote-result waiters. `enqueue`, `mark_running`,
+  and pending remote-result waiters. `enqueue`, `start_inline`, `mark_running`,
   `mark_transferred`, `mark_finished`, and pending-result methods are the only
   state operations used by protocol and worker services.
 - **`Scheduler`**: remains stateless. It receives snapshots and returns an
@@ -196,16 +196,31 @@ peer with queued work for one job. A successful transfer changes source
 metadata to `transferred` and removes the job from its source queue; failed
 sends requeue it.
 
-Remote results return to the creator using the creator's advertised address.
-The standalone `misaka run` command is a short-lived client: it reconstructs
-peer addresses from persisted peer knowledge, submits a job, and waits for a
-response. It is not a second runtime or a network authority.
+Inline local execution registers a running job with `JobManager::start_inline`
+before starting the command, then records its completed or failed result. It
+does not enter the worker queue, so it cannot be executed again by the queue
+consumer or handed to a work-stealing requester. These jobs participate in
+busy checks, introspection and resource-count refreshes. Metadata remains
+in-memory and has no durable recovery or retention limit.
+
+The scheduler rejects invalid CPU samples and peers at or above 85% load.
+It keeps the existing CPU-gap and queue-backlog policy; equal CPU values are
+ordered by SisterId so peer enumeration order cannot change the choice.
+
+Normal remote `misaka run` is a short-lived client of the running Sister's
+loopback API. That Sister resolves the executor, creates a target-bound Human
+authorization and submits over authenticated Iroh; the result returns over
+Iroh to the creator. A missing daemon or failed Iroh route fails closed.
+DirectTcp callback addressing is retained only for the explicitly selected
+compatibility backend. `misaka run --local` still executes locally.
 
 ## Observability
 
 Runtime events use `tracing`, with human output by default and JSON output for
 Testament. Stable event fields include `event`, `sister_id`, `peer_id`, and
-`job_id` where applicable. Logs are diagnostic only.
+`job_id` where applicable. Job lifecycle events omit command text and output
+payloads; completion events include `output_bytes`. Command results returned
+to the CLI/API retain their full output. Logs are diagnostic only.
 
 Introspection returns a read-only JSON snapshot containing identity, resource
 counters, peer snapshots, job metadata, and queue depth. It has no mutation

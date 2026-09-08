@@ -40,7 +40,6 @@ pub(crate) async fn run(node: &SisterNode) -> crate::Result<()> {
                 event = "job_started",
                 sister_id = node.identity.id.as_u64(),
                 job_id = %job.id,
-                command = %job.command,
                 "queued job execution started"
             );
             // Do not select away from a running blocking command: finish and
@@ -70,7 +69,7 @@ pub(crate) async fn run(node: &SisterNode) -> crate::Result<()> {
                 job_id = %job.id,
                 success = result.success(),
                 exit_code = result.exit_code,
-                output = %result.full_output(),
+                output_bytes = job_result.output.len(),
                 "queued job execution finished"
             );
 

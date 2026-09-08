@@ -49,10 +49,12 @@ validity, role permission, exact constraint list, and local revocation list
 before opening the destination file or remote TCP connection. A successful
 authorized operation consumes its nonce in `used-command-nonces.json`.
 
-Transfer v2 carries the same authorization on Prepare, Chunk, and Finalize
-requests; only Prepare consumes the nonce because those requests are one
-logical transfer. Tunnel and SSH issue a fresh authorization for every local
-connection, so multiple forwarded connections do not reuse a nonce.
+The CLI issues fresh short-lived authorizations for Transfer v2 Prepare,
+Chunk, and Finalize requests so a long transfer does not reuse an expired
+grant. The receiver validates authorization on each request; only Prepare
+records its nonce. Chunk and Finalize do not independently consume nonces.
+Tunnel and SSH issue a fresh authorization for every local connection, so
+multiple forwarded connections do not reuse a nonce.
 
 The no-human-material compatibility path remains available only through the
 explicit `--insecure-development` startup flag used by local Testament
@@ -148,12 +150,30 @@ misaka run  →  loopback API of the RUNNING local Sister (POST /api/v1/jobs)
   table, pending result, and local Human identity). A transient CLI Iroh endpoint
   would collide with the running Sister's own identity, so it is not used. The
   running Sister records its loopback API address in `api-endpoint`.
-- If no running local Sister is reachable, `misaka run` falls back to the
-  in-process **DirectTcp** path (compatibility/debug only). A FAILED Iroh
-  submission is reported as an error and never silently downgrades to TCP.
+- If no running local Sister is reachable, remote `misaka run` fails closed.
+  A failed Iroh submission is reported as an error and never silently
+  downgrades to TCP or constructs a one-shot Sister. Explicit `--local`
+  execution remains available.
 - `JobData.creator_addr` is legacy DirectTcp callback metadata; the Iroh path
   ignores it and routes the result by the creator's SisterId over the
   authenticated control channel. No security decision depends on it.
 - `JobResponse` is asynchronous relative to submission. The caller bounded-waits
   on a result timeout; a timeout means "submitted, result unknown", never "did
   not run". There is no exactly-once execution guarantee.
+
+## Local submission boundary
+
+The loopback API accepts command submissions without authenticating the local
+caller. A self-targeted or scheduler-local command runs as the daemon's OS
+user; a remote command uses the daemon's local Human material to sign the
+request. Loopback binding does not isolate users on a shared host. Deployments
+must currently trust processes that can reach this API. Per-caller API
+authentication is a separate compatibility change, not a property of the
+Human signatures created after a request is accepted.
+
+Command execution uses the host shell without a sandbox, execution deadline,
+or output quota. The remote-result timeout only bounds waiting for a result;
+it does not terminate the command. Task diagnostics record IDs, status, exit
+codes and output byte counts, without the command text or output payload.
+Command text remains available through local introspection and task metadata,
+and command output remains in the result returned to the caller.

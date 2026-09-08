@@ -46,7 +46,18 @@ Open the Vite URL, normally `http://127.0.0.1:5173/`. The Vite server proxies `/
 /settings          Local API and hosting boundary
 ```
 
-The v0 API exposes only read-only network views and the side-effect-free `Ping Sister` action. It does not expose keys, membership material, authorization tokens, file operations, SSH, tunnels, or settings mutation.
+The console uses read-only network views and the side-effect-free `Ping Sister`
+action. The backend API also exposes `POST /api/v1/jobs` for the CLI to submit
+commands through the running Sister; the console does not currently provide a
+job-submission screen. The API does not expose keys, membership material,
+authorization tokens, file operations, SSH, tunnels, or settings mutation.
+
+The job endpoint has no local-caller authentication. It executes local jobs as
+the daemon's OS user and signs remote jobs with its local Human material.
+Loopback restricts network reachability, but does not separate local users or
+processes. Use this API only where those callers are trusted; do not publish it
+through a proxy. See [human-authorization-v0.md](human-authorization-v0.md)
+for the current execution and authorization boundaries.
 
 ## Build the frontend
 

@@ -42,6 +42,14 @@ impl JobManager {
         self.queue.push(job);
     }
 
+    /// Register work already owned by an inline executor. It must be visible
+    /// to introspection and busy checks without also entering the worker queue.
+    pub(crate) async fn start_inline(&self, mut job: LocalJob, started_at: u64) {
+        job.status = JobStatus::Running;
+        job.started_at = Some(started_at);
+        self.jobs.write().await.insert(job.id.clone(), job);
+    }
+
     pub fn pop(&self) -> Option<LocalJob> {
         self.queue.pop()
     }
@@ -227,6 +235,31 @@ mod tests {
         let finished = manager.job("one").await.unwrap();
         assert_eq!(finished.status, JobStatus::Completed);
         assert_eq!(finished.result_output.as_deref(), Some("output"));
+    }
+
+    #[tokio::test]
+    async fn inline_job_is_visible_without_becoming_queue_work() {
+        let manager = JobManager::new();
+        let mut inline = job("inline");
+        inline.creator = 42;
+        manager.start_inline(inline, 10).await;
+
+        assert_eq!(manager.count_running().await, 1);
+        assert_eq!(manager.count_queued().await, 0);
+        assert!(manager.is_busy().await);
+        assert!(manager.pop().is_none());
+        assert!(manager.pop_transferable(7, true).is_none());
+        let running = manager.job("inline").await.unwrap();
+        assert_eq!(running.creator, 42);
+        assert_eq!(running.started_at, Some(10));
+
+        manager.mark_finished("inline", &result("inline", true)).await;
+        assert_eq!(manager.count_running().await, 0);
+        assert!(!manager.is_busy().await);
+        assert_eq!(
+            manager.job("inline").await.unwrap().status,
+            JobStatus::Completed
+        );
     }
 
     #[tokio::test]

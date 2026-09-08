@@ -1,12 +1,33 @@
 # Misaka Network — Handoff / Pause Record
 
-> **Status: PAUSED (not abandoned).** Last activity: 2026-09-06 (local).
+> **Status: LOCAL CHANGES — static review only.** Last activity: 2026-09-08 (local).
 > This file is the entry point for the next engineer/agent resuming the project.
 > It captures what was in flight when work paused, what is deliberately open,
 > and how to verify the tree is still healthy. It is a snapshot, not a spec:
 > for design detail read the per-topic docs listed below.
 
-## 0. State at pause — read this first
+## Current update — 2026-09-08
+
+The user requested compatibility-focused improvements after a code assessment,
+without running tests or builds. The current uncommitted changes:
+
+- Register inline local jobs as running before execution, without enqueueing
+  duplicate work; retain completed/failed metadata and existing command output.
+- Remove command text and output payloads from job lifecycle diagnostics.
+- Break equal-CPU scheduling ties by SisterId and reject invalid CPU samples.
+- Correct the API, remote-run, Transfer v2 authorization and lifecycle docs.
+- Add regression test code for local job bookkeeping and scheduler choices.
+
+No protocol, CLI flag, config format, dependency or deployment changes. These
+edits have only been statically reviewed; the earlier green results below do
+not validate this patch. No commit, push or deployment was requested.
+
+At the start of this work, HEAD was `df67d59` and matched the local
+`origin/main` reference (no fetch was performed). The three commits below are
+therefore no longer locally ahead. API caller authentication, execution
+limits, persistent jobs and the design items in §3 remain open.
+
+## 0. Historical pause snapshot — 2026-09-06
 
 | Item | Value |
 | --- | --- |
@@ -26,10 +47,10 @@
 4bfd725 fix(cli): fail-closed remote run; relay honors the running Sister's job timeout
 ```
 
-**First action for whoever resumes:** decide whether to `git push origin main`.
-Pushing `main` triggers the `cloudflare-gateway.yml` workflow (deploys the
-Cloudflare Gateway after all gates pass). The user has historically authorized
-this; confirm before pushing.
+This was the push decision at the historical pause. Recheck current Git state
+before any future submission. Pushing `main` triggers the
+`cloudflare-gateway.yml` deployment workflow; the current optimization request
+does not authorize a push or deployment.
 
 ### Headline change of the paused work (already green locally)
 
