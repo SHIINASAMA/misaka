@@ -52,12 +52,21 @@ commands through the running Sister; the console does not currently provide a
 job-submission screen. The API does not expose keys, membership material,
 authorization tokens, file operations, SSH, tunnels, or settings mutation.
 
-The job endpoint has no local-caller authentication. It executes local jobs as
-the daemon's OS user and signs remote jobs with its local Human material.
-Loopback restricts network reachability, but does not separate local users or
-processes. Use this API only where those callers are trusted; do not publish it
-through a proxy. See [human-authorization-v0.md](human-authorization-v0.md)
-for the current execution and authorization boundaries.
+The API is authenticated with the machine-local **local control token**: every
+`/api/v1/*` route requires `Authorization: Bearer <token>`, and the Vite dev
+proxy reads `MISAKA_CONFIG_DIR/local-control-token` **server-side** and injects
+the header. The browser never receives or persists the token, and the API is
+never weakened to keep the console working. A single unauthenticated
+`GET /healthz` returns `{"status":"ok"}` for liveness; there is no browser
+login, OAuth, cookies, or session management in v1.
+
+The API remains loopback-only, and it executes local jobs as the daemon's OS
+user / signs remote jobs with its local Human material. The control token
+protects against other local users/processes that cannot read the owner's
+config files; it does not defend against same-user malware. Do not publish the
+API through a proxy. See [deployment-v1.md](deployment-v1.md) for the token and
+threat model, and [human-authorization-v0.md](human-authorization-v0.md) for
+the execution and authorization boundaries.
 
 ## Build the frontend
 

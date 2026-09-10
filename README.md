@@ -158,6 +158,27 @@ MISAKA_CONFIG_DIR=.testament/runs/<run-id>/sisters/s1/config \
 Run the black-box operator checks with `testament operator-verify`.
 
 
+## Running as a service (per-user)
+
+`misaka start` runs a foreground Sister. For a persistent setup use a per-user
+service (macOS LaunchAgent / Linux `systemd --user`; **no root**):
+
+```bash
+misaka service install                          # loopback-only (the default)
+misaka service install --advertise-host <lan-ip>     # LAN direct
+misaka service install --iroh-relay https://relay.example.com   # own relay
+misaka service status --json
+misaka doctor            # bounded, local, non-destructive deployment checks
+misaka version --json    # binary + state-layout + protocol versions
+```
+
+The loopback API is authenticated with a machine-local control token
+(`MISAKA_CONFIG_DIR/local-control-token`, 0600); the CLI attaches it
+automatically and the Vite dev proxy injects it server-side. Installing a
+service never exposes a Sister beyond loopback unless you pass an explicit
+connectivity switch. See [docs/deployment-v1.md](docs/deployment-v1.md).
+
+
 ## Verification
 
 ```bash

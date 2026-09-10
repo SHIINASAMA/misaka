@@ -314,10 +314,42 @@ failure.
   `.testament/runs/live-<id>/`; the live Gateway's `peers` directory is **not**
   mutated beyond the two test records, which expire on the Gateway's TTL.
 
+## Local control, state layout, service generators
+
+Deterministic unit coverage for the deployment foundation (no live
+launchd/systemd required in CI):
+
+- **Local control auth** (`misaka-api`, `misaka-runtime`): missing token → 401;
+  wrong token → 401; correct token → success; malformed `Authorization` → 401
+  with the same generic body; token persists across reload; a malformed token
+  file is rejected, not regenerated; the token file is `0600`; distinct config
+  dirs get distinct tokens; `/healthz` is public and minimal.
+- **Real CLI control path** (`enrollment-verify` JI01): a running Sister +
+  generated token + `misaka run --sister B` over authenticated Iroh returns the
+  result, and a raw unauthenticated `POST /api/v1/jobs` returns 401 and does
+  not execute. JI04/JI08/JI09 fail-closed behavior is unchanged.
+- **Runtime marker** (`misaka-runtime`): `runtime.json` roundtrips (loopback
+  endpoint + binary version), is removed only by its owning `instance_id`, and
+  a malformed marker is an error.
+- **State layout** (`misaka-runtime`, SL01–SL06): create v1, adopt legacy,
+  too-new fails closed, failed migration does not advance the version, adoption
+  never rewrites (even malformed) secret files.
+- **Version semantics** (`misaka`): an old persisted `identity.version` is
+  overridden by the running binary version; `misaka version --json` parses and
+  separates binary / protocol / state-layout versions.
+- **Service generators** (`misaka`): plist/unit content (absolute executable,
+  `MISAKA_CONFIG_DIR`, restart-on-failure, no token), deterministic labels,
+  name validation, and safe `service run` argv (no insecure/test flags).
+- **Doctor** (`misaka`): Gateway-without-connectivity warning, URL parsing,
+  permission checks, healthy aggregation.
+
+`misaka doctor --network` performs bounded opt-in reachability checks and is
+not part of normal CI. Live service installation (launchd/systemd) is an
+operator-only manual procedure (see `docs/deployment-v1.md`), never CI.
+
 ## CI gate
 
 The baseline gate is:
-
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings

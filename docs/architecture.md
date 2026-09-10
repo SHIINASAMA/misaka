@@ -303,11 +303,19 @@ revocation propagation remains an explicit open item (see below).
 
 ## Trust and execution boundaries (current)
 
-- The loopback API has **no per-caller local authentication**. Any local
-  process that can reach it is currently trusted.
+- The loopback API requires the machine-local **local control token**
+  (`local-control-token`, 0600): every `/api/v1/*` route needs
+  `Authorization: Bearer <token>`, and one unauthenticated `/healthz` exposes
+  only liveness. Loopback is a network boundary, not a local-user authorization
+  boundary; the token is that boundary. It is independent of Sister/Human/
+  Authority credentials. See [deployment-v1.md](deployment-v1.md).
 - Host command execution is **not sandboxed**, has **no execution deadline**,
   and has **no output quota**. A Job-result timeout bounds only how long the
   caller waits for a result; it does not terminate the command.
+- A persistent Sister runs as a per-user service (`misaka service`), and the
+  default network posture (loopback-only, relay disabled) is preserved: a
+  service is reachable beyond loopback only with an explicit `--advertise-host`
+  or `--iroh-relay` at install time. `misaka doctor` diagnoses the deployment.
 
 ## Current open architecture items
 
@@ -316,11 +324,14 @@ maintaining their own:
 
 1. Network-wide revocation propagation (revocation is currently local-only).
 2. Canonical Sister identity / `SisterId` uniqueness (see Identity status).
-3. Local loopback API caller authentication.
-4. Execution limits: command deadline, output quota, and an optional future
+3. Execution limits: command deadline, output quota, and an optional future
    sandbox boundary.
-5. Resource abstraction (not designed yet).
-6. Ability abstraction (not designed yet).
+4. Resource abstraction (not designed yet).
+5. Ability abstraction (not designed yet).
+
+(Local loopback API authentication is no longer open: the local control token
+authenticates every `/api/v1/*` call. See
+[deployment-v1.md](deployment-v1.md).)
 
 Job-specific items that are intentionally deferred — **not** current
 implementation goals unless separately selected:
@@ -342,7 +353,7 @@ docs/architecture.md        (this document)
         ↓
 current subsystem docs      (identity, membership, human-authorization,
                              authenticated-session, gateway, relay,
-                             network-knowledge, jobs/testing, …)
+                             network-knowledge, jobs/testing, deployment-v1, …)
         ↓
 historical design/planning records   (clearly marked "Historical design record")
 ```
