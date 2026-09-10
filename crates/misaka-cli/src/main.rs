@@ -818,6 +818,10 @@ async fn async_main() -> Result<(), MisakaError> {
             // logged or passed on a command line.
             let control_dir = IdentityStore::config_dir()
                 .map_err(|error| MisakaError::Other(error.to_string()))?;
+            // State layout gate: create/adopt the layout, and FAIL CLOSED on a
+            // newer unsupported layout before touching any persisted state.
+            misaka_runtime::state_layout::StateLayout::open(&control_dir)
+                .map_err(|error| MisakaError::Other(format!("state layout: {error}")))?;
             let local_control_token =
                 misaka_runtime::local_control_token_store::LocalControlTokenStore::load_or_init(
                     &control_dir,
