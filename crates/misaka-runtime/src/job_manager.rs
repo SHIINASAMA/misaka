@@ -253,7 +253,9 @@ mod tests {
         assert_eq!(running.creator, 42);
         assert_eq!(running.started_at, Some(10));
 
-        manager.mark_finished("inline", &result("inline", true)).await;
+        manager
+            .mark_finished("inline", &result("inline", true))
+            .await;
         assert_eq!(manager.count_running().await, 0);
         assert!(!manager.is_busy().await);
         assert_eq!(
