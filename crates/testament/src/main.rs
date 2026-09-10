@@ -110,6 +110,15 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Opt-in LIVE per-user service check (NOT in CI). Installs a temporary,
+    /// uniquely named service in an isolated config dir, verifies the
+    /// authenticated local API, restarts, stops, uninstalls, and confirms the
+    /// identity survives. Never touches ~/.misaka.
+    #[command(name = "service-verify")]
+    ServiceVerify {
+        #[arg(long)]
+        json: bool,
+    },
     /// Run the Operator UX v1 black-box smoke suite (O01-O07).
     #[command(name = "operator-verify")]
     OperatorVerify,
@@ -163,6 +172,13 @@ fn main() {
         Command::SecurityVerify { json } => {
             verify_definitions(json, security_scenarios(), "security scenarios")
         }
+        Command::ServiceVerify { json } => match testament::service_verify::run(json) {
+            Ok(code) => code,
+            Err(error) => {
+                eprintln!("service-verify: {error}");
+                2
+            }
+        },
         Command::GatewayVerify { json } => {
             verify_definitions(json, gateway_scenarios(), "gateway scenarios")
         }

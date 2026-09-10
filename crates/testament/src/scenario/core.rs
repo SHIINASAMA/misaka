@@ -54,6 +54,10 @@ pub fn scenarios() -> Vec<ScenarioDef> {
             name: "T13_graceful_stop",
             run: Box::new(t13_graceful_stop),
         },
+        ScenarioDef {
+            name: "T14_runtime_marker",
+            run: Box::new(t14_runtime_marker),
+        },
     ]
 }
 
@@ -511,6 +515,93 @@ fn t13_graceful_stop(ctx: &mut Context) -> Result<(), ScenarioError> {
 
     // Logs are diagnostic only; the real OS exit code is the authoritative
     // graceful-stop contract because introspection is unavailable after exit.
+    ctx.stop_and_forget("s1")?;
+    Ok(())
+}
+
+/// T14 — the ephemeral runtime marker: created after the API binds (with a
+/// loopback endpoint and the current binary version), removed by its owning
+/// process on graceful shutdown, and detected as stale when left behind.
+fn t14_runtime_marker(ctx: &mut Context) -> Result<(), ScenarioError> {
+    ctx.start_sister("s1", "railgun", &[])?;
+    let config = PathBuf::from(
+        ctx.entries
+            .get("s1")
+            .ok_or_else(|| ScenarioError::infra("no s1 entry"))?
+            .config_dir
+            .clone(),
+    );
+    let marker = config.join("runtime.json");
+
+    let raw = std::fs::read_to_string(&marker).map_err(|error| {
+        ScenarioError::assertion(format!("runtime.json missing after start: {error}"))
+    })?;
+    let json: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|error| ScenarioError::assertion(format!("runtime.json is not JSON: {error}")))?;
+    let endpoint = json
+        .get("api_endpoint")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| ScenarioError::assertion("runtime.json has no api_endpoint"))?;
+    let addr: std::net::SocketAddr = endpoint.parse().map_err(|error| {
+        ScenarioError::assertion(format!("api_endpoint is not an address: {error}"))
+    })?;
+    if !addr.ip().is_loopback() {
+        return Err(ScenarioError::assertion(format!(
+            "runtime.json endpoint is not loopback: {addr}"
+        )));
+    }
+    let reported = json
+        .get("binary_version")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let version_out = ctx.run_cli("s1", &["version", "--json"])?;
+    let version_json: serde_json::Value = serde_json::from_str(&version_out).map_err(|error| {
+        ScenarioError::assertion(format!("version --json unparseable: {error}"))
+    })?;
+    let binary = version_json
+        .get("binary_version")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    if binary.is_empty() || reported != binary {
+        return Err(ScenarioError::assertion(format!(
+            "runtime.json binary_version {reported:?} does not match the binary {binary:?}"
+        )));
+    }
+
+    // Graceful shutdown removes the marker the exiting process owns.
+    let status = ctx.terminate_sister("s1")?;
+    if status.code() != Some(0) {
+        return Err(ScenarioError::assertion(
+            "graceful stop exit code was not 0",
+        ));
+    }
+    if marker.exists() {
+        return Err(ScenarioError::assertion(
+            "runtime.json survived a graceful shutdown",
+        ));
+    }
+
+    // A stale marker (dead pid) must be tolerated and reported by doctor.
+    let stale = serde_json::json!({
+        "schema_version": 1,
+        "instance_id": "stale",
+        "pid": 999_999u32,
+        "started_at": 0,
+        "api_endpoint": "127.0.0.1:1",
+        "api_result_timeout_secs": 60,
+        "binary_version": "0.0.0-stale"
+    });
+    std::fs::write(&marker, serde_json::to_vec_pretty(&stale).unwrap())
+        .map_err(|error| ScenarioError::infra(format!("write stale marker: {error}")))?;
+    let doctor = ctx.run_cli("s1", &["doctor", "--json"])?;
+    if !doctor.contains("stale") {
+        return Err(ScenarioError::assertion(format!(
+            "doctor did not report the stale runtime marker: {doctor}"
+        )));
+    }
+
+    let _ = std::fs::remove_file(&marker);
     ctx.stop_and_forget("s1")?;
     Ok(())
 }

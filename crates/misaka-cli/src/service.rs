@@ -371,6 +371,11 @@ pub struct ServiceStatus {
     pub installed_binary_version: Option<String>,
     pub running_daemon_version: Option<String>,
     pub api_endpoint: Option<String>,
+    /// Whether the authenticated local control API responded. `None` = not
+    /// probed (no marker / unreachable).
+    pub api_authenticated: Option<bool>,
+    /// Service-manager running + authenticated local API responding.
+    pub healthy: bool,
 }
 
 pub fn install(request: InstallRequest) -> Result<(), MisakaError> {
@@ -500,6 +505,31 @@ fn lifecycle(name: &str, action: &str) -> Result<(), MisakaError> {
     Ok(())
 }
 
+/// What the OS service manager currently reports for a profile, or `None` when
+/// no manager is available / the query fails.
+pub fn manager_state(name: &str) -> Option<String> {
+    let manager = ServiceManager::detect().ok()?;
+    match manager {
+        ServiceManager::Launchd => {
+            let output = run_argv(&launchd_status_argv(&manager.label(name))).ok()?;
+            Some(if output.status.success() {
+                "running".to_string()
+            } else {
+                "stopped".to_string()
+            })
+        }
+        ServiceManager::Systemd => {
+            let output = run_argv(&systemd_argv("is-active", &manager.label(name))).ok()?;
+            let state = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            Some(if state.is_empty() {
+                "unknown".to_string()
+            } else {
+                state
+            })
+        }
+    }
+}
+
 pub fn start(name: &str) -> Result<(), MisakaError> {
     lifecycle(name, "start")
 }
@@ -512,7 +542,7 @@ pub fn restart(name: &str) -> Result<(), MisakaError> {
     lifecycle(name, "restart")
 }
 
-pub fn status(name: &str, json: bool) -> Result<(), MisakaError> {
+pub async fn status(name: &str, json: bool) -> Result<(), MisakaError> {
     validate_name(name).map_err(MisakaError::Other)?;
     let manager = ServiceManager::detect().map_err(MisakaError::Other)?;
     let config_dir = crate::IdentityStore::config_dir()
@@ -520,30 +550,28 @@ pub fn status(name: &str, json: bool) -> Result<(), MisakaError> {
     let definition = manager.definition_path(name).map_err(MisakaError::Other)?;
     let config = ServiceConfigStore::load(&config_dir).map_err(MisakaError::Other)?;
     let installed = definition.exists();
-    let running = match manager {
-        ServiceManager::Launchd => match run_argv(&launchd_status_argv(&manager.label(name))) {
-            Ok(output) if output.status.success() => "running".to_string(),
-            Ok(_) => "stopped".to_string(),
-            Err(_) => "unknown".to_string(),
-        },
-        ServiceManager::Systemd => {
-            match run_argv(&systemd_argv("is-active", &manager.label(name))) {
-                Ok(output) => String::from_utf8_lossy(&output.stdout).trim().to_string(),
-                Err(_) => "unknown".to_string(),
-            }
-        }
-    };
+    let running = manager_state(name).unwrap_or_else(|| "unknown".to_string());
     let instance = misaka_runtime::runtime_instance_store::RuntimeInstanceStore::load(&config_dir)
         .ok()
         .flatten();
+
+    // Preferred health model: service manager says running AND the
+    // authenticated local API responds. Bounded (see probe_local_control).
+    let mut api_authenticated = None;
+    if let Some(instance) = &instance {
+        if let Ok(addr) = instance.api_endpoint.parse::<std::net::SocketAddr>() {
+            api_authenticated = Some(matches!(
+                crate::probe_local_control(addr, &config_dir).await,
+                Ok(200)
+            ));
+        }
+    }
+    let healthy = installed && running == "running" && api_authenticated == Some(true);
+
     let report = ServiceStatus {
         name: name.to_string(),
         installed,
-        running: if running.is_empty() {
-            "unknown".to_string()
-        } else {
-            running
-        },
+        running,
         config_dir: config_dir.to_string_lossy().to_string(),
         executable: config
             .as_ref()
@@ -555,6 +583,8 @@ pub fn status(name: &str, json: bool) -> Result<(), MisakaError> {
             .map(|binary| binary.version.clone()),
         running_daemon_version: instance.as_ref().map(|i| i.binary_version.clone()),
         api_endpoint: instance.as_ref().map(|i| i.api_endpoint.clone()),
+        api_authenticated,
+        healthy,
     };
     if json {
         println!(
@@ -566,6 +596,7 @@ pub fn status(name: &str, json: bool) -> Result<(), MisakaError> {
         println!("service:   {} ({})", report.name, manager.label(name));
         println!("installed: {}", if report.installed { "yes" } else { "no" });
         println!("running:   {}", report.running);
+        println!("healthy:   {}", if report.healthy { "yes" } else { "no" });
         println!("config:    {}", report.config_dir);
         if let Some(executable) = &report.executable {
             println!("executable: {executable}");
@@ -581,7 +612,10 @@ pub fn status(name: &str, json: bool) -> Result<(), MisakaError> {
             }
         }
         if let Some(endpoint) = &report.api_endpoint {
-            println!("local API: {endpoint}");
+            println!(
+                "local API: {endpoint} (authenticated: {})",
+                report.api_authenticated.unwrap_or(false)
+            );
         }
     }
     Ok(())

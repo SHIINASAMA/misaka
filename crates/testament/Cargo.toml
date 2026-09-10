@@ -12,5 +12,6 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 clap.workspace = true
+uuid.workspace = true
 rcgen.workspace = true
 reqwest = { workspace = true, features = ["blocking"] }

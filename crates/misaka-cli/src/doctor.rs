@@ -175,6 +175,35 @@ pub async fn run(json: bool, network: bool) -> Result<(), MisakaError> {
         Err(error) => doctor.error("local-control-token", error.to_string()),
     }
 
+    // permissions: the config dir must not be group/other-writable, and the
+    // identity/secret files must be owner-only.
+    let mut broad = Vec::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(metadata) = std::fs::metadata(&dir) {
+            if metadata.permissions().mode() & 0o022 != 0 {
+                broad.push("config directory is group/other-writable".to_string());
+            }
+        }
+    }
+    for secret in [
+        "sister-identity-key",
+        "iroh-stream-key.bin",
+        "network-authority-key",
+        "human-identity-key",
+    ] {
+        let path = dir.join(secret);
+        if path.exists() && !permissions_are_tight(&path, 0o600) {
+            broad.push(format!("{secret} is not 0600"));
+        }
+    }
+    if broad.is_empty() {
+        doctor.ok("permissions", "config dir and secrets are owner-only");
+    } else {
+        doctor.warn("permissions", broad.join("; "));
+    }
+
     // Sister identity + key
     let identity = match misaka_runtime::identity_store::IdentityStore::load() {
         Ok(Some(identity)) => {
@@ -239,6 +268,14 @@ pub async fn run(json: bool, network: bool) -> Result<(), MisakaError> {
                 }
                 Ok(None) => {} // ordinary Sister: no authority key, expected
                 Err(error) => doctor.error("authority-owner-key", error.to_string()),
+            }
+            // Authority owner only: the membership-serial allocator must be
+            // readable (an unreadable allocator blocks new member issuance).
+            if dir.join("network-authority-key").exists() {
+                match misaka_runtime::membership_serial_store::MembershipSerialStore::open(&dir) {
+                    Ok(_) => doctor.ok("membership-serial-store", "allocator readable"),
+                    Err(error) => doctor.warn("membership-serial-store", error.to_string()),
+                }
             }
             Some(authority)
         }
@@ -425,6 +462,31 @@ pub async fn run(json: bool, network: bool) -> Result<(), MisakaError> {
                         if !path.exists() {
                             doctor.warn("service-definition", "definition file is missing");
                         }
+                    }
+                    // Service-manager process state, cross-checked against the
+                    // runtime marker so a crashed/stale daemon is visible.
+                    let state = crate::service::manager_state(&service_config.name);
+                    let marker_present =
+                        misaka_runtime::runtime_instance_store::RuntimeInstanceStore::load(&dir)
+                            .ok()
+                            .flatten()
+                            .is_some();
+                    match state.as_deref() {
+                        Some("running") if marker_present => {
+                            doctor.ok("service-state", "service manager reports running")
+                        }
+                        Some("running") => doctor.warn(
+                            "service-state",
+                            "service manager reports running but there is no runtime marker",
+                        ),
+                        Some("stopped" | "inactive" | "failed") if marker_present => doctor.warn(
+                            "service-state",
+                            "a daemon marker exists but the service manager reports it stopped",
+                        ),
+                        Some(other) => {
+                            doctor.warn("service-state", format!("service manager reports {other}"))
+                        }
+                        None => doctor.skip("service-state", "service manager unavailable"),
                     }
                 }
             } else {

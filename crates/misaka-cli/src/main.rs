@@ -1635,7 +1635,7 @@ pub(crate) async fn dispatch(cli: Cli) -> Result<(), MisakaError> {
             ServiceCommand::Start { name } => service::start(&name)?,
             ServiceCommand::Stop { name } => service::stop(&name)?,
             ServiceCommand::Restart { name } => service::restart(&name)?,
-            ServiceCommand::Status { name, json } => service::status(&name, json)?,
+            ServiceCommand::Status { name, json } => service::status(&name, json).await?,
             ServiceCommand::Uninstall { name } => service::uninstall(&name)?,
         },
 

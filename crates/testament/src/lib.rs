@@ -17,6 +17,7 @@ pub mod operator;
 pub mod reporter;
 pub mod run_manager;
 pub mod scenario;
+pub mod service_verify;
 pub mod smoke;
 pub mod supervisor;
 pub mod types;

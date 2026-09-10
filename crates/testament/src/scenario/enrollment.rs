@@ -732,30 +732,45 @@ fn ji01_directed_job_over_iroh(ctx: &mut Context) -> Result<(), ScenarioError> {
 
     // §49: an unauthenticated local caller must be rejected, and its command
     // must not run. POST /api/v1/jobs with no Authorization header → 401.
-    if let Ok(raw) = std::fs::read_to_string(authority.join("api-endpoint")) {
-        if let Ok(api_addr) = raw.trim().parse::<std::net::SocketAddr>() {
-            let sentinel = ctx.layout.root.join("ji01-unauth-sentinel");
-            let body = serde_json::json!({
-                "command": format!("touch {}", sentinel.display())
-            })
-            .to_string();
-            let response = unauthenticated_post(api_addr, "/api/v1/jobs", &body);
-            if !response.contains("401") {
-                ctx.teardown();
-                stop_gateway(gateway)?;
-                return Err(ScenarioError::assertion(format!(
-                    "unauthenticated POST /api/v1/jobs was not rejected with 401: {response}"
-                )));
-            }
-            if sentinel.exists() {
-                let _ = std::fs::remove_file(&sentinel);
-                ctx.teardown();
-                stop_gateway(gateway)?;
-                return Err(ScenarioError::assertion(
-                    "an unauthenticated local caller executed a command".to_string(),
-                ));
-            }
-        }
+    //
+    // The control address comes from runtime.json (the current marker); if it
+    // cannot be resolved the assertion FAILS rather than silently skipping.
+    let Some(api_addr) = local_control_addr(&authority) else {
+        ctx.teardown();
+        stop_gateway(gateway)?;
+        return Err(ScenarioError::assertion(
+            "no runtime.json/api-endpoint for the running Sister; cannot prove \
+             unauthenticated local control is rejected"
+                .to_string(),
+        ));
+    };
+    if !api_addr.ip().is_loopback() {
+        ctx.teardown();
+        stop_gateway(gateway)?;
+        return Err(ScenarioError::assertion(format!(
+            "local control API is not a loopback endpoint: {api_addr}"
+        )));
+    }
+    let sentinel = ctx.layout.root.join("ji01-unauth-sentinel");
+    let body = serde_json::json!({
+        "command": format!("touch {}", sentinel.display())
+    })
+    .to_string();
+    let response = unauthenticated_post(api_addr, "/api/v1/jobs", &body);
+    if !response.contains("401") {
+        ctx.teardown();
+        stop_gateway(gateway)?;
+        return Err(ScenarioError::assertion(format!(
+            "unauthenticated POST /api/v1/jobs was not rejected with 401: {response}"
+        )));
+    }
+    if sentinel.exists() {
+        let _ = std::fs::remove_file(&sentinel);
+        ctx.teardown();
+        stop_gateway(gateway)?;
+        return Err(ScenarioError::assertion(
+            "an unauthenticated local caller executed a command".to_string(),
+        ));
     }
     ctx.teardown();
     stop_gateway(gateway)?;
@@ -788,6 +803,27 @@ fn unauthenticated_post(addr: std::net::SocketAddr, path: &str, body: &str) -> S
     let mut response = String::new();
     let _ = stream.read_to_string(&mut response);
     response
+}
+
+/// The running Sister's loopback control address.
+///
+/// Reads `runtime.json` (the current marker) first, then the legacy
+/// `api-endpoint` file. `None` means neither marker exists.
+fn local_control_addr(config_dir: &Path) -> Option<std::net::SocketAddr> {
+    if let Ok(raw) = std::fs::read_to_string(config_dir.join("runtime.json")) {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) {
+            if let Some(addr) = json.get("api_endpoint").and_then(|value| value.as_str()) {
+                if let Ok(addr) = addr.parse() {
+                    return Some(addr);
+                }
+            }
+        }
+    }
+    std::fs::read_to_string(config_dir.join("api-endpoint"))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 /// JI04 — submitting to a known-but-unreachable Sister fails within a bound
@@ -867,9 +903,9 @@ fn ji08_no_running_sister_fails_closed(ctx: &mut Context) -> Result<(), Scenario
     // persisted identity + membership make the config look like a real joined
     // device (whose operator forgot to `misaka start`).
     network_init(ctx, &dir)?;
-    // A config with no `api-endpoint` recorded (no daemon ever wrote one) is
-    // exactly the no-running-Sister state.
-    if dir.join("api-endpoint").exists() {
+    // A config with no runtime marker (no daemon ever wrote one) is exactly the
+    // no-running-Sister state.
+    if dir.join("runtime.json").exists() || dir.join("api-endpoint").exists() {
         return Err(ScenarioError::assertion(
             "JI08 fixture unexpectedly has a recorded API endpoint",
         ));
