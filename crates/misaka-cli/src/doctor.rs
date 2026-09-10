@@ -118,7 +118,7 @@ pub async fn run(json: bool, network: bool) -> Result<(), MisakaError> {
 
     // config directory
     if dir.is_dir() {
-        doctor.ok("config-dir", format!("{}", dir.display()));
+        doctor.ok("config-dir", dir.display().to_string());
     } else {
         doctor.warn(
             "config-dir",
@@ -150,7 +150,7 @@ pub async fn run(json: bool, network: bool) -> Result<(), MisakaError> {
             "state-layout",
             "no state-layout.json yet; it is created/adopted on next start",
         ),
-        Err(error) => doctor.error("state-layout", format!("{error}")),
+        Err(error) => doctor.error("state-layout", error.to_string()),
     }
 
     // local control token
@@ -172,7 +172,7 @@ pub async fn run(json: bool, network: bool) -> Result<(), MisakaError> {
             "local-control-token",
             "missing; it is created when a Sister starts",
         ),
-        Err(error) => doctor.error("local-control-token", format!("{error}")),
+        Err(error) => doctor.error("local-control-token", error.to_string()),
     }
 
     // Sister identity + key
@@ -189,7 +189,7 @@ pub async fn run(json: bool, network: bool) -> Result<(), MisakaError> {
             None
         }
         Err(error) => {
-            doctor.error("sister-identity", format!("{error}"));
+            doctor.error("sister-identity", error.to_string());
             None
         }
     };
@@ -209,14 +209,14 @@ pub async fn run(json: bool, network: bool) -> Result<(), MisakaError> {
     };
     match misaka_runtime::iroh_identity_store::IrohIdentityStore::load(&dir) {
         Ok(_) => doctor.ok("iroh-key", "present"),
-        Err(error) => doctor.error("iroh-key", format!("{error}")),
+        Err(error) => doctor.error("iroh-key", error.to_string()),
     }
 
     // NetworkId
     match misaka_runtime::network_id_store::NetworkIdStore::load(&dir) {
         Ok(Some(network_id)) => doctor.ok("network-id", network_id.to_string()),
         Ok(None) => doctor.skip("network-id", "not initialized"),
-        Err(error) => doctor.error("network-id", format!("{error}")),
+        Err(error) => doctor.error("network-id", error.to_string()),
     }
 
     // authority descriptor + owner-key consistency
@@ -238,7 +238,7 @@ pub async fn run(json: bool, network: bool) -> Result<(), MisakaError> {
                     }
                 }
                 Ok(None) => {} // ordinary Sister: no authority key, expected
-                Err(error) => doctor.error("authority-owner-key", format!("{error}")),
+                Err(error) => doctor.error("authority-owner-key", error.to_string()),
             }
             Some(authority)
         }
@@ -247,7 +247,7 @@ pub async fn run(json: bool, network: bool) -> Result<(), MisakaError> {
             None
         }
         Err(error) => {
-            doctor.error("network-authority", format!("{error}"));
+            doctor.error("network-authority", error.to_string());
             None
         }
     };
@@ -299,7 +299,7 @@ pub async fn run(json: bool, network: bool) -> Result<(), MisakaError> {
                 }
             }
             Ok(None) => doctor.skip("membership", "not enrolled"),
-            Err(error) => doctor.error("membership", format!("{error}")),
+            Err(error) => doctor.error("membership", error.to_string()),
         }
     }
 
@@ -313,7 +313,7 @@ pub async fn run(json: bool, network: bool) -> Result<(), MisakaError> {
             }
         }
         Ok(None) => doctor.skip("transport-binding", "absent"),
-        Err(error) => doctor.error("transport-binding", format!("{error}")),
+        Err(error) => doctor.error("transport-binding", error.to_string()),
     }
 
     // human identity completeness
@@ -432,7 +432,7 @@ pub async fn run(json: bool, network: bool) -> Result<(), MisakaError> {
             }
         }
         Ok(None) => doctor.skip("service", "no service.json"),
-        Err(error) => doctor.error("service", format!("{error}")),
+        Err(error) => doctor.error("service", error.to_string()),
     }
 
     let gateways = misaka_runtime::gateway_store::GatewayStore::load(&dir);

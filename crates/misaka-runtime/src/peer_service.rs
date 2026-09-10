@@ -245,17 +245,16 @@ mod tests {
 #[cfg(test)]
 mod tempfile_like {
     use std::path::{Path, PathBuf};
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     pub struct TempDir(PathBuf);
 
     impl TempDir {
         pub fn new() -> Self {
-            let suffix = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos();
-            let path = std::env::temp_dir().join(format!("misaka-peer-service-{suffix}"));
+            // A unique suffix: nanosecond timestamps can collide across tests
+            // that create their temp dir in the same clock tick under
+            // parallel execution, which silently cross-contaminates them.
+            let path =
+                std::env::temp_dir().join(format!("misaka-peer-service-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir_all(&path).unwrap();
             Self(path)
         }
