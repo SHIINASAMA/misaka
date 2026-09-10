@@ -222,9 +222,10 @@ enum Command {
         /// Emit a machine-readable report as JSON.
         #[arg(long)]
         json: bool,
-        /// Opt in to bounded reachability checks against configured Gateways/relay.
+        /// Opt in to configured-infrastructure checks (Gateway identity + Relay
+        /// health). This is the ONLY mode that contacts external services.
         #[arg(long)]
-        network: bool,
+        infra: bool,
     },
 
     /// Run only the native Iroh relay service.
@@ -1639,7 +1640,7 @@ pub(crate) async fn dispatch(cli: Cli) -> Result<(), MisakaError> {
             ServiceCommand::Uninstall { name } => service::uninstall(&name)?,
         },
 
-        Command::Doctor { json, network } => doctor::run(json, network).await?,
+        Command::Doctor { json, infra } => doctor::run(json, infra).await?,
 
         Command::Connect { sister } => {
             run_connect(&sister, iroh_options.clone())
@@ -5133,5 +5134,38 @@ mod version_tests {
     fn version_command_accepts_json_flag() {
         let cli = Cli::try_parse_from(["misaka", "version", "--json"]).unwrap();
         assert!(matches!(cli.command, Command::Version { json: true }));
+    }
+}
+
+#[cfg(test)]
+mod doctor_cli_tests {
+    use super::*;
+
+    #[test]
+    fn doctor_accepts_infra_and_json_flags() {
+        let cli = Cli::try_parse_from(["misaka", "doctor", "--infra", "--json"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Doctor {
+                json: true,
+                infra: true
+            }
+        ));
+        // Default (no --infra) is the strictly local mode.
+        let cli = Cli::try_parse_from(["misaka", "doctor"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Doctor {
+                json: false,
+                infra: false
+            }
+        ));
+    }
+
+    #[test]
+    fn doctor_network_flag_is_removed() {
+        // `--network` was misleading (it does not verify the Misaka Network) and
+        // is replaced by `--infra`; it is not retained as an alias.
+        assert!(Cli::try_parse_from(["misaka", "doctor", "--network"]).is_err());
     }
 }

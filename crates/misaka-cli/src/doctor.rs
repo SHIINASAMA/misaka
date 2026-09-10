@@ -2,14 +2,16 @@
 //!
 //! Default checks are strictly local and make no external network activity,
 //! consistent with Misaka's loopback-only default posture. Only
-//! `misaka doctor --network` performs bounded opt-in reachability checks
+//! `misaka doctor --infra` performs bounded opt-in infrastructure checks
 //! against configured infrastructure, and it never runs a smoke workload
 //! (no transfer, Job, SSH, Tunnel, or Gateway mutation).
 
 use serde::Serialize;
 use std::path::Path;
+use std::time::Duration;
 
 use crate::MisakaError;
+use misaka_core::gateway::{GatewayInfo, GATEWAY_PROTOCOL_VERSION};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -109,7 +111,7 @@ pub fn connectivity_gap_warning(
     }
 }
 
-pub async fn run(json: bool, network: bool) -> Result<(), MisakaError> {
+pub async fn run(json: bool, infra: bool) -> Result<(), MisakaError> {
     let dir = crate::IdentityStore::config_dir()
         .map_err(|error| MisakaError::Other(error.to_string()))?;
     let mut doctor = Doctor::new();
@@ -511,8 +513,17 @@ pub async fn run(json: bool, network: bool) -> Result<(), MisakaError> {
         doctor.skip("gateways", "none configured");
     }
 
-    if network {
-        network_checks(&mut doctor, &gateways, start_posture_relay.as_deref()).await;
+    if infra {
+        // Only `--infra` may contact configured external infrastructure.
+        for check in infra_checks(
+            &gateways,
+            authority.as_ref(),
+            start_posture_relay.as_deref(),
+        )
+        .await
+        {
+            doctor.checks.push(check);
+        }
     }
 
     let report = DoctorReport::new(doctor.checks);
@@ -566,63 +577,219 @@ fn pid_is_alive(pid: u32) -> bool {
 
 /// Bounded, opt-in reachability checks. Only these contact configured
 /// infrastructure; each is capped, and none performs a smoke workload.
-async fn network_checks(doctor: &mut Doctor, gateways: &[String], relay: Option<&str>) {
-    if gateways.is_empty() {
-        doctor.skip("network:gateways", "no Gateways configured");
-    }
-    for gateway in gateways {
-        let host_port = host_port_of(gateway);
-        match host_port {
-            Some((host, port)) => match tcp_reachable(&host, port).await {
-                true => doctor.ok("network:gateway", format!("reachable: {gateway}")),
-                false => doctor.warn("network:gateway", format!("unreachable: {gateway}")),
-            },
-            None => doctor.skip("network:gateway", format!("unsupported URL: {gateway}")),
-        }
-    }
-    if let Some(relay) = relay {
-        match host_port_of(relay) {
-            Some((host, port)) => match tcp_reachable(&host, port).await {
-                true => doctor.ok("network:relay", format!("reachable: {relay}")),
-                false => doctor.warn("network:relay", format!("unreachable: {relay}")),
-            },
-            None => doctor.skip("network:relay", format!("unsupported URL: {relay}")),
-        }
+/// One infrastructure probe result.
+pub struct InfraProbe {
+    pub status: Status,
+    pub message: String,
+}
+
+fn infra_client(timeout: Duration) -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .connect_timeout(timeout)
+        .timeout(timeout)
+        .build()
+        .map_err(|error| error.to_string())
+}
+
+/// Describe a request failure precisely enough to be actionable, without an
+/// elaborate taxonomy: timeout vs. connect/refused vs. TLS vs. other.
+fn describe_request_error(error: &reqwest::Error) -> String {
+    let text = error.to_string();
+    let lower = text.to_ascii_lowercase();
+    if error.is_timeout() {
+        format!("timeout: {text}")
+    } else if lower.contains("certificate") || lower.contains("tls") || lower.contains("ssl") {
+        format!("TLS validation failed: {text}")
+    } else if error.is_connect() {
+        format!("connection failed: {text}")
+    } else {
+        format!("request failed: {text}")
     }
 }
 
-/// Extract `host:port` from an `http(s)://` URL (default port 443).
-pub fn host_port_of(url: &str) -> Option<(String, u16)> {
-    let rest = url.split_once("://").map(|(_, rest)| rest)?;
-    let authority = rest.split(['/', '?']).next()?;
-    let (host, port) = match authority.rsplit_once(':') {
-        Some((host, port)) if port.chars().all(|c| c.is_ascii_digit()) => {
-            (host.to_string(), port.parse::<u16>().ok()?)
+/// Validate a Gateway's self-description (`GET /.well-known/misaka`).
+///
+/// This proves the Gateway is alive, speaks a supported Gateway protocol, and
+/// belongs to *this* Network with *this* Authority. It does NOT prove that any
+/// Sister can be reached through it, nor that discovery works.
+pub async fn probe_gateway(
+    base: &str,
+    network_id: &misaka_core::NetworkId,
+    authority_fingerprint: &str,
+    timeout: Duration,
+) -> InfraProbe {
+    let client = match infra_client(timeout) {
+        Ok(client) => client,
+        Err(error) => {
+            return InfraProbe {
+                status: Status::Warn,
+                message: format!("HTTP client unavailable: {error}"),
+            }
         }
-        _ => (authority.to_string(), 443),
     };
-    if host.is_empty() {
-        return None;
+    let url = format!("{}/.well-known/misaka", base.trim_end_matches('/'));
+    let response = match client.get(&url).send().await {
+        Ok(response) => response,
+        Err(error) => {
+            return InfraProbe {
+                status: Status::Warn,
+                message: describe_request_error(&error),
+            }
+        }
+    };
+    let http_status = response.status();
+    if !http_status.is_success() {
+        return InfraProbe {
+            status: Status::Warn,
+            message: format!("Gateway is reachable but returned HTTP {http_status}"),
+        };
     }
-    Some((host, port))
+    let info: GatewayInfo = match response.json().await {
+        Ok(info) => info,
+        Err(error) => {
+            return InfraProbe {
+                status: Status::Warn,
+                message: format!("Gateway returned an unexpected service response: {error}"),
+            }
+        }
+    };
+    if info.protocol_version != GATEWAY_PROTOCOL_VERSION {
+        return InfraProbe {
+            status: Status::Error,
+            message: format!(
+                "unsupported Gateway protocol v{} (this binary supports v{})",
+                info.protocol_version, GATEWAY_PROTOCOL_VERSION
+            ),
+        };
+    }
+    if info.network_id != *network_id {
+        return InfraProbe {
+            status: Status::Error,
+            message: format!(
+                "Gateway serves Network {}, this Sister belongs to {}",
+                info.network_id, network_id
+            ),
+        };
+    }
+    if !info
+        .authority_fingerprint
+        .eq_ignore_ascii_case(authority_fingerprint)
+    {
+        return InfraProbe {
+            status: Status::Error,
+            message: "Gateway Authority fingerprint does not match this Network".to_string(),
+        };
+    }
+    InfraProbe {
+        status: Status::Ok,
+        message: "Gateway protocol healthy; Network and Authority match".to_string(),
+    }
 }
 
-async fn tcp_reachable(host: &str, port: u16) -> bool {
-    let target = format!("{host}:{port}");
-    tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        tokio::net::TcpStream::connect(target),
-    )
-    .await
-    .map(|result| result.is_ok())
-    .unwrap_or(false)
+/// Validate the configured Relay service (`GET /healthz`).
+///
+/// This proves the configured Relay service is alive at that URL. It does NOT
+/// prove the Sister can establish an Iroh relay path, that another Sister is
+/// reachable through it, that the Relay admits this EndpointId, or that
+/// application traffic works. The Relay has no Misaka Network authority role,
+/// so it is never compared against NetworkId/Authority/membership.
+pub async fn probe_relay(base: &str, timeout: Duration) -> InfraProbe {
+    let client = match infra_client(timeout) {
+        Ok(client) => client,
+        Err(error) => {
+            return InfraProbe {
+                status: Status::Warn,
+                message: format!("HTTP client unavailable: {error}"),
+            }
+        }
+    };
+    let url = format!("{}/healthz", base.trim_end_matches('/'));
+    let response = match client.get(&url).send().await {
+        Ok(response) => response,
+        Err(error) => {
+            return InfraProbe {
+                status: Status::Warn,
+                message: describe_request_error(&error),
+            }
+        }
+    };
+    let http_status = response.status();
+    if http_status.is_success() {
+        InfraProbe {
+            status: Status::Ok,
+            message: "Relay health endpoint responded successfully".to_string(),
+        }
+    } else {
+        InfraProbe {
+            status: Status::Warn,
+            message: format!("Relay health endpoint returned HTTP {http_status}"),
+        }
+    }
+}
+
+/// Infrastructure checks for `doctor --infra`.
+///
+/// Each Gateway is reported independently (`infra:gateway:<index>`), and the
+/// Relay separately (`infra:relay`). A missing Network/Gateway/Relay is a SKIP,
+/// not an error. A Network/Authority contradiction is an ERROR; a temporary
+/// availability problem is a WARN.
+pub async fn infra_checks(
+    gateways: &[String],
+    authority: Option<&misaka_core::NetworkAuthority>,
+    relay: Option<&str>,
+) -> Vec<Check> {
+    fn push_check(checks: &mut Vec<Check>, name: String, probe: InfraProbe) {
+        checks.push(Check {
+            name,
+            status: probe.status,
+            message: probe.message,
+        });
+    }
+    let mut checks = Vec::new();
+    if gateways.is_empty() {
+        checks.push(Check {
+            name: "infra:gateways".to_string(),
+            status: Status::Skip,
+            message: "no Gateways configured".to_string(),
+        });
+    }
+    for (index, gateway) in gateways.iter().enumerate() {
+        let name = format!("infra:gateway:{index}");
+        match authority {
+            None => checks.push(Check {
+                name,
+                status: Status::Skip,
+                message: "no local Network Authority to validate the Gateway against".to_string(),
+            }),
+            Some(authority) => {
+                let probe = probe_gateway(
+                    gateway,
+                    &authority.network_id,
+                    &authority.authority_public_key.to_string(),
+                    Duration::from_secs(5),
+                )
+                .await;
+                push_check(&mut checks, name, probe);
+            }
+        }
+    }
+    match relay {
+        None => checks.push(Check {
+            name: "infra:relay".to_string(),
+            status: Status::Skip,
+            message: "no Relay configured".to_string(),
+        }),
+        Some(url) => {
+            let probe = probe_relay(url, Duration::from_secs(5)).await;
+            push_check(&mut checks, "infra:relay".to_string(), probe);
+        }
+    }
+    checks
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        connectivity_gap_warning, host_port_of, permissions_are_tight, DoctorReport, Status,
-    };
+    use super::{connectivity_gap_warning, permissions_are_tight, DoctorReport, Status};
 
     #[test]
     fn gateway_without_connectivity_is_warned() {
@@ -632,17 +799,266 @@ mod tests {
         assert!(connectivity_gap_warning(true, None, Some("https://r")).is_none());
     }
 
-    #[test]
-    fn host_port_parsing_handles_schemes_and_default_ports() {
-        assert_eq!(
-            host_port_of("https://gateway.example.com"),
-            Some(("gateway.example.com".into(), 443))
-        );
-        assert_eq!(
-            host_port_of("https://gateway.example.com:8443/v1"),
-            Some(("gateway.example.com".into(), 8443))
-        );
-        assert_eq!(host_port_of("not a url"), None);
+    // --- Gateway infrastructure probes (DGI01-DGI07) -----------------------
+    //
+    // All servers are local mocks; the deployed Cloudflare Gateway is never used.
+
+    use misaka_core::gateway::GatewayInfo;
+    use misaka_core::{NetworkAuthority, NetworkId};
+    use std::net::SocketAddr;
+    use tokio::net::TcpListener;
+
+    fn json_response(body: &str) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+    }
+
+    async fn canned_http(response: String) -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                use tokio::io::AsyncWriteExt;
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+        addr
+    }
+
+    async fn dead_addr() -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        addr
+    }
+
+    async fn hanging_addr() -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                drop(stream);
+            }
+        });
+        addr
+    }
+
+    async fn gateway_server(authority: NetworkAuthority) -> SocketAddr {
+        let server = misaka_gatewayd::GatewayServer::bind(
+            misaka_gatewayd::GatewayConfig::new(authority),
+            "127.0.0.1:0".parse().unwrap(),
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        tokio::spawn(async move {
+            let _ = server.run().await;
+        });
+        addr
+    }
+
+    fn probe_timeout() -> std::time::Duration {
+        std::time::Duration::from_secs(3)
+    }
+
+    // DGI01: valid GatewayInfo + matching NetworkId + matching fingerprint → OK
+    #[tokio::test]
+    async fn dgi01_matching_gateway_is_ok() {
+        let (authority, _key) = NetworkAuthority::generate(NetworkId::generate());
+        let addr = gateway_server(authority).await;
+        let probe = super::probe_gateway(
+            &format!("http://{addr}"),
+            &authority.network_id,
+            &authority.authority_public_key.to_string(),
+            probe_timeout(),
+        )
+        .await;
+        assert_eq!(probe.status, super::Status::Ok, "{}", probe.message);
+    }
+
+    // DGI02: unsupported Gateway protocol version → ERROR
+    #[tokio::test]
+    async fn dgi02_unsupported_protocol_is_error() {
+        let (authority, _key) = NetworkAuthority::generate(NetworkId::generate());
+        let info = GatewayInfo {
+            protocol_version: misaka_core::gateway::GATEWAY_PROTOCOL_VERSION + 1,
+            network_id: authority.network_id,
+            authority_fingerprint: authority.authority_public_key.to_string(),
+        };
+        let addr = canned_http(json_response(&serde_json::to_string(&info).unwrap())).await;
+        let probe = super::probe_gateway(
+            &format!("http://{addr}"),
+            &authority.network_id,
+            &authority.authority_public_key.to_string(),
+            probe_timeout(),
+        )
+        .await;
+        assert_eq!(probe.status, super::Status::Error, "{}", probe.message);
+    }
+
+    // DGI03: Gateway NetworkId mismatch → ERROR
+    #[tokio::test]
+    async fn dgi03_network_mismatch_is_error() {
+        let (served, _key) = NetworkAuthority::generate(NetworkId::generate());
+        let (expected, _key) = NetworkAuthority::generate(NetworkId::generate());
+        let info = GatewayInfo {
+            protocol_version: misaka_core::gateway::GATEWAY_PROTOCOL_VERSION,
+            network_id: served.network_id,
+            authority_fingerprint: served.authority_public_key.to_string(),
+        };
+        let addr = canned_http(json_response(&serde_json::to_string(&info).unwrap())).await;
+        let probe = super::probe_gateway(
+            &format!("http://{addr}"),
+            &expected.network_id,
+            &expected.authority_public_key.to_string(),
+            probe_timeout(),
+        )
+        .await;
+        assert_eq!(probe.status, super::Status::Error, "{}", probe.message);
+    }
+
+    // DGI04: Gateway Authority fingerprint mismatch → ERROR
+    #[tokio::test]
+    async fn dgi04_authority_mismatch_is_error() {
+        let (authority, _key) = NetworkAuthority::generate(NetworkId::generate());
+        let info = GatewayInfo {
+            protocol_version: misaka_core::gateway::GATEWAY_PROTOCOL_VERSION,
+            network_id: authority.network_id,
+            authority_fingerprint: "00".repeat(32),
+        };
+        let addr = canned_http(json_response(&serde_json::to_string(&info).unwrap())).await;
+        let probe = super::probe_gateway(
+            &format!("http://{addr}"),
+            &authority.network_id,
+            &authority.authority_public_key.to_string(),
+            probe_timeout(),
+        )
+        .await;
+        assert_eq!(probe.status, super::Status::Error, "{}", probe.message);
+    }
+
+    // DGI05: HTTP success but malformed GatewayInfo → WARN (availability-shaped)
+    #[tokio::test]
+    async fn dgi05_malformed_info_is_warn() {
+        let (authority, _key) = NetworkAuthority::generate(NetworkId::generate());
+        let addr = canned_http(json_response("not a gateway info")).await;
+        let probe = super::probe_gateway(
+            &format!("http://{addr}"),
+            &authority.network_id,
+            &authority.authority_public_key.to_string(),
+            probe_timeout(),
+        )
+        .await;
+        assert_eq!(probe.status, super::Status::Warn, "{}", probe.message);
+    }
+
+    // DGI06: connection failure / timeout → WARN
+    #[tokio::test]
+    async fn dgi06_connection_failure_is_warn() {
+        let (authority, _key) = NetworkAuthority::generate(NetworkId::generate());
+        let addr = dead_addr().await;
+        let probe = super::probe_gateway(
+            &format!("http://{addr}"),
+            &authority.network_id,
+            &authority.authority_public_key.to_string(),
+            probe_timeout(),
+        )
+        .await;
+        assert_eq!(probe.status, super::Status::Warn, "{}", probe.message);
+    }
+
+    // DGI07: multiple Gateways → an independent result for each
+    #[tokio::test]
+    async fn dgi07_multiple_gateways_are_independent() {
+        let (authority, _key) = NetworkAuthority::generate(NetworkId::generate());
+        let good = format!("http://{}", gateway_server(authority).await);
+        let dead = format!("http://{}", dead_addr().await);
+        let checks = super::infra_checks(&[good, dead], Some(&authority), None).await;
+        let gateway0 = checks.iter().find(|c| c.name == "infra:gateway:0").unwrap();
+        let gateway1 = checks.iter().find(|c| c.name == "infra:gateway:1").unwrap();
+        assert_eq!(gateway0.status, super::Status::Ok, "{}", gateway0.message);
+        assert_eq!(gateway1.status, super::Status::Warn, "{}", gateway1.message);
+        assert!(checks
+            .iter()
+            .any(|c| c.name == "infra:relay" && c.status == super::Status::Skip));
+    }
+
+    // --- Relay infrastructure probes (DRI01-DRI04) -------------------------
+
+    async fn relay_server() -> SocketAddr {
+        let relay = misaka_relay::RelayService::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let addr = relay.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = relay.run().await;
+        });
+        addr
+    }
+
+    // DRI01: /healthz responds successfully → OK
+    #[tokio::test]
+    async fn dri01_relay_health_is_ok() {
+        let addr = relay_server().await;
+        let probe = super::probe_relay(&format!("http://{addr}"), probe_timeout()).await;
+        assert_eq!(probe.status, super::Status::Ok, "{}", probe.message);
+    }
+
+    // DRI02: TCP succeeds but /healthz fails → WARN
+    #[tokio::test]
+    async fn dri02_relay_health_failure_is_warn() {
+        let addr = canned_http(
+            "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .to_string(),
+        )
+        .await;
+        let probe = super::probe_relay(&format!("http://{addr}"), probe_timeout()).await;
+        assert_eq!(probe.status, super::Status::Warn, "{}", probe.message);
+    }
+
+    // DRI03: endpoint unreachable → WARN
+    #[tokio::test]
+    async fn dri03_relay_unreachable_is_warn() {
+        let addr = dead_addr().await;
+        let probe = super::probe_relay(&format!("http://{addr}"), probe_timeout()).await;
+        assert_eq!(probe.status, super::Status::Warn, "{}", probe.message);
+    }
+
+    // DRI04: timeout → WARN
+    #[tokio::test]
+    async fn dri04_relay_timeout_is_warn() {
+        let addr = hanging_addr().await;
+        let probe = super::probe_relay(
+            &format!("http://{addr}"),
+            std::time::Duration::from_millis(300),
+        )
+        .await;
+        assert_eq!(probe.status, super::Status::Warn, "{}", probe.message);
+    }
+
+    // --- skips and aggregation --------------------------------------------
+
+    #[tokio::test]
+    async fn infra_skips_without_authority_gateways_or_relay() {
+        let (authority, _key) = NetworkAuthority::generate(NetworkId::generate());
+        let checks = super::infra_checks(&[], Some(&authority), None).await;
+        assert!(checks
+            .iter()
+            .any(|c| c.name == "infra:gateways" && c.status == super::Status::Skip));
+        assert!(checks
+            .iter()
+            .any(|c| c.name == "infra:relay" && c.status == super::Status::Skip));
+
+        // No Network authority → the Gateway cannot be validated → SKIP (never a
+        // manufactured Network identity).
+        let checks = super::infra_checks(&["http://127.0.0.1:1".to_string()], None, None).await;
+        let gateway = checks.iter().find(|c| c.name == "infra:gateway:0").unwrap();
+        assert_eq!(gateway.status, super::Status::Skip, "{}", gateway.message);
     }
 
     #[test]
