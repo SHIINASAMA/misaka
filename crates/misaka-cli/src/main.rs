@@ -55,6 +55,15 @@ struct Cli {
     #[arg(long, global = true, requires = "iroh_relay")]
     iroh_relay_only: bool,
 
+    /// Advertised (reachable) host address.
+    ///
+    /// Absent ⇒ Misaka binds/listens on loopback only (local/same-host) and
+    /// never contacts any relay. Present ⇒ direct peer connectivity is enabled
+    /// (bind all interfaces for LAN). Reaching/being reached by a non-loopback
+    /// peer requires this, or a reachable `--iroh-relay` to your own relay.
+    #[arg(long, global = true, value_name = "IP")]
+    advertise_host: Option<IpAddr>,
+
     /// Explicit independent Misaka Network namespace.
     #[arg(long, global = true, value_name = "UUID")]
     network_id: Option<String>,
@@ -131,10 +140,6 @@ enum Command {
         #[arg(long, default_value_t = 60)]
         peer_timeout: u64,
 
-        /// LAN address advertised to peers.
-        #[arg(long)]
-        advertise_host: Option<IpAddr>,
-
         /// Log format (human | json).
         #[arg(long, default_value = "human")]
         log_format: String,
@@ -152,7 +157,7 @@ enum Command {
         relay: bool,
 
         /// Relay bind address when --relay is enabled.
-        #[arg(long, default_value = "0.0.0.0:443")]
+        #[arg(long, default_value = "127.0.0.1:443")]
         relay_bind: SocketAddr,
 
         /// Plain HTTP bind address for the relay captive-portal service when
@@ -199,7 +204,7 @@ enum Command {
     /// Run only the native Iroh relay service.
     Relay {
         /// Public address on which the Iroh relay listens.
-        #[arg(long, default_value = "0.0.0.0:443")]
+        #[arg(long, default_value = "127.0.0.1:443")]
         bind: SocketAddr,
 
         /// Plain HTTP bind address for the relay captive-portal service when
@@ -518,9 +523,11 @@ async fn async_main() -> Result<(), MisakaError> {
                 .map_err(|error| MisakaError::Other(format!("invalid --iroh-relay URL: {error}")))
         })
         .transpose()?;
+    let advertise_host = cli.advertise_host;
     let iroh_options = IrohTransportOptions {
         relay: iroh_relay,
         relay_only: cli.iroh_relay_only,
+        advertise_host,
     };
     match cli.command {
         Command::Start {
@@ -539,7 +546,6 @@ async fn async_main() -> Result<(), MisakaError> {
             discovery,
             heartbeat,
             peer_timeout,
-            advertise_host,
             log_format,
             introspect,
             api_port,
@@ -606,9 +612,16 @@ async fn async_main() -> Result<(), MisakaError> {
                         )
                         .await;
                     if !online {
-                        tracing::warn!(
-                            "Iroh endpoint did not become online before export; persisting current address and waiting for updates"
-                        );
+                        if iroh_options.relay.is_some() {
+                            tracing::warn!(
+                                "Iroh endpoint did not become online before export; persisting current address and waiting for updates"
+                            );
+                        } else {
+                            // Local-only default: no relay to come online against.
+                            tracing::debug!(
+                                "Iroh endpoint is local-only (no relay configured); persisting loopback address"
+                            );
+                        }
                     }
                     misaka_runtime::iroh_endpoint_store::IrohEndpointStore::save(
                         &data_dir,
@@ -1789,6 +1802,13 @@ async fn probe_peer_liveness(
             // Enrolled, but this peer offers no Iroh endpoint: fall through to TCP.
         } else {
             for endpoint in &iroh_endpoints {
+                // Default is loopback-only: skip remote peers the local bind
+                // cannot reach (no --advertise-host / reachable relay).
+                if !ctx.iroh_options.reachable()
+                    && ctx.iroh_options.target_needs_reachable(endpoint)
+                {
+                    continue;
+                }
                 let ping = Envelope::new(
                     ctx.network_id,
                     MessageType::Ping,
@@ -2021,6 +2041,58 @@ struct StreamProbeMetrics {
 struct IrohTransportOptions {
     relay: Option<iroh::RelayUrl>,
     relay_only: bool,
+    advertise_host: Option<IpAddr>,
+}
+
+impl IrohTransportOptions {
+    /// Whether the local endpoint may bind all interfaces.
+    ///
+    /// True when the operator declared a reachable host with
+    /// `--advertise-host`, or enabled a relay that is not on the loopback
+    /// interface (reaching a remote relay needs a reachable source socket).
+    fn reachable(&self) -> bool {
+        if self.advertise_host.is_some() {
+            return true;
+        }
+        self.relay
+            .as_ref()
+            .is_some_and(|url| !relay_url_is_loopback(url))
+    }
+
+    /// The backend bind policy implied by these options (local-only by default).
+    fn to_bind_options(&self) -> misaka_network::IrohBindOptions {
+        misaka_network::IrohBindOptions {
+            local_only: !self.reachable(),
+            relay: self.relay.clone(),
+            relay_only: self.relay_only,
+        }
+    }
+
+    /// Whether dialing `endpoint` requires a reachable (non-loopback) local
+    /// bind. A remote direct address, or a relay that is not local, needs one.
+    fn target_needs_reachable(&self, endpoint: &NetworkEndpoint) -> bool {
+        match endpoint {
+            NetworkEndpoint::Tcp(addr) => !addr.ip().is_loopback(),
+            NetworkEndpoint::Iroh(addr) => {
+                addr.ip_addrs().any(|addr| !addr.ip().is_loopback())
+                    || addr.relay_urls().any(|url| !relay_url_is_loopback(url))
+            }
+        }
+    }
+}
+
+/// Whether a relay URL points at the loopback interface (`localhost`,
+/// `127.0.0.1`, `[::1]`). A loopback relay can be reached from a loopback-bound
+/// endpoint; any other relay cannot.
+fn relay_url_is_loopback(url: &iroh::RelayUrl) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_ascii_lowercase();
+    host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "0:0:0:0:0:0:0:1"
 }
 
 struct StreamTestOptions<'a> {
@@ -2093,6 +2165,13 @@ async fn run_stream_test(
                 .map_err(|error| error.to_string())?
             }
             NetworkEndpoint::Iroh(endpoint) => {
+                if !iroh_options.reachable()
+                    && iroh_options.target_needs_reachable(&NetworkEndpoint::Iroh(endpoint.clone()))
+                {
+                    return Err("stream-test target is not on the loopback interface; add \
+                         --advertise-host <ip> (or a reachable --iroh-relay <url>)"
+                        .to_string());
+                }
                 let backend = bind_iroh_client_backend(iroh_options).await?;
                 if let Some(auth) = iroh_auth.as_mut() {
                     *auth = authenticated_session_for_backend(auth.clone(), &backend);
@@ -3523,6 +3602,15 @@ async fn connect_peer_stream(
     peer_certificate: Option<&[u8]>,
     iroh_options: IrohTransportOptions,
 ) -> Result<misaka_network::NetworkStream, String> {
+    // §tighten: the default is local-only. Dialing a non-loopback peer requires
+    // an explicit `--advertise-host` (or a reachable `--iroh-relay`).
+    if iroh_options.target_needs_reachable(&endpoint) && !iroh_options.reachable() {
+        return Err(format!(
+            "Sister #{peer_id} is not on the loopback interface; this process is bound \
+             loopback-only by default. Pass --advertise-host <ip> (or a reachable \
+             --iroh-relay <url> to your own relay) to enable non-local direct connectivity."
+        ));
+    }
     let network_id = local_network_id()?;
     let stream = if matches!(&endpoint, NetworkEndpoint::Iroh(_)) {
         if peer_certificate.is_some() {
@@ -3615,20 +3703,14 @@ async fn bind_iroh_backend(
     data_dir: &Path,
     iroh_options: IrohTransportOptions,
 ) -> Result<misaka_network::IrohBackend, String> {
+    if iroh_options.relay_only && iroh_options.relay.is_none() {
+        return Err("--iroh-relay-only requires --iroh-relay <url>".to_string());
+    }
     let secret_key = misaka_runtime::iroh_identity_store::IrohIdentityStore::load_or_init(data_dir)
         .map_err(|error| error.to_string())?;
-    match (iroh_options.relay, iroh_options.relay_only) {
-        (Some(relay_url), true) => {
-            misaka_network::IrohBackend::bind_with_secret_key_and_relay_only(secret_key, relay_url)
-                .await
-        }
-        (Some(relay_url), false) => {
-            misaka_network::IrohBackend::bind_with_secret_key_and_relay(secret_key, relay_url).await
-        }
-        (None, false) => misaka_network::IrohBackend::bind_with_secret_key(secret_key).await,
-        (None, true) => unreachable!("CLI requires --iroh-relay with --iroh-relay-only"),
-    }
-    .map_err(|error| error.to_string())
+    misaka_network::IrohBackend::bind_with_options(secret_key, iroh_options.to_bind_options())
+        .await
+        .map_err(|error| error.to_string())
 }
 
 fn load_authenticated_session(
@@ -3846,18 +3928,12 @@ async fn bind_iroh_client_backend_with_secret_key(
     secret_key: iroh::SecretKey,
     iroh_options: IrohTransportOptions,
 ) -> Result<misaka_network::IrohBackend, String> {
-    match (iroh_options.relay, iroh_options.relay_only) {
-        (Some(relay_url), true) => {
-            misaka_network::IrohBackend::bind_with_secret_key_and_relay_only(secret_key, relay_url)
-                .await
-        }
-        (Some(relay_url), false) => {
-            misaka_network::IrohBackend::bind_with_secret_key_and_relay(secret_key, relay_url).await
-        }
-        (None, false) => misaka_network::IrohBackend::bind_with_secret_key(secret_key).await,
-        (None, true) => unreachable!("CLI requires --iroh-relay with --iroh-relay-only"),
+    if iroh_options.relay_only && iroh_options.relay.is_none() {
+        return Err("--iroh-relay-only requires --iroh-relay <url>".to_string());
     }
-    .map_err(|error| error.to_string())
+    misaka_network::IrohBackend::bind_with_options(secret_key, iroh_options.to_bind_options())
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// Rebind the persisted Sister authentication material to the ephemeral
@@ -4636,5 +4712,72 @@ mod stream_tests {
                 ..
             }
         ));
+    }
+}
+
+#[cfg(test)]
+mod tighten_tests {
+    use super::*;
+
+    fn relay(url: &str) -> iroh::RelayUrl {
+        url.parse().unwrap()
+    }
+
+    fn endpoint(ip: &str, relay_url: Option<&str>) -> NetworkEndpoint {
+        let mut addr = iroh::EndpointAddr::new(iroh::SecretKey::generate().public());
+        if let Some(url) = relay_url {
+            addr = addr.with_relay_url(relay(url));
+        }
+        addr = addr.with_ip_addr(ip.parse().unwrap());
+        NetworkEndpoint::Iroh(addr)
+    }
+
+    fn opts(advertise: bool, relay_url: Option<&str>) -> IrohTransportOptions {
+        IrohTransportOptions {
+            relay: relay_url.map(relay),
+            relay_only: false,
+            advertise_host: advertise
+                .then(|| std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 5))),
+        }
+    }
+
+    #[test]
+    fn default_is_local_only() {
+        let options = opts(false, None);
+        assert!(options.to_bind_options().local_only);
+        assert!(!options.reachable());
+        // Loopback targets are fine from a local-only bind; remote ones are not.
+        assert!(!options.target_needs_reachable(&endpoint("127.0.0.1:5", None)));
+        assert!(options.target_needs_reachable(&endpoint("192.168.1.2:5", None)));
+    }
+
+    #[test]
+    fn advertise_host_enables_reachable_bind() {
+        assert!(!opts(true, None).to_bind_options().local_only);
+        assert!(opts(true, None).reachable());
+    }
+
+    #[test]
+    fn loopback_relay_keeps_local_only_bind() {
+        let options = opts(false, Some("https://127.0.0.1:3340"));
+        assert!(options.to_bind_options().local_only);
+        assert!(!options.reachable());
+    }
+
+    #[test]
+    fn non_loopback_relay_enables_reachable_bind() {
+        let options = opts(false, Some("https://relay.example.com:443"));
+        assert!(!options.to_bind_options().local_only);
+        assert!(options.reachable());
+    }
+
+    #[test]
+    fn relay_url_loopback_detection() {
+        assert!(relay_url_is_loopback(&relay("https://127.0.0.1:3340")));
+        assert!(relay_url_is_loopback(&relay("https://localhost:3340")));
+        assert!(relay_url_is_loopback(&relay("https://[::1]:3340")));
+        assert!(!relay_url_is_loopback(&relay(
+            "https://relay.example.com:443"
+        )));
     }
 }

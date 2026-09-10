@@ -29,7 +29,7 @@ pub const ENROLLMENT_ALPN: &[u8] = b"misaka/enrollment/1";
 pub mod iroh_backend;
 pub mod resolver;
 pub mod tls;
-pub use iroh_backend::{misaka_alpns, IrohBackend, IrohSession};
+pub use iroh_backend::{misaka_alpns, IrohBackend, IrohBindOptions, IrohSession};
 
 #[derive(Debug, Error)]
 pub enum NetworkError {
@@ -649,15 +649,19 @@ mod tests {
         let network_id = NetworkId::generate();
         let server_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
             .alpns(vec![IROH_ALPN.to_vec()])
+            .clear_ip_transports()
             .bind_addr("127.0.0.1:0")
             .unwrap()
+            .relay_mode(iroh::RelayMode::Disabled)
             .bind()
             .await
             .unwrap();
         let client_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
             .alpns(vec![IROH_ALPN.to_vec()])
+            .clear_ip_transports()
             .bind_addr("127.0.0.1:0")
             .unwrap()
+            .relay_mode(iroh::RelayMode::Disabled)
             .bind()
             .await
             .unwrap();
@@ -731,6 +735,7 @@ mod tests {
         let server_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
             .secret_key(iroh::SecretKey::generate())
             .alpns(vec![IROH_ALPN.to_vec()])
+            .clear_ip_transports()
             .relay_mode(iroh::RelayMode::Custom(relay_map.clone()))
             .ca_tls_config(iroh::tls::CaTlsConfig::custom_roots(relay_certs.clone()))
             .clear_ip_transports()
@@ -740,6 +745,7 @@ mod tests {
         let client_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
             .secret_key(iroh::SecretKey::generate())
             .alpns(vec![IROH_ALPN.to_vec()])
+            .clear_ip_transports()
             .relay_mode(iroh::RelayMode::Custom(relay_map))
             .ca_tls_config(iroh::tls::CaTlsConfig::custom_roots(relay_certs))
             .clear_ip_transports()
@@ -795,15 +801,19 @@ mod tests {
     async fn iroh_session_reuses_one_connection_for_multiple_streams() {
         let server_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
             .alpns(vec![IROH_ALPN.to_vec()])
+            .clear_ip_transports()
             .bind_addr("127.0.0.1:0")
             .unwrap()
+            .relay_mode(iroh::RelayMode::Disabled)
             .bind()
             .await
             .unwrap();
         let client_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
             .alpns(vec![IROH_ALPN.to_vec()])
+            .clear_ip_transports()
             .bind_addr("127.0.0.1:0")
             .unwrap()
+            .relay_mode(iroh::RelayMode::Disabled)
             .bind()
             .await
             .unwrap();

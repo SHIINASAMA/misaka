@@ -94,8 +94,14 @@ mod tests {
 
     #[tokio::test]
     async fn online_wait_is_bounded_when_no_relay_is_available() {
+        // Loopback bind + no relay: guaranteed offline, and never an
+        // any-interface listener that macOS would firewall-prompt for.
         let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
             .alpns(vec![b"misaka/test".to_vec()])
+            .clear_ip_transports()
+            .relay_mode(iroh::RelayMode::Disabled)
+            .bind_addr("127.0.0.1:0")
+            .unwrap()
             .bind()
             .await
             .unwrap();

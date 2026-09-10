@@ -105,6 +105,17 @@ impl SisterRuntime {
                                 .to_string(),
                         ));
                     }
+                    // §17: Direct TCP fails closed to loopback by default. A
+                    // secure (mTLS) Direct TCP stream listener binds 0.0.0.0
+                    // only when the operator explicitly declared LAN intent
+                    // with `--advertise-host`; otherwise it binds loopback so a
+                    // unit test (or a stray local process) never triggers the
+                    // macOS Application Firewall for an any-interface listener.
+                    let stream_bind_host = if advertise_host.is_some() {
+                        "0.0.0.0"
+                    } else {
+                        "127.0.0.1"
+                    };
                     Some(StreamAcceptor::Direct(
                         misaka_network::tls::TlsServer::new(
                             identity
@@ -113,7 +124,9 @@ impl SisterRuntime {
                                 )
                                 .map_err(|error| crate::Error::Network(error.to_string()))?,
                         )
-                        .listen(NetworkEndpoint::Tcp(format!("0.0.0.0:{port}").parse()?))
+                        .listen(NetworkEndpoint::Tcp(
+                            format!("{stream_bind_host}:{port}").parse()?,
+                        ))
                         .await
                         .map_err(|error| crate::Error::Network(error.to_string()))?,
                     ))
@@ -1801,15 +1814,19 @@ mod tests {
         let network_id = misaka_core::NetworkId::generate();
         let server_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
             .alpns(vec![misaka_network::IROH_ALPN.to_vec()])
+            .clear_ip_transports()
             .bind_addr("127.0.0.1:0")
             .unwrap()
+            .relay_mode(iroh::RelayMode::Disabled)
             .bind()
             .await
             .unwrap();
         let client_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
             .alpns(vec![misaka_network::IROH_ALPN.to_vec()])
+            .clear_ip_transports()
             .bind_addr("127.0.0.1:0")
             .unwrap()
+            .relay_mode(iroh::RelayMode::Disabled)
             .bind()
             .await
             .unwrap();
@@ -1868,15 +1885,19 @@ mod tests {
         let network_id = misaka_core::NetworkId::generate();
         let server_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
             .alpns(vec![misaka_network::IROH_ALPN.to_vec()])
+            .clear_ip_transports()
             .bind_addr("127.0.0.1:0")
             .unwrap()
+            .relay_mode(iroh::RelayMode::Disabled)
             .bind()
             .await
             .unwrap();
         let client_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
             .alpns(vec![misaka_network::IROH_ALPN.to_vec()])
+            .clear_ip_transports()
             .bind_addr("127.0.0.1:0")
             .unwrap()
+            .relay_mode(iroh::RelayMode::Disabled)
             .bind()
             .await
             .unwrap();
@@ -1945,15 +1966,19 @@ mod tests {
         let network_id = misaka_core::NetworkId::generate();
         let server_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
             .alpns(vec![misaka_network::IROH_ALPN.to_vec()])
+            .clear_ip_transports()
             .bind_addr("127.0.0.1:0")
             .unwrap()
+            .relay_mode(iroh::RelayMode::Disabled)
             .bind()
             .await
             .unwrap();
         let client_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
             .alpns(vec![misaka_network::IROH_ALPN.to_vec()])
+            .clear_ip_transports()
             .bind_addr("127.0.0.1:0")
             .unwrap()
+            .relay_mode(iroh::RelayMode::Disabled)
             .bind()
             .await
             .unwrap();
@@ -2108,15 +2133,19 @@ mod tests {
     async fn iroh_runtime_reuses_one_session_for_multiple_logical_streams() {
         let server_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
             .alpns(vec![misaka_network::IROH_ALPN.to_vec()])
+            .clear_ip_transports()
             .bind_addr("127.0.0.1:0")
             .unwrap()
+            .relay_mode(iroh::RelayMode::Disabled)
             .bind()
             .await
             .unwrap();
         let client_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
             .alpns(vec![misaka_network::IROH_ALPN.to_vec()])
+            .clear_ip_transports()
             .bind_addr("127.0.0.1:0")
             .unwrap()
+            .relay_mode(iroh::RelayMode::Disabled)
             .bind()
             .await
             .unwrap();
@@ -2559,10 +2588,12 @@ mod tests {
         )
         .await
         .unwrap();
+        // §17: the Direct TCP secure stream listener binds loopback by default
+        // (0.0.0.0 only when --advertise-host declares LAN intent).
         assert!(matches!(
             runtime.stream_listener.as_ref(),
             Some(super::StreamAcceptor::Direct(listener))
-                if listener.local_addr().ip().is_unspecified()
+                if listener.local_addr().ip().is_loopback()
         ));
         let stream_addr = runtime.stream_addr().unwrap();
         let shutdown = runtime.shutdown();

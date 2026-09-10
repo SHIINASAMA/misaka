@@ -375,15 +375,19 @@ mod tests {
         let (authority, authority_key) = NetworkAuthority::generate(network_id);
         let server_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
             .alpns(vec![misaka_network::IROH_ALPN.to_vec()])
+            .clear_ip_transports()
             .bind_addr("127.0.0.1:0")
             .unwrap()
+            .relay_mode(iroh::RelayMode::Disabled)
             .bind()
             .await
             .unwrap();
         let client_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
             .alpns(vec![misaka_network::IROH_ALPN.to_vec()])
+            .clear_ip_transports()
             .bind_addr("127.0.0.1:0")
             .unwrap()
+            .relay_mode(iroh::RelayMode::Disabled)
             .bind()
             .await
             .unwrap();
@@ -453,15 +457,19 @@ mod tests {
         let client_key = SisterKeyPair::generate();
         let server_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
             .alpns(vec![misaka_network::IROH_ALPN.to_vec()])
+            .clear_ip_transports()
             .bind_addr("127.0.0.1:0")
             .unwrap()
+            .relay_mode(iroh::RelayMode::Disabled)
             .bind()
             .await
             .unwrap();
         let client_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
             .alpns(vec![misaka_network::IROH_ALPN.to_vec()])
+            .clear_ip_transports()
             .bind_addr("127.0.0.1:0")
             .unwrap()
+            .relay_mode(iroh::RelayMode::Disabled)
             .bind()
             .await
             .unwrap();

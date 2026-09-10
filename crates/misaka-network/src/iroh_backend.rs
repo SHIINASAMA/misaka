@@ -36,6 +36,35 @@ pub fn misaka_alpns() -> Vec<Vec<u8>> {
     vec![IROH_ALPN.to_vec(), ENROLLMENT_ALPN.to_vec()]
 }
 
+/// Explicit socket/bind policy for an Iroh endpoint.
+///
+/// Misaka defaults are deliberately **local-only**: no public iroh relay is
+/// ever contacted implicitly, and the endpoint binds only loopback unless the
+/// operator opts into a reachable (all-interface) bind.
+#[derive(Debug, Clone)]
+pub struct IrohBindOptions {
+    /// Bind only `127.0.0.1` (`true`) vs. all interfaces (`false`). `false`
+    /// means the endpoint is reachable by non-loopback peers (direct LAN), or
+    /// can reach a non-loopback relay.
+    pub local_only: bool,
+    /// Relay to use. `None` ⇒ [`iroh::RelayMode::Disabled`] (never contact any
+    /// relay). `Some(url)` ⇒ that single operator-selected relay.
+    pub relay: Option<iroh::RelayUrl>,
+    /// Disable direct IP transports (relay-only measurement). Requires `relay`.
+    pub relay_only: bool,
+}
+
+impl IrohBindOptions {
+    /// The default: loopback-only, no relay.
+    pub fn local_only() -> Self {
+        Self {
+            local_only: true,
+            relay: None,
+            relay_only: false,
+        }
+    }
+}
+
 impl IrohBackend {
     /// Create a backend around an already configured Iroh endpoint.
     ///
@@ -47,16 +76,52 @@ impl IrohBackend {
         }
     }
 
-    /// Bind an endpoint using Iroh's default relay/address-lookup preset.
+    /// Bind a fresh endpoint with the default local-only policy.
     pub async fn bind() -> Result<Self> {
-        Self::bind_with_secret_key(iroh::SecretKey::generate()).await
+        Self::bind_with_options(iroh::SecretKey::generate(), IrohBindOptions::local_only()).await
     }
 
-    /// Bind an endpoint with a persisted transport identity.
+    /// Bind an endpoint with a persisted transport identity and the default
+    /// local-only policy (loopback bind, no relay).
     pub async fn bind_with_secret_key(secret_key: iroh::SecretKey) -> Result<Self> {
-        let endpoint = Endpoint::builder(iroh::endpoint::presets::N0)
+        Self::bind_with_options(secret_key, IrohBindOptions::local_only()).await
+    }
+
+    /// Bind an endpoint with an explicit bind/relay policy.
+    ///
+    /// - `local_only`: clear iroh's pre-configured any-interface sockets and
+    ///   bind `127.0.0.1` instead (never an all-interface listener).
+    /// - `relay: None`: relay explicitly disabled (no public iroh relay).
+    /// - `relay_only`: also disable direct IP peer transports (measurement).
+    pub async fn bind_with_options(
+        secret_key: iroh::SecretKey,
+        options: IrohBindOptions,
+    ) -> Result<Self> {
+        let mut builder = iroh::Endpoint::builder(iroh::endpoint::presets::N0)
             .secret_key(secret_key)
-            .alpns(misaka_alpns())
+            .alpns(misaka_alpns());
+        if options.local_only || options.relay_only {
+            // Remove iroh's default `0.0.0.0`/`[::]` sockets first; a loopback
+            // bind added afterwards is then the only IP socket.
+            builder = builder.clear_ip_transports();
+        }
+        if options.local_only {
+            builder = builder
+                .bind_addr("127.0.0.1:0")
+                .map_err(|error| NetworkError::Iroh(error.to_string()))?;
+        }
+        builder = match options.relay.as_ref() {
+            Some(relay_url) => builder.relay_mode(iroh::RelayMode::Custom(iroh::RelayMap::from(
+                relay_url.clone(),
+            ))),
+            None => builder.relay_mode(iroh::RelayMode::Disabled),
+        };
+        if options.relay_only && options.relay.is_none() {
+            return Err(NetworkError::Iroh(
+                "relay-only endpoint requires a relay URL".to_string(),
+            ));
+        }
+        let endpoint = builder
             .bind()
             .await
             .map_err(|error| NetworkError::Iroh(error.to_string()))?;
@@ -66,19 +131,22 @@ impl IrohBackend {
     /// Bind an endpoint using one explicitly selected Iroh relay.
     ///
     /// The relay only carries Iroh's encrypted transport traffic; it does not
-    /// become a Misaka authority or a separate network backend.
+    /// become a Misaka authority or a separate network backend. A remote relay
+    /// needs a reachable source socket, so this binds all interfaces; use
+    /// [`Self::bind_with_options`] with a loopback bind for a local relay.
     pub async fn bind_with_secret_key_and_relay(
         secret_key: iroh::SecretKey,
         relay_url: iroh::RelayUrl,
     ) -> Result<Self> {
-        let endpoint = Endpoint::builder(iroh::endpoint::presets::N0)
-            .secret_key(secret_key)
-            .alpns(misaka_alpns())
-            .relay_mode(iroh::RelayMode::Custom(iroh::RelayMap::from(relay_url)))
-            .bind()
-            .await
-            .map_err(|error| NetworkError::Iroh(error.to_string()))?;
-        Ok(Self::new(endpoint, IROH_ALPN))
+        Self::bind_with_options(
+            secret_key,
+            IrohBindOptions {
+                local_only: false,
+                relay: Some(relay_url),
+                relay_only: false,
+            },
+        )
+        .await
     }
 
     /// Bind an endpoint that can reach peers only through one explicitly selected relay.
@@ -89,15 +157,15 @@ impl IrohBackend {
         secret_key: iroh::SecretKey,
         relay_url: iroh::RelayUrl,
     ) -> Result<Self> {
-        let endpoint = Endpoint::builder(iroh::endpoint::presets::N0)
-            .secret_key(secret_key)
-            .alpns(misaka_alpns())
-            .relay_mode(iroh::RelayMode::Custom(iroh::RelayMap::from(relay_url)))
-            .clear_ip_transports()
-            .bind()
-            .await
-            .map_err(|error| NetworkError::Iroh(error.to_string()))?;
-        Ok(Self::new(endpoint, IROH_ALPN))
+        Self::bind_with_options(
+            secret_key,
+            IrohBindOptions {
+                local_only: false,
+                relay: Some(relay_url),
+                relay_only: true,
+            },
+        )
+        .await
     }
 
     /// Establish one long-lived Iroh connection without opening a logical

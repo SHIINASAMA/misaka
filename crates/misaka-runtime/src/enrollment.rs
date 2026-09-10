@@ -451,15 +451,19 @@ mod tests {
         // ALPN over a direct path with no network access.
         let server_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
             .alpns(misaka_network::misaka_alpns())
+            .clear_ip_transports()
             .bind_addr("127.0.0.1:0")
             .unwrap()
+            .relay_mode(iroh::RelayMode::Disabled)
             .bind()
             .await
             .unwrap();
         let client_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
             .alpns(misaka_network::misaka_alpns())
+            .clear_ip_transports()
             .bind_addr("127.0.0.1:0")
             .unwrap()
+            .relay_mode(iroh::RelayMode::Disabled)
             .bind()
             .await
             .unwrap();
