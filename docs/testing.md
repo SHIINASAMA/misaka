@@ -31,6 +31,7 @@ The suite currently contains:
 - `T11_testament_independence`: Sisters are independent OS processes.
 - `T12_mdns_discovery`: environment-sensitive; skipped when multicast is unavailable.
 - `T13_graceful_stop`: SIGTERM is handled by the runtime and exits with code 0; the stop event is diagnostic corroboration.
+- `T14_runtime_marker`: `runtime.json` is created after the API binds (loopback endpoint + current binary version), removed by its owning process on graceful shutdown, and a stale marker is reported by `misaka doctor`.
 
 Run one scenario while debugging:
 
@@ -344,10 +345,15 @@ launchd/systemd required in CI):
 - **Service generators** (`misaka`): plist/unit content (absolute executable,
   `MISAKA_CONFIG_DIR`, restart-on-failure, no token), deterministic labels,
   name validation, and safe `service run` argv (no insecure/test flags).
-- **Doctor** (`misaka`): Gateway-without-connectivity warning, URL parsing,
-  permission checks, healthy aggregation; the report also covers file
-  permissions, the Authority-owner serial allocator, and the service-manager vs
-  runtime-marker cross-check.
+- **Doctor** (`misaka`): local checks (permissions, Authority-owner serial
+  allocator, service-manager vs runtime-marker cross-check, Gateway-without-
+  connectivity warning) plus `--infra` probes: DGI01–DGI07 (Gateway
+  identity: match ⇒ ok; unsupported protocol / NetworkId / Authority mismatch
+  ⇒ error; malformed response / connection failure ⇒ warn; multiple Gateways
+  reported independently) and DRI01–DRI04 (Relay `/healthz`: success ⇒ ok;
+  health failure / unreachable / timeout ⇒ warn). Mocks are local; the
+  deployed Cloudflare Gateway is never used. `doctor --infra` never claims
+  Sister-to-Sister or data-path validation.
 - **Live service (opt-in, NOT in CI)** — `cargo run -p testament --
   service-verify`: installs a temporary, uniquely named per-user service in an
   isolated config dir, waits for the authenticated local API, checks
@@ -355,8 +361,9 @@ launchd/systemd required in CI):
   identity survives. It uses a `Drop` guard so a failed run still uninstalls,
   and it never touches `~/.misaka`.
 
-`misaka doctor --network` performs bounded opt-in reachability checks and is
-not part of normal CI. Live service installation (launchd/systemd) is
+`misaka doctor --infra` performs bounded opt-in Gateway-identity and
+Relay-health checks (`/.well-known/misaka`, `/healthz`) and is not part of
+normal CI. Live service installation (launchd/systemd) is
 exercised only by the opt-in `testament service-verify` (see above), never by
 CI; see `docs/deployment-v1.md` for the manual procedure too.
 

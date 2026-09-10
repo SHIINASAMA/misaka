@@ -157,21 +157,24 @@ configuration, or the content store. There is no automatic `--purge-data`.
 
 ## 4. `misaka doctor`
 
-Default doctor is local, bounded, non-destructive, and performs **no external
-network activity** (consistent with the loopback-only default).
+`misaka doctor` answers one question: **"Is this local Misaka installation
+internally healthy?"** It is local, bounded, non-destructive, and performs
+**no external network activity** by default.
 
 ```bash
 misaka doctor            # human output
 misaka doctor --json     # stable for scripts/Testament
-misaka doctor --network  # bounded opt-in reachability checks
+misaka doctor --infra    # opt-in: configured external infrastructure only
 ```
 
-Checks include: config dir; state-layout version (fail-closed on newer);
-token presence + file permissions; Sister identity/key; Iroh key; NetworkId;
-Authority descriptor (+ Authority-owner key consistency where applicable);
-membership signature/expiry + local revocation; transport binding; human
-identity completeness; `runtime.json` (stale pid / version mismatch);
-authenticated local API probe; service install state; Gateways configured.
+Local checks: config dir; state-layout version (fail-closed on newer); token
+presence + file permissions; config-dir/secret permissions; Sister
+identity/key; Iroh key; NetworkId; Authority descriptor (+ Authority-owner key
+consistency and serial-allocator readability where applicable); membership
+signature/expiry + local revocation; transport binding; human identity
+completeness; `runtime.json` (stale pid / version mismatch / crash leftovers);
+authenticated local API probe; service install + service-manager state;
+Gateways configured.
 
 Deployment diagnostic of note:
 
@@ -181,9 +184,66 @@ Gateway discovery is configured, but this Sister has no non-local transport
 path. Configure --advertise-host or --iroh-relay for multi-host use.
 ```
 
-`--network` adds bounded Gateway/relay TCP reachability checks. It never runs a
-transfer, Job, SSH, Tunnel, or Gateway mutation. Statuses are `ok|warn|error|
-skip`; doctor never prints secrets.
+### `misaka doctor --infra`
+
+Answers: **"Are the external infrastructure services configured for this
+Sister reachable and compatible with this Network?"** It is the only doctor
+mode that contacts external services, and it is bounded (~2–3 s connect /
+~5 s total; no retries).
+
+For each configured Gateway (reported independently as `infra:gateway:<index>`):
+
+```http
+GET https://<gateway>/.well-known/misaka
+```
+
+validating `GatewayInfo`: HTTP success, valid self-description, a supported
+`protocol_version`, `network_id` == local NetworkId, and
+`authority_fingerprint` == local Authority public key.
+
+For the configured Relay (`infra:relay`):
+
+```http
+GET <relay>/healthz
+```
+
+A Gateway/Relay that is unreachable or temporarily failing is `warn`. A
+**Network/Authority contradiction, or an unsupported required Gateway
+protocol, is `error`.** No local Network ⇒ Gateways are `skip` (never a
+manufactured identity); no Gateway/Relay configured ⇒ `skip`.
+
+### What `--infra` does NOT prove
+
+```text
+Gateway health      ≠ Network health
+Relay health        ≠ Sister reachability
+TCP reachability    ≠ Misaka protocol compatibility
+infrastructure OK   ≠ authenticated Sister-to-Sister connectivity
+```
+
+`--infra` does **not** test Sister-to-Sister connectivity, does not run a Job /
+Transfer / Tunnel / SSH workload, does not measure RTT or paths, does not
+probe Iroh peer handshakes, does not touch peer discovery, and **never mutates
+Gateway state** (no announce, no `/v1/peers`, no discovery change).
+`/.well-known/misaka` is sufficient for infrastructure identity validation.
+The Relay has no Misaka Network authority role, so it is never compared
+against NetworkId / Authority / membership.
+
+Statuses are `ok|warn|error|skip`; `healthy` means "no `error` checks". Doctor
+never prints secrets.
+
+### Tooling responsibility boundary
+
+```text
+doctor          local deployment integrity ("is my local Sister healthy?")
+doctor --infra  configured Gateway / Relay infrastructure compatibility
+ps              Sister/network state visibility ("who do I know?")
+connect / stream-test   actual transport/data-path diagnostics
+Testament       system correctness / regression verification
+```
+
+Misaka selects Sisters; Iroh delivers between Sisters. Doctor is a diagnostic,
+not a transport-routing layer.
 
 ## 5. State layout and upgrade boundary
 
@@ -320,7 +380,9 @@ ordering first.
 - Windows service management is not implemented (the code still compiles and
   its tests stay green).
 - No cross-file-atomic migration framework; no migration exists yet.
-- `doctor --network` uses bounded TCP reachability only (no authenticated
-  Gateway handshake), and does not probe peers.
+- `doctor --infra` validates Gateway identity (protocol / NetworkId / Authority
+  fingerprint via `/.well-known/misaka`) and Relay service health via
+  `/healthz` only; it does not perform authenticated Gateway handshakes, Iroh
+  peer probes, or path/RTT measurements.
 - No automatic updater, release channels, OAuth/multi-user control, public web
   console, or remote administration.

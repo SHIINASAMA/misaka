@@ -73,7 +73,7 @@ Use `MISAKA_CONFIG_DIR` for every local multi-Sister experiment. Never use a dev
 - Local control is authenticated: every `/api/v1/*` route requires the machine-local control token (`MISAKA_CONFIG_DIR/local-control-token`, 0600, 256 random bits). It is never logged, never in a service definition, never derived from Sister/Human/Authority credentials, and a malformed token is never silently replaced. Do not weaken the API for the Web UI — the Vite dev proxy injects the header server-side.
 - A persistent Sister is a **per-user** service (macOS LaunchAgent / Linux `systemd --user`; no root, no system-wide unit). `service install` persists only normal runtime connectivity and must never expose a Sister beyond loopback without an explicit `--advertise-host`/`--iroh-relay`, and never persists insecure/test flags. `service uninstall` never deletes identity, keys, membership, authority material, revocations, Gateway config, or the content store.
 - On-disk compatibility is gated by `state-layout.json`: a new dir creates v1, an existing dir is adopted without rewriting identity/security files, and a newer unsupported layout **fails closed**. Never introduce an irreversible migration, and never reset revocation or replay-protection state on upgrade.
-- Deployment, service, local-control, doctor, and upgrade details live in `docs/deployment-v1.md`.
+- Deployment, service, local-control, doctor, and upgrade details live in `docs/deployment-v1.md`. Keep `misaka doctor` local by default; `doctor --infra` checks configured Gateway identity (`/.well-known/misaka`) and Relay health (`/healthz`) only — never Sister-to-Sister connectivity, peer handshakes, or Job/Transfer/Tunnel/SSH workloads, and never Gateway state mutation.
 
 ## Change style
 

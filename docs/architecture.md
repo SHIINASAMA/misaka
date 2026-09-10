@@ -315,7 +315,9 @@ revocation propagation remains an explicit open item (see below).
 - A persistent Sister runs as a per-user service (`misaka service`), and the
   default network posture (loopback-only, relay disabled) is preserved: a
   service is reachable beyond loopback only with an explicit `--advertise-host`
-  or `--iroh-relay` at install time. `misaka doctor` diagnoses the deployment.
+  or `--iroh-relay` at install time. `misaka doctor` diagnoses the deployment (local by default; `--infra`
+  additionally checks configured Gateway identity and Relay health only — it
+  does not test Sister-to-Sister connectivity or run a workload).
 
 ## Current open architecture items
 
