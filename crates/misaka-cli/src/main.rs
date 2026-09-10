@@ -40,6 +40,9 @@ use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::task::JoinSet;
 
+mod doctor;
+mod service;
+
 #[derive(Parser)]
 #[command(name = "misaka")]
 #[command(about = "Misaka Network - decentralized computing network")]
@@ -208,6 +211,22 @@ enum Command {
         json: bool,
     },
 
+    /// Manage a per-user Sister service (macOS LaunchAgent / Linux systemd --user).
+    Service {
+        #[command(subcommand)]
+        command: ServiceCommand,
+    },
+
+    /// Diagnose local deployment health (bounded, non-destructive).
+    Doctor {
+        /// Emit a machine-readable report as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Opt in to bounded reachability checks against configured Gateways/relay.
+        #[arg(long)]
+        network: bool,
+    },
+
     /// Run only the native Iroh relay service.
     Relay {
         /// Public address on which the Iroh relay listens.
@@ -366,6 +385,62 @@ enum Command {
 }
 
 #[derive(Subcommand)]
+enum ServiceCommand {
+    /// Install (and start, unless --no-start) a per-user service for this config dir.
+    Install {
+        /// Service profile name (deterministic label/unit).
+        #[arg(long, default_value = service::DEFAULT_SERVICE_NAME)]
+        name: String,
+        /// Sister listen port recorded in service.json.
+        #[arg(long)]
+        port: Option<u16>,
+        /// Local control API port recorded in service.json.
+        #[arg(long)]
+        api_port: Option<u16>,
+        /// Read-only introspection port (0 disables).
+        #[arg(long)]
+        introspect: Option<u16>,
+        /// Discovery mode recorded in service.json.
+        #[arg(long, default_value = "mdns")]
+        discovery: String,
+        /// Write the definition but do not start it.
+        #[arg(long)]
+        no_start: bool,
+    },
+    /// Start the installed service.
+    Start {
+        #[arg(long, default_value = service::DEFAULT_SERVICE_NAME)]
+        name: String,
+    },
+    /// Stop the installed service.
+    Stop {
+        #[arg(long, default_value = service::DEFAULT_SERVICE_NAME)]
+        name: String,
+    },
+    /// Restart the installed service.
+    Restart {
+        #[arg(long, default_value = service::DEFAULT_SERVICE_NAME)]
+        name: String,
+    },
+    /// Report service installation and running state.
+    Status {
+        #[arg(long, default_value = service::DEFAULT_SERVICE_NAME)]
+        name: String,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove the service registration and definition (never Network state).
+    Uninstall {
+        #[arg(long, default_value = service::DEFAULT_SERVICE_NAME)]
+        name: String,
+    },
+    /// Internal entrypoint used by the service definition to run the Sister.
+    #[command(hide = true)]
+    Run,
+}
+
+#[derive(Subcommand)]
 enum NetworkCommand {
     /// Initialize the local Network authority and owner Sister membership.
     Init,
@@ -515,13 +590,22 @@ fn main() -> Result<(), MisakaError> {
 }
 
 async fn async_main() -> Result<(), MisakaError> {
-    let cli = Cli::parse();
+    dispatch(Cli::parse()).await
+}
+
+/// Dispatch one parsed CLI invocation.
+///
+/// `misaka service run` re-enters this with a synthetic `start` invocation built
+/// from `service.json`, so `misaka start` and a service-managed daemon share one
+/// runtime assembly path — there is no second Sister startup implementation.
+pub(crate) async fn dispatch(cli: Cli) -> Result<(), MisakaError> {
     let requested_network_id = cli
         .network_id
         .as_deref()
         .map(misaka_core::NetworkId::parse)
         .transpose()
         .map_err(|error| MisakaError::Other(format!("invalid --network-id: {error}")))?;
+    let iroh_relay_raw = cli.iroh_relay.clone();
     let iroh_relay = cli
         .iroh_relay
         .map(|value| {
@@ -1510,6 +1594,52 @@ async fn async_main() -> Result<(), MisakaError> {
                 );
             }
         }
+
+        Command::Service { command } => match command {
+            ServiceCommand::Run => service::run().await?,
+            ServiceCommand::Install {
+                name,
+                port,
+                api_port,
+                introspect,
+                discovery,
+                no_start,
+            } => {
+                let mut start = service::ServiceStartOptions::default();
+                if let Some(port) = port {
+                    start.port = port;
+                }
+                if let Some(api_port) = api_port {
+                    start.api_port = api_port;
+                }
+                if let Some(introspect) = introspect {
+                    start.introspect = introspect;
+                }
+                start.discovery = discovery;
+                // The only connectivity switches a service persists. Absent
+                // these, the daemon stays loopback-only with relay disabled.
+                start.advertise_host = advertise_host.map(|ip| ip.to_string());
+                start.iroh_relay = iroh_relay_raw.clone();
+                start.iroh_relay_only = cli.iroh_relay_only;
+                if start.iroh_relay_only && start.iroh_relay.is_none() {
+                    return Err(MisakaError::Other(
+                        "--iroh-relay-only requires --iroh-relay <url>".to_string(),
+                    ));
+                }
+                service::install(service::InstallRequest {
+                    name,
+                    start,
+                    no_start,
+                })?;
+            }
+            ServiceCommand::Start { name } => service::start(&name)?,
+            ServiceCommand::Stop { name } => service::stop(&name)?,
+            ServiceCommand::Restart { name } => service::restart(&name)?,
+            ServiceCommand::Status { name, json } => service::status(&name, json)?,
+            ServiceCommand::Uninstall { name } => service::uninstall(&name)?,
+        },
+
+        Command::Doctor { json, network } => doctor::run(json, network).await?,
 
         Command::Connect { sister } => {
             run_connect(&sister, iroh_options.clone())
@@ -3991,6 +4121,36 @@ async fn http_post_json(
     })
     .await
     .ok()?
+}
+
+/// Bounded authenticated `GET /api/v1/overview` against the local control API.
+/// Returns the HTTP status code (`200` ok, `401` authentication failure).
+pub(crate) async fn probe_local_control(addr: SocketAddr, data_dir: &Path) -> Result<u16, String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let token = misaka_runtime::local_control_token_store::LocalControlTokenStore::load(data_dir)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "local control token is missing".to_string())?;
+    let mut stream = tokio::time::timeout(
+        Duration::from_millis(1500),
+        tokio::net::TcpStream::connect(addr),
+    )
+    .await
+    .map_err(|_| "connect timed out".to_string())?
+    .map_err(|error| error.to_string())?;
+    let request = format!(
+        "GET /api/v1/overview HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n"
+    );
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut bytes = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut bytes)).await;
+    let text = String::from_utf8_lossy(&bytes);
+    text.split_whitespace()
+        .nth(1)
+        .and_then(|status| status.parse::<u16>().ok())
+        .ok_or_else(|| "no HTTP status in response".to_string())
 }
 
 /// Client for the running Sister's authenticated loopback control surface.
