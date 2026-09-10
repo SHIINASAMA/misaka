@@ -1,5 +1,9 @@
 # Gateway v0
 
+> Current discovery service. For the Gateway's place in the runtime stack see
+> [architecture.md](architecture.md#gateway); for the small-network scope of
+> what Sisters exchange see [network-knowledge-v0.md](network-knowledge-v0.md).
+
 Gateway v0 solves one problem: **two Sisters that already belong to the same
 Misaka Network can discover each other and form the existing authenticated Iroh
 P2P connection using nothing more than a configured Gateway domain.**
@@ -25,12 +29,17 @@ The Gateway does:
 
 The Gateway does **not**:
 
-- enroll members or issue `MembershipCertificate`s,
+- enroll members or issue `MembershipCertificate`s (it is not the membership
+  issuer),
 - hold the Network Authority **private** key (it needs only the public half),
 - relay application traffic, run jobs/transfers/tunnels, keep a long-lived
-  control connection, or forward data.
+  control connection, or forward data,
+- act as a Job router or scheduler,
+- hold shared central Network state (Gateways never communicate, replicate,
+  or reconcile; see below).
 
-A Gateway deployment serves exactly **one Network** in v0.
+The Gateway is not an Authority, not a Relay, and not a data plane. A Gateway
+deployment serves exactly **one Network** in v0.
 
 ## Enrollment is separate
 
@@ -99,9 +108,9 @@ a revoked Sister cannot actually establish the P2P session. The residual risk is
 directory **information disclosure** to a revoked-but-unexpired member.
 
 Follow-up (when needed): feed the Gateway the Network's
-Authority-signed `RevocationRecord`s (the client already fetches the
-`network-revocations.json` sidecar during join) and have `verify_request` reject
-a presented membership whose serial is revoked.
+Authority-signed `RevocationRecord`s (each Sister currently holds only its own
+local `revocations.json`; there is no distribution channel yet) and have
+`verify_request` reject a presented membership whose serial is revoked.
 
 ## Wire contract — `misaka-core/src/gateway.rs`
 Transport-agnostic DTOs, plain serde with `#[serde(default)]` on additive

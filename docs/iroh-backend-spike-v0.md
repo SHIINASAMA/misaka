@@ -1,5 +1,18 @@
 # Iroh Backend Spike v0
 
+> **Historical design record.**
+> Not the authoritative description of current runtime behavior.
+> See [architecture.md](architecture.md) for current architecture.
+>
+> This document records the point when Iroh was an *opt-in spike* and
+> Direct TCP was still the default. That ordering is reversed today: **Iroh is
+> the default `misaka start` transport and Direct TCP is the
+> compatibility/debug path.** Transport facts that remain true (Iroh owns path
+> selection and session reuse; Misaka observes path events and does not
+> transparently migrate application streams) are restated in current form in
+> [network-stream-v0.md](network-stream-v0.md) and
+> [iroh-control-plane-v0.md](iroh-control-plane-v0.md).
+
 This checkpoint adds one optional Iroh backend to `misaka-network`. It is a
 connectivity spike and does not change the runtime's default Direct TCP path.
 Sister listeners persist the Iroh transport key, so a Sister keeps the same

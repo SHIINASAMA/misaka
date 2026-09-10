@@ -2,6 +2,12 @@
 
 Misaka Network is a local-network, decentralized runtime in which every node is a **Sister**. A Sister can listen for peers, discover and remember network state, accept or submit work, execute jobs, and contribute idle capacity. There is no master/slave role.
 
+**Current status: pre-Resource alpha.** Identity, membership, timed-invite
+enrollment, authenticated Iroh connectivity, Gateway/Relay discovery, Network
+Knowledge, and basic distributed Job execution are real. The Resource/Ability
+abstractions and distributed-storage semantics are **not** designed yet. See
+[docs/architecture.md](docs/architecture.md) for the current architecture.
+
 ## Workspace
 
 ```text
@@ -78,8 +84,16 @@ atomically, and commits the optional Gateway only on success. See
 [docs/network-formation-v0.md](docs/network-formation-v0.md) for the full model
 and [docs/gateway-v0.md](docs/gateway-v0.md) for discovery.
 
+**Network posture — default local-only.** `misaka start` binds only loopback
+and never contacts a relay, so an unconfigured Sister is local/same-host only.
+To reach (or be reached by) a non-loopback peer, pass explicit flags:
+`--advertise-host <ip>` enables LAN direct connectivity, and
+`--iroh-relay <url>` enables an operator-selected (own/local) relay. These are
+the switches that permit any non-loopback binding or external relay contact.
+
 For deterministic local experiments without a Gateway, use manual discovery and
-isolated configuration directories:
+isolated configuration directories. This is a **debug / compatibility**
+topology, not normal onboarding:
 
 ```bash
 MISAKA_CONFIG_DIR=.misaka-a cargo run -p misaka -- start \
@@ -91,21 +105,22 @@ MISAKA_CONFIG_DIR=.misaka-b cargo run -p misaka -- start \
 ```
 
 `--stream-backend` (default `iroh`), `--peer`, `--iroh-peer`, and
-`--advertise-host` are low-level debug / recovery / compatibility options and
-are not needed for normal onboarding. `--introspect` enables a read-only JSON
-snapshot endpoint on loopback; it is disabled by default. See
+`--advertise-host` are low-level **debug / recovery / compatibility /
+measurement** options and are not needed for normal onboarding.
+`--introspect` enables a read-only JSON snapshot endpoint on loopback; it is
+disabled by default. See
 [docs/architecture.md](docs/architecture.md) and [docs/protocol.md](docs/protocol.md).
 
-Once a peer has been learned into the local PeerStore, establish and verify a
-stream by Sister identity:
+Also for debug / recovery / measurement: once a peer has been learned into the
+local PeerStore, establish and verify a stream by Sister identity,
 
 ```bash
 MISAKA_CONFIG_DIR=.misaka-a cargo run -p misaka -- connect '#<sister-id>'
 ```
 
-The command resolves the stored Iroh or explicitly advertised candidate,
-performs the stream handshake and a bounded echo exchange, then reports the
-selected path.
+which resolves the stored Iroh or explicitly advertised candidate, performs
+the stream handshake and a bounded echo exchange, then reports the selected
+path.
 
 
 ## Operator UX

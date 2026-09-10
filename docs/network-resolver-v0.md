@@ -1,30 +1,45 @@
-# Network Resolver v0
+# Network Resolver v0 (limited scope)
 
-`misaka-network::resolver` owns candidate ordering without owning Sister
-identity or service policy:
+The current architecture must **not** be read as "Misaka manually selects
+LAN → Direct → Relay" for normal authenticated Iroh connectivity.
+
+For a normal enrolled Sister the boundary is:
 
 ```text
-PeerState stream candidates
-          │
-          ▼
-EndpointCandidate
-          │ rank
-          ▼
-LAN → direct → relay
+Misaka resolves a Sister to a validated Iroh endpoint / signed PeerRecord.
+
+Iroh owns:
+  direct path
+  NAT traversal
+  relay fallback
+  path changes
 ```
 
-Runtime resolver candidates currently use TCP. The transport layer also has
-an opt-in Iroh endpoint variant. `EndpointCandidate` now ranks explicit Iroh
-candidates after direct TCP and before the reserved relay slot; an Iroh backend
-must still be explicitly injected into `SisterConnector`. Loopback/private TCP
-addresses rank as `Lan`; other TCP addresses rank as `Direct`; `Relay` is a
-reserved kind for the relay integration boundary. `SisterConnector` and
-`SecureSisterConnector` use this ordering while preserving invalid-candidate
-diagnostics and sequential fallback.
+Misaka does not implement its own IP/overlay routing algorithm, and a Sister
+is not used as a router when another Sister cannot establish a direct path.
+The resolver module is therefore **not** the mechanism behind normal
+authenticated-Iroh connectivity. See
+[architecture.md](architecture.md#routing-boundary) and
+[network-stream-v0.md](network-stream-v0.md).
 
-`SisterConnector` races TCP and explicitly injected Iroh candidates while
-preserving Direct TCP-only behavior when no Iroh backend is configured. The
-stream boundary captures `PathInfo` for the selected backend, including
-optional selected-path RTT, and the runtime keeps a separate in-memory
-active-stream registry exposed only through loopback introspection; a candidate
-is never treated as evidence that a stream is connected.
+## What the resolver module actually is
+
+`misaka-network::resolver` provides candidate-ranking and candidate-racing
+primitives (`EndpointCandidate`, `rank_candidates`, `race_connect`) with a
+`PathKind` taxonomy (Lan / Direct / Iroh / Relay). These primitives date from
+the pre-Iroh, TCP-first candidate model. Today they serve two limited roles:
+
+- the **legacy / generic NetworkStream compatibility and test layer**
+  (the runtime `connection.rs` connector types that consume the resolver are
+  no longer on the normal runtime path);
+- **diagnostic classification** — e.g. the CLI labels an endpoint's kind
+  (`lan` / `direct` / `iroh` / `relay`) from `EndpointCandidate`.
+
+Normal CLI stream clients (`misaka connect`, `cp`, `tunnel`, `ssh`,
+`stream-test`) resolve a peer from the local PeerStore and dial its stored
+Iroh (or Direct TCP) endpoint directly, then run the authenticated session
+over Iroh. They do not route through the resolver's relay slot, and the relay
+kind is not selected by runtime policy.
+
+Do not extend this module into a Misaka-owned path-selection or routing
+algorithm: path ownership belongs to Iroh.

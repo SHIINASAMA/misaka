@@ -1,5 +1,9 @@
 # Misaka Network — Project Normalization, Modularization & Testament Plan
 
+> **Historical design/planning record.**
+> Not the authoritative description of current runtime behavior.
+> See [architecture.md](architecture.md) for current architecture.
+
 ## 0. Objective
 
 Refactor the current Misaka Network prototype into a maintainable Rust workspace without changing its fundamental architecture:

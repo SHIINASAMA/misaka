@@ -1,249 +1,354 @@
-# Runtime architecture
+# Misaka Runtime Architecture (current)
 
-## Foundation v1 completion boundary
+> **This document is the authoritative description of the current Misaka
+> runtime.** Subsystem docs and design records from earlier phases may still
+> describe historical stepping stones; when they disagree with this document
+> or with the code, this document plus the current source win. See
+> [Documentation authority](#documentation-authority) at the end.
 
-Foundation v1 establishes explicit ownership for all mutable peer/job state and
-unifies runtime shutdown. It deliberately does not introduce the next-round
-identity and authorization model (Ability, Tag, JobRequirements,
-HumanIdentity, Principal, Trust, Permission, or Authorization).
+## Project stage: Pre-Resource Alpha
 
-## Sister model and ownership graph
-
-A running `SisterRuntime` is one complete Misaka node. Every node has equal
-capabilities; peer IDs identify nodes but do not confer authority. There is no
-master/slave role.
-
-```text
-SisterRuntime
-├── node: SisterNode
-├── listener: TcpListener
-└── shutdown: Shutdown                 # watch sender; coordinator-owned
-
-SisterNode
-├── identity: Arc<SisterIdentity>       # immutable identity
-├── config: RuntimeConfig               # immutable runtime settings
-├── bind_addr / listen_addr             # immutable after assembly
-├── peers: PeerService                  # peer-state service handle
-│   └── PeerRegistry                    # Arc<RwLock<PeerStateTable>>
-│       └── PeerStateTable              # sole in-memory peer-state owner
-├── jobs: JobManager                    # job-state service handle
-│   ├── JobQueue                        # sole queue owner
-│   ├── job metadata                    # sole LocalJob map owner
-│   └── pending results                 # sole oneshot waiter owner
-├── local_state: Arc<RwLock<LocalState>># resource observation handle
-├── scheduler: Arc<Scheduler>           # stateless policy
-├── transport: PeerTransport             # wire/framing/encryption
-└── shutdown: ShutdownToken              # task cancellation receiver
-
-handler ────────> PeerService / JobManager ────────> mutable state
-executor ───────> JobManager ──────────────────────> mutable state
-stealing ───────> PeerService / JobManager ────────> mutable state
-```
-
-`SisterNode` is now an assembler/facade for immutable identity/config,
-transport operations, local resource observation, and service handles. It no
-longer exposes raw `PeerStateTable`, `JobQueue`, local-job map, or pending
-result map fields. `SisterRuntime` owns orchestration and cancellation, not
-peer/job state.
-
-### Service boundaries
-
-- **`PeerRegistry`**: async façade over in-memory `PeerStateTable`. Owns
-  upsert, lookup, address resolution, enumeration, and offline pruning. It
-  knows nothing about disk or transport.
-- **`PeerService`**: coordinates `PeerRegistry` with `PeerStore` persistence
-  and identity-derived peer recording. It does not own network transport;
-  `SisterNode` keeps the wire operation boundary.
-- **`JobManager`**: owns `JobQueue`, `LocalJob` metadata, status transitions,
-  and pending remote-result waiters. `enqueue`, `start_inline`, `mark_running`,
-  `mark_transferred`, `mark_finished`, and pending-result methods are the only
-  state operations used by protocol and worker services.
-- **`Scheduler`**: remains stateless. It receives snapshots and returns an
-  optional executor ID; it does not read system resources itself.
-- **`Executor`**: consumes jobs from `JobManager`, runs commands on Tokio's
-  blocking pool, records transitions through `JobManager`, and routes remote
-  results through node transport.
-- **`WorkStealing`**: reads peer/job service views, requests work when idle,
-  and relies on handler + JobManager for transfer bookkeeping.
-- **`Handler`**: interprets wire messages and calls service methods. It does
-  not lock or mutate raw state containers.
-
-Foundation v1 deliberately keeps `SisterIdentity` (machine identity) separate from job and peer state. Future `HumanIdentity`/`Principal` data can be associated at an authorization boundary without changing transport ownership. `JobManager` is the future seam for adding job requirements/tags, while `PeerService` is the future seam for trust and capability observations. No current peer ID or nickname is treated as a permission or authority decision.
-
-## Runtime lifecycle
-
-`SisterRuntime::new` creates a `Shutdown` sender, injects a cloneable
-`ShutdownToken` into the node, and binds listeners. Configured peer handshakes
-run after `run` starts accepting inbound sockets; this avoids a startup
-deadlock when two fresh Sisters simultaneously wait for each other's Hello.
-`run` starts cancellable background tasks and selects between listener
-acceptance and shutdown.
-
-The same token is selected by discovery, gateway discovery, state broadcast,
-cleanup, executor, work stealing, response-listener, and accept loops. On
-cancellation, the accept loop stops, in-flight request tasks are aborted,
-service tasks are joined within `RuntimeConfig.shutdown_timeout`, and
-`sister_stopped` is emitted. A currently running `spawn_blocking` command is
-allowed to finish; shutdown waits only up to the configured bound and then
-detaches if necessary.
-
-The CLI installs SIGTERM/SIGINT handling on `Start`. A signal requests this
-cooperative shutdown and the process exits successfully after `run` returns.
-A sudden SIGKILL bypasses the handler and produces no graceful-stop event.
-
-## Configuration and identity
-
-`RuntimeConfig` centralizes listen port, advertised host, data directory,
-timer intervals, discovery mode, introspection address, and shutdown timeout.
-`IdentityStore` persists a Sister identity in the configured data directory.
-`MISAKA_CONFIG_DIR` overrides the default configuration location and is used
-for isolated multi-process tests.
-
-A node binds `0.0.0.0:<port>` for peer traffic and advertises either loopback
-or the configured `advertise_host`. Introspection is a separate optional
-loopback-only listener and is never sent in Hello, State, or mDNS records.
-
-## Network knowledge
-
-`PeerStateTable` is in-memory knowledge. `PeerStore` serializes the minimal
-peer blueprint needed by the standalone CLI to reconnect to known peers.
-Hello exchanges identity, listen address, and an optional loopback stream
-candidate; State exchanges resource, queue, and stream-candidate metadata.
-The mDNS record carries the same optional stream candidate metadata. Peer
-timeout cleanup removes stale entries.
-
-The current transport uses short-lived TCP connections. Each message is
-encoded with bincode, encrypted with AES-256-GCM, and framed as:
+Misaka is currently a **pre-Resource alpha**. The identity, membership,
+enrollment, authenticated-connectivity, Gateway/Relay/Network-Knowledge, and
+basic distributed-Job layers are mature enough to exercise end to end. The
+Resource/Ability abstractions and the distributed-storage semantics that would
+sit above them are **not** mature and not designed yet.
 
 ```text
-[u32 big-endian encrypted-frame length][encrypted payload]
+Mature enough today:
+  identity, membership, timed-invite enrollment,
+  authenticated Iroh connectivity, Gateway discovery, Relay,
+  Network Knowledge, basic distributed Job execution
+
+Not mature / not designed yet:
+  Resource abstraction, Ability abstraction, Tags,
+  resource placement, resource coordination,
+  distributed storage semantics
 ```
 
-The maximum frame length is bounded before allocation. Every envelope carries
-a protocol version.
+This stage label is a boundary statement, not a roadmap. It explains why
+experimental surfaces (Transfer, generic NetworkStream) are deliberately not
+presented as foundational infrastructure.
 
-Secure Network Streams use TLS 1.3 with mutual certificate authentication via
-`misaka-network::tls`. A Sister pins the expected peer certificate as a trust
-root and validates the peer's certificate identity name; the TLS library owns
-the key exchange and record encryption. `RuntimeConfig::MutualTls` wires this
-primitive into an opt-in listener, while the default raw stream remains
-loopback-only. Trust provisioning is explicit and is never inferred from
-mDNS alone.
+## Layered architecture
 
-## Discovery and the Gateway v0
+```text
+Applications / Services
+    Job
+    Tunnel
+    experimental Transfer
+        ↓
+Misaka runtime
+    Identity
+    Membership
+    Human Authorization
+    Network Knowledge
+    Scheduler
+    JobManager
+        ↓
+Authenticated Iroh session / control plane
+        ↓
+Iroh connectivity
+    direct
+    NAT traversal
+    Relay fallback
+        ↓
+Internet / LAN
+```
 
-Sisters learn about each other through `DiscoveryMode` (mDNS on a LAN, manual
-peer addresses, or off). Beyond that, a **Gateway** lets Sisters that already
-share a Network discover each other over plain HTTPS using only a configured
-domain. The `gateway_loop` background task periodically announces the local
-signed `PeerRecord`, fetches peers from every configured Gateway independently,
-merges results per Sister by the highest `PeerRecord::sequence`, and calls
-`SisterNode::bootstrap_peer_record` for new or newer locators. Bootstrap
-re-verifies the record, cross-checks its endpoint against its own
-`TransportBinding`, and pins the authenticated Iroh Hello to the record's
-Sister id before storing it, so the Gateway is never a trust anchor.
+Each running node is an equal **Sister**. There is no runtime master/slave
+role: every Sister runs the same discovery, state, execution, cleanup, and
+work-stealing services (`SisterNode` is explicitly documented as having no
+master/slave identity in the code). Peer IDs identify nodes but confer no
+authority over other nodes.
 
-The Gateway layering rule is **crypto vs. storage**: the signature and
-membership verification (`misaka_core::gateway::verify_request`) is shared
-pure code in `misaka-core`; the directory state machine (uniqueness,
-monotonic-sequence update, nonce replay, TTL, GC, list) is owned by the storage
-platform — Durable Object SQL for the Cloudflare reference host, an in-process
-map for the native `misaka-gatewayd` self-host/test host. It is deliberately
-not reimplemented as a reusable Rust state machine. Gateways never talk to each
-other, replicate, elect a leader, or reconcile. `--iroh-peer` remains only a
-debug/recovery escape hatch. Full design: [gateway-v0.md](gateway-v0.md).
+## The two actors: Sisters and the Network Authority
 
-## Network Stream v0 boundary
+- **Sister** — an equal runtime node. Handles its own inbound/outbound
+  traffic, executes jobs, contributes capacity.
+- **Network Authority** — the trust root and membership issuer for one
+  NetworkId. It is *not* a runtime master Sister. Its private key never
+  appears in a Sister runtime message, a Gateway, an Invite Code, or a log.
+  A Sister that happens to hold the authority key additionally serves
+  enrollment (redeeming timed invites) because that is where the private key
+  lives — that is a key-holding role, not a control role.
 
-The optional `misaka-network` crate provides a separate Direct TCP
-`NetworkStream` with a minimal magic/version handshake and raw post-handshake
-Tokio byte IO. `NetworkBackend` is the transport boundary. `DirectTcpBackend`
-remains the runtime's default implementation and the existing free functions
-remain compatibility wrappers. An opt-in `IrohBackend` adapts one or more
-Iroh bidirectional QUIC streams to the same `NetworkStream` contract;
-`--stream-backend iroh` selects it for the runtime and CLI. `SisterRuntime`
-binds its experimental Direct TCP listener to loopback (`127.0.0.1`) on the
-independent `--stream-port`, and server-side handshakes time out after five
-seconds. It does not migrate or unify the control-plane `PeerTransport`, or
-route by SisterId. Stream addresses and peer certificates are stored
-separately as connection candidates and trust material; secure TLS is opt-in
-until the operator provisions the trust set.
+Identity material is covered in [identity-v0.md](identity-v0.md) and
+membership/revocation in [membership-v0.md](membership-v0.md).
 
-Endpoint Model v0 introduces `NetworkEndpoint::Tcp(SocketAddr)` and the
-opt-in `NetworkEndpoint::Iroh(EndpointAddr)` at the backend boundary. These
-values are connection candidates and are deliberately distinct from
-`SisterId`; SisterId resolution and persisted stream endpoint
-knowledge are separate from the legacy control endpoint. `SisterConnector`
-resolves stored stream candidates by `SisterId` and races explicit TCP and Iroh
-candidates when the matching backend is configured; it does not perform
-automatic Iroh discovery, transparent reconnect, application-layer
-authentication, or own a long-lived session.
+## Routing boundary
 
-The v0 runtime echo loop exists only to validate long-lived bidirectional
-streams and uses bounded buffers. The stream is intentionally insecure and is
-restricted to loopback/deterministic test use. Active stream introspection
-reports backend, selected route, optional RTT, endpoints, age, and byte
-counters through the loopback-only diagnostic surface. Security, transfer,
-tunnel, discovery, multiplexing, and cross-domain connectivity are later
-checkpoints.
+Misaka does not implement an application-level next-hop routing protocol
+between Sisters.
+
+The scheduler or caller selects a destination Sister.
+
+Network Knowledge resolves that Sister to validated transport information.
+
+Iroh is responsible for delivering traffic to that Sister, including
+direct connectivity, NAT traversal, and relay fallback.
+
+Therefore:
+
+    Misaka selects Sisters;
+    Iroh delivers between Sisters.
+
+A Sister is not used as a router merely because another Sister cannot
+establish a direct IP path. There is no "next-hop" Job/packet routing layer
+between Sisters, and no network-wide routing table to build or converge.
+
+## Transport reality
+
+- **Iroh is the normal/default transport** for `misaka start`
+  (`--stream-backend` defaults to `iroh`). An Iroh Sister does not bind the
+  legacy TCP control listener; the authenticated Iroh control channel is its
+  control plane.
+- **Default posture is local-only.** With no explicit flags, a Sister's Iroh
+  endpoint binds `127.0.0.1` only and relay is **disabled** — it never
+  contacts an iroh relay and never opens an any-interface socket. Reaching or
+  being reached by a non-loopback peer requires an explicit flag:
+  `--advertise-host <ip>` enables direct (LAN) peer connectivity by binding
+  all interfaces; `--iroh-relay <url>` enables an operator-selected relay
+  (bound loopback when the URL is on the loopback interface, all-interface
+  otherwise so the relay is reachable).
+- **DirectTcp is compatibility/debug/test infrastructure.** It is the
+  `RuntimeConfig::default()` backend only for internal/test construction; the
+  CLI does not select it unless asked. It does not provide the authenticated
+  session identity guarantees that Iroh provides, and it is not the normal
+  production transport. Its listeners follow the same rule: loopback by
+  default, all interfaces only with `--advertise-host`.
+- Iroh owns encryption, endpoint identity, and **path selection** (direct
+  connectivity, NAT traversal, and — only when a relay is configured — relay
+  fallback and path changes). Misaka observes route information for
+  diagnostics and does not transparently reroute application streams itself.
+
+See [iroh-control-plane-v0.md](iroh-control-plane-v0.md) for the control-plane
+channel and [network-stream-v0.md](network-stream-v0.md) for the boundary
+between the normal transport and the legacy/experimental stream surfaces.
+
+## Authenticated Iroh session and control plane
+
+Before any service runs on an Iroh logical stream, the stream must complete an
+authenticated ClientHello/ServerHello. The handshake binds together:
+
+```text
+NetworkId
+SisterId
+SisterPublicKey
+MembershipCertificate (Authority-signed, time-valid)
+TransportBinding
+actual remote Iroh EndpointId
+```
+
+and checks the local revocation store. A stream that fails any check is
+dropped before echo, Transfer, Tunnel, or control dispatch. Once accepted, the
+verified `AuthenticatedPeer` is carried into application dispatch, and
+`Envelope.from` means **the immediate authenticated sender of that stream** —
+a valid Sister cannot spoof another Sister's id on an authenticated channel.
+
+DirectTcp remains the compatibility path and does **not** provide these
+identity guarantees. Full details:
+[authenticated-session-v0.md](authenticated-session-v0.md).
+
+## Enrollment and membership
+
+Timed-invite enrollment is the normal join UX:
+
+```text
+misaka network init        # owner: Network + Authority
+misaka start               # Iroh is the default transport
+misaka network invite --expires 1h
+misaka network join <network-id> <invite-code> [--gateway]
+```
+
+A fresh device needs only a Network ID, an Invite Code, and an optional
+Gateway URL. The joiner proves key possession to the Authority over Iroh
+(dedicated `misaka/enrollment/1` ALPN) and installs an Authority-signed
+membership atomically. The Gateway is never the enrollment authority. See
+[network-formation-v0.md](network-formation-v0.md).
+
+## Gateway
+
+A Gateway is a **discovery** service: it stores signed `PeerRecord`s and
+answers queries, nothing more.
+
+```text
+Gateway:
+  announce signed PeerRecord
+  query PeerRecords
+  bootstrap discovery
+
+NOT:
+  membership issuer / Authority / Relay / data plane /
+  Job router / shared central Network state
+```
+
+It never holds the Authority private key. Sisters announce to and query every
+configured Gateway independently, validate each candidate (`PeerRecord`
+re-verification plus endpoint↔TransportBinding cross-check), and merge local
+observations by highest `PeerRecord::sequence`. Gateways never communicate,
+replicate, or reconcile with each other. Once an authenticated Iroh P2P
+connection forms, the Gateway is out of the data path. Details:
+[gateway-v0.md](gateway-v0.md).
+
+## Relay
+
+An Iroh Relay is transport infrastructure only:
+
+```text
+Relay != Sister
+Relay != Gateway
+Relay != Network Authority
+Relay != scheduler
+Relay != Job forwarder
+```
+
+It forwards encrypted Iroh transport traffic. It has no Sister identity, joins
+no Network, and knows nothing about Job semantics. It does not solve logical
+Job routing, because no such routing problem exists in Misaka — logical Job
+routing is not part of the design. Relay admission allowlists are transport
+allowlists (Iroh EndpointIds) and must not be conflated with Misaka
+Membership. Details: [relay-v0.md](relay-v0.md) and
+[relay-access-control-v0.md](relay-access-control-v0.md).
+
+## Network Knowledge
+
+Sisters exchange signed `PeerRecord`s (over the authenticated control channel,
+in the `PeerRecords` message after a Hello, and via Gateway fetch). Network
+Knowledge is deliberately **small-network knowledge exchange** — not DHT,
+consensus, leader election, or a routing protocol. It helps a Sister discover
+other Sisters and their signed locators; it does **not** construct next-hop
+routing tables. A Sister that learns C's signed `PeerRecord` through B can then
+logically connect **directly to C through Iroh**; it does not send application
+packets through B. See
+[network-knowledge-v0.md](network-knowledge-v0.md).
 
 ## Jobs
 
-The scheduler is a small pure policy component. The executor consumes queued
-local jobs and executes commands on Tokio's blocking pool, so command
-execution does not block network or introspection tasks. Work stealing asks a
-peer with queued work for one job. A successful transfer changes source
-metadata to `transferred` and removes the job from its source queue; failed
-sends requeue it.
+Job execution is a distributed capability: a creator Sister selects an
+executor (directed, or scheduler-chosen), and the job runs there with the
+result returned over the authenticated Iroh control channel.
 
-Inline local execution registers a running job with `JobManager::start_inline`
-before starting the command, then records its completed or failed result. It
-does not enter the worker queue, so it cannot be executed again by the queue
-consumer or handed to a work-stealing requester. These jobs participate in
-busy checks, introspection and resource-count refreshes. Metadata remains
-in-memory and has no durable recovery or retention limit.
+Normal remote `misaka run`:
 
-The scheduler rejects invalid CPU samples and peers at or above 85% load.
-It keeps the existing CPU-gap and queue-backlog policy; equal CPU values are
-ordered by SisterId so peer enumeration order cannot change the choice.
+```text
+CLI
+  → loopback API of the running local Sister (POST /api/v1/jobs)
+  → target-bound Human Authorization (target = the concrete executor Sister)
+  → authenticated Iroh control channel
+  → selected executor
+  → authenticated JobResponse back over Iroh
+  → running local Sister resolves → CLI prints
+```
 
-Normal remote `misaka run` is a short-lived client of the running Sister's
-loopback API. That Sister resolves the executor, creates a target-bound Human
-authorization and submits over authenticated Iroh; the result returns over
-Iroh to the creator. A missing daemon or failed Iroh route fails closed.
-DirectTcp callback addressing is retained only for the explicitly selected
-compatibility backend. `misaka run --local` still executes locally.
+- Remote Job submission is **exclusively** this authenticated-Iroh path
+  through a running local Sister. There is no implicit Iroh → DirectTcp
+  downgrade and no one-shot DirectTcp Sister constructed by the CLI.
+- Remote submission **fails closed** when the local Sister is absent, when no
+  authenticated Iroh route exists, or when authentication fails.
+- Job authorization is **target-bound** to a concrete Sister
+  (`target = Some(Sister(executor))`); an untargeted authorization is rejected.
+- The Job-forwarding arm in the handler (`executor != self` on a *received*
+  Job) is a defensive/compatibility protocol path for a received Job whose
+  declared executor differs from the receiver. It is **not** a normal
+  sender-side routing mechanism and is not currently driven by normal
+  CLI/runtime submission — the sender normally sends directly to the selected
+  executor.
+- A Job-result timeout means **result unknown** — it never means the command
+  definitely did not execute. There is no exactly-once execution guarantee.
 
-## Observability
+See [human-authorization-v0.md](human-authorization-v0.md) for the
+authorization model and [testing.md](testing.md) for the required Iroh Job
+coverage (JI01 / JI04 / JI08 / JI09).
 
-Runtime events use `tracing`, with human output by default and JSON output for
-Testament. Stable event fields include `event`, `sister_id`, `peer_id`, and
-`job_id` where applicable. Job lifecycle events omit command text and output
-payloads; completion events include `output_bytes`. Command results returned
-to the CLI/API retain their full output. Logs are diagnostic only.
+Scheduler policy is a small deterministic component; process-level automatic
+scheduling and C→A→B forwarding are deliberately **not** part of the required
+E2E coverage.
 
-Introspection returns a read-only JSON snapshot containing identity, resource
-counters, peer snapshots, job metadata, and queue depth. It has no mutation
-endpoints, binds only to loopback, and does not participate in peer protocol
-or discovery.
+## Tunnel, SSH, Transfer
 
-## Testament boundary
+- **Tunnel** is a connectivity primitive, not a generic mux: one local TCP
+  connection is forwarded over an authenticated/authorized Sister stream to a
+  TCP endpoint reachable from the remote Sister. TunnelOpen authorization is
+  target-bound to the destination Sister with the exact remote `SocketAddr`
+  as the constraint. No UDP/SOCKS/subnet/virtual-NIC features are claimed.
+- **SSH** delegates to the host's OpenSSH client over a temporary Tunnel.
+  Misaka does not implement SSH. See
+  [tunnel-v0.md](tunnel-v0.md) / [remote-login-v0.md](remote-login-v0.md).
+- **Transfer** (v0 / v1 resume / v2 parallel, `misaka cp`) is an
+  **experimental transport/data-path exercise** — not the Resource abstraction.
+  No `FileResource`/`StorageResource`/replication/sync/placement model is
+  claimed. See [transfer-v0.md](transfer-v0.md).
 
-Testament launches the built `misaka` executable as an OS process. It assigns
-each Sister an isolated config directory, ports, deterministic peer topology,
-and persisted launch metadata, then observes introspection and command
-results. `testament up -n N` prepares a full mesh before reporting success;
-`testament ps` combines recorded PID state with loopback introspection and
-never greps logs. `terminate`/`stop` sends SIGTERM and exercises the graceful
-path; `kill` sends SIGKILL and exercises sudden termination. T13 and O05
-assert the graceful path, while T08/T09 and O03 exercise sudden failure.
+## Identity status
 
-The `.testament/current` pointer is an operator convenience for selecting a
-run, not Network state. `testament` commands manage processes and artifacts;
-`misaka ps` independently reads IdentityStore/PeerStore and probes known
-Sisters with the read-only Misaka Ping/Pong protocol.
+- `SisterPublicKey` (Ed25519) is the cryptographic Sister identity material.
+- `SisterId` is a numeric protocol/UX handle currently included in membership
+  but **not** canonical / globally collision-proof.
+- The unresolved problem is precise: two distinct valid public keys can
+  theoretically be issued/accepted with the same numeric `SisterId` unless
+  canonical uniqueness (e.g. key-derived SisterId) is defined.
+- Current boundary protections bind id *and* key wherever signed metadata
+  allows (membership, authenticated session, PeerRecord bootstrap,
+  TransportBinding, application dispatch), but those protections do **not**
+  solve canonical identity.
 
-Testament never instantiates `SisterRuntime`, acts as a peer, joins discovery,
-or executes Misaka jobs in-process. Killing the harness must not be required
-for the network to continue operating; Sisters never connect back to
-Testament.
+## Revocation status
+
+Revocation is **local-only**. Revocations are Authority-signed records; each
+Sister enforces only the records present in its own `revocations.json`. There
+is no established Network-wide propagation, so a peer that has not received a
+revocation may still accept a revoked membership/session. Network-wide
+revocation propagation remains an explicit open item (see below).
+
+## Trust and execution boundaries (current)
+
+- The loopback API has **no per-caller local authentication**. Any local
+  process that can reach it is currently trusted.
+- Host command execution is **not sandboxed**, has **no execution deadline**,
+  and has **no output quota**. A Job-result timeout bounds only how long the
+  caller waits for a result; it does not terminate the command.
+
+## Current open architecture items
+
+This is the **single canonical list**. Subsystem docs reference it rather than
+maintaining their own:
+
+1. Network-wide revocation propagation (revocation is currently local-only).
+2. Canonical Sister identity / `SisterId` uniqueness (see Identity status).
+3. Local loopback API caller authentication.
+4. Execution limits: command deadline, output quota, and an optional future
+   sandbox boundary.
+5. Resource abstraction (not designed yet).
+6. Ability abstraction (not designed yet).
+
+Job-specific items that are intentionally deferred — **not** current
+implementation goals unless separately selected:
+
+- executor delegation
+- exactly-once execution
+- durable Job recovery
+
+Sister-level Job next-hop routing is **not** a required missing feature;
+Misaka deliberately does not implement it (see
+[Routing boundary](#routing-boundary)).
+
+## Documentation authority
+
+```text
+Current source code + tests
+        ↓
+docs/architecture.md        (this document)
+        ↓
+current subsystem docs      (identity, membership, human-authorization,
+                             authenticated-session, gateway, relay,
+                             network-knowledge, jobs/testing, …)
+        ↓
+historical design/planning records   (clearly marked "Historical design record")
+```
+
+Historical records are not authoritative for current behavior. Superseded
+design/planning documents in `docs/` carry a "Historical design record" header
+and point back here. There is no separate handoff file: this document plus the
+current subsystem docs are the source of truth, and the current source code
+wins over all of them.

@@ -1,15 +1,17 @@
-# Sister Identity v0
+# Sister Identity v0 (current)
 
-Misaka keeps three identities separate:
+Misaka keeps four identities separate:
 
 ```text
 NetworkId
   namespace of one independent Misaka Network
 
 SisterId
-  human-friendly numeric handle used by the existing CLI and peer state
-Sister public key
-  cryptographic identity used for signatures
+  numeric protocol/UX handle used by the CLI and peer state
+
+SisterPublicKey
+  cryptographic identity material used for signatures and
+  authenticated sessions
 
 Iroh EndpointId
   transport identity used by the Iroh backend
@@ -32,23 +34,38 @@ The existing `identity.json` remains the home of display and compatibility
 metadata such as `SisterId` and nickname. It is not used as an authority or
 authentication credential.
 
-## Open decision: SisterId is not the canonical identity
+## SisterId vs SisterPublicKey — current status
 
-There is an unresolved architectural question deliberately NOT decided by this
-hardening pass: `SisterId` is a `u64` numeric handle, while `SisterPublicKey`
-(Ed25519) is the actual cryptographic identity. A numeric id is not derived from
-the key, so it can in principle be claimed by any key. The concrete risk today:
-an enrollment client can *choose* an `SisterId` that already belongs to another
-Sister while presenting its own different key — an id collision / equivocation.
+- `SisterPublicKey` (Ed25519) is the **cryptographic** Sister identity
+  material: it signs memberships' possession proofs, transport bindings,
+  `PeerRecord`s, and authenticated-session hellos.
+- `SisterId` is a **numeric protocol/UX handle**. It is currently included in
+  the membership certificate and in every signed contract, but it is **not**
+  canonical and is **not** globally collision-proof.
 
-Protocol boundaries now bind id AND key together wherever signed metadata allows
-(authenticated session binds membership↔key↔endpoint; Gateway bootstrap pins the
-record's SisterId *and* SisterPublicKey; application dispatch binds every
-message to the authenticated peer), so the practical surfaces are covered. What
-is NOT solved: whether the canonical Sister identity should be public-key-derived
-(replacing the `u64` handle), which needs a migration-safe design decision.
-Covered by regression tests for the threats above; the canonical-identity
-question is left for an explicit later decision rather than rushed here.
+The unresolved problem, stated precisely: **two distinct valid public keys can
+theoretically be issued/accepted with the same numeric `SisterId` unless
+canonical uniqueness is defined** (for example, deriving the canonical id from
+the public key). A numeric id is not derived from the key, so in principle any
+key could claim an id that already belongs to another Sister — an id
+collision / equivocation.
+
+The current boundary protections bind id **and** key together wherever signed
+metadata allows:
+
+- membership binds id + key (a certificate names one id and one key);
+- the authenticated session binds id + key (a same-id/different-key
+  equivocation is rejected when the bootstrap expected a specific key);
+- PeerRecord bootstrap pins id + key (a Gateway cannot redirect us to a
+  different Sister than the record cryptographically names);
+- TransportBinding binds id + key + EndpointId;
+- application dispatch binds `Envelope.from` to the authenticated peer.
+
+These protections cover the practical surfaces, but they do **not** solve
+canonical identity. Deciding whether the canonical Sister identity should be
+public-key-derived (replacing the `u64` handle) remains an open architecture
+item — see the canonical list in
+[architecture.md](architecture.md#current-open-architecture-items).
 
 ## TransportBinding
 
@@ -73,7 +90,7 @@ endpoint keeps the sequence unchanged; changing the Iroh endpoint creates the
 next sequence. Invalid signatures or a binding for another Network/Sister
 abort startup rather than being silently repaired.
 
-This establishes the contract needed by the authenticated session phase:
+This is the contract that the authenticated session enforces at connect time:
 
 ```text
 Iroh remote EndpointId X
@@ -82,13 +99,18 @@ valid TransportBinding signed by Sister key
         → X belongs to that Sister identity
 ```
 
-The current phase provides the signing and persistence primitives. It does not
-yet authenticate application sessions or grant membership; those are Phase C
-and Phase D responsibilities.
+The binding is also embedded in the signed `PeerRecord` that Network Knowledge
+and Gateway discovery exchange. Binding provisioning and the authenticated
+session that consumes it are both implemented today.
 
-## Key possession challenge
+## Enrollment key possession
 
-`KeyPossessionChallenge` signs a NetworkId-scoped nonce with the Sister key.
-The challenge primitive is ready for ClientHello/ServerHello proof of private
-key possession. Challenge transport and session admission are intentionally
-deferred to the authenticated-session phase.
+Timed-invite enrollment proves **key possession** to the Authority with the
+`EnrollmentChallenge`/`EnrollmentProof` exchange: the joining Sister signs a
+challenge bound to the Network, the invite digest, its Sister id and public
+key, and a fresh Authority nonce, before the Authority issues a membership for
+that key. See [network-formation-v0.md](network-formation-v0.md).
+
+(The standalone `KeyPossessionChallenge` type in `misaka-core` remains a
+generic primitive; the live enrollment flow uses the invite-scoped
+`EnrollmentChallenge` above.)

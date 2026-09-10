@@ -1,5 +1,16 @@
 # Connection Racing v0
 
+> **Historical design record.**
+> Not the authoritative description of current runtime behavior.
+> See [architecture.md](architecture.md) for current architecture.
+>
+> This describes a candidate-racing step in the pre-Iroh-default generic
+> connector layer. Normal authenticated-Iroh connectivity no longer routes
+> through this layer — Misaka resolves a Sister to a validated
+> PeerRecord/endpoint and Iroh owns path selection. The resolver module's
+> limited current role is documented in
+> [network-resolver-v0.md](network-resolver-v0.md).
+
 The resolver now exposes `race_connect`: it parses and ranks transport
 candidates, starts one backend connect future per candidate, and returns the
 first successful stream. Dropping the `FuturesUnordered` cancels losing

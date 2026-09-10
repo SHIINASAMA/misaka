@@ -1,7 +1,12 @@
-# Relay Access Control v0
+# Relay Access Control v0 (current)
 
 The native Iroh relay can optionally admit only a configured set of Iroh
-`EndpointId` values. The relay still has no Sister identity, NetworkId,
+`EndpointId` values.
+
+**This is transport admission only.** Relay admission is scoped to Iroh
+EndpointIds and must never be conflated with Misaka Membership: a relay may
+forward encrypted bytes, but it can neither grant Network membership nor
+execute a command. The relay still has no Sister identity, NetworkId,
 membership store, scheduler, or job authority.
 
 Enable the admission boundary with:
@@ -49,13 +54,9 @@ connection without restarting the relay. Existing relay connections are not
 forcibly terminated by the Iroh v1 access hook, so a revoked endpoint must
 reconnect before the denial is observed.
 
-This is the transport admission layer only. Misaka membership and command
-authorization remain separate: a relay may forward encrypted bytes, but it
-cannot grant Network membership or execute a command.
-
-`misaka network revoke --membership-serial <serial>` writes a signed
-revocation to `revocations.json`. Running Sisters reject that serial on their
-next authenticated startup/session load. Relay access is endpoint-scoped, so
-the operator must also remove the revoked endpoint from the regular allowlist
-(or rely on the relay's dynamic file reload); existing relay connections are
-not forcibly terminated by Iroh's access hook.
+Membership revocation is a separate Misaka concern and is local-only (see
+[membership-v0.md](membership-v0.md)); because relay admission is
+endpoint-scoped, revoking a Sister's membership does not by itself remove its
+EndpointId from this allowlist. The operator must also remove the endpoint
+from the regular allowlist (or rely on the relay's dynamic file reload) to
+deny it relay transport.

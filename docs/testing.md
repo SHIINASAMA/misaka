@@ -156,7 +156,8 @@ client against a real Sister and checks exact destination bytes. N11 checks
 live active-stream telemetry and cleanup through loopback introspection. The
 same N11 path also verifies that `misaka ps --json --introspect` exposes the
 active stream through the public CLI. The
-Iroh scenario launches real Sisters with the opt-in Iroh backend and verifies
+Iroh scenario launches real Sisters with the Iroh backend (the default
+`misaka start` transport) and verifies
 Transfer v1 over the advertised Iroh endpoint. The disconnect scenarios pass a
 ready-file to the external stream client and poll
 for it with a deadline before killing the remote Sister; they do not use a
@@ -231,12 +232,28 @@ persisted state and introspection, never CLI log text.
 - `JI09` a **running** Sister whose directed target has no authenticated-Iroh
   route fails closed: the submission reaches the loopback API, the Iroh path
   fails, and the CLI reports the failure without any DirectTcp fallback.
-  (JI02 automatic scheduling and JI03 real C→A→B forwarding are NOT included:
-  the scheduler and the sender-side Job path have no deterministic fixtures —
-  the sender delivers straight to the named executor with no next-hop routing,
-  so no CLI/process path can land a Job on an intermediate Sister to forward it.
-  The forwarding `Envelope.from`/creator-preservation arm is covered by the
-  `misaka-runtime` JH04 unit test.)
+
+**Required Iroh Job coverage.** The required Iroh Job coverage is:
+
+```text
+JI01   directed authenticated-Iroh Job (creator → executor over Iroh)
+JI04   unreachable target → bounded fail-closed behavior
+JI08   no running local Sister → fail closed
+JI09   running Sister but no authenticated Iroh route → fail closed
+```
+
+**JI02 and JI03 are intentionally not required.** Process-level
+automatic-scheduling E2E (JI02) and C→A→B forwarding E2E (JI03) are not part
+of current required coverage. Scheduler policy belongs in deterministic
+component tests. Normal submission sends directly to the selected executor,
+and Misaka deliberately does not implement Sister next-hop Job routing — Iroh
+owns connectivity and relay fallback. The handler forwarding arm (a received
+Job whose declared executor differs from the receiver) is covered by the
+`misaka-runtime` JH04 unit test, which verifies the envelope discipline
+(`Envelope.from` = the forwarding Sister, logical creator preserved) without
+implying a production routing capability. See
+[architecture.md](architecture.md#jobs) and
+[human-authorization-v0.md](human-authorization-v0.md).
 
 The suite uses only local infrastructure (a native `network gateway serve`); it
 never depends on the production Cloudflare Gateway. `gateway-live-verify`

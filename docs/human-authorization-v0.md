@@ -1,4 +1,4 @@
-# Human Authorization v0
+# Human Authorization v0 (current)
 
 Human authorization is separate from Sister transport identity. A human key
 signs a command, while a Sister remains the peer that receives, schedules,
@@ -24,10 +24,10 @@ receiving the authority private key.
 
 When human material is present, `misaka run --sister` and network-dispatched
 `misaka run` sign a short-lived `job.submit` authorization. The authorization
-binds the target Sister and exact command string. The receiving Sister checks
-the authority signature, role permission, time window, target, and persists
-the nonce before queueing the job. Work stealing preserves the authorization
-unchanged.
+binds the target Sister and the exact command string. The receiving Sister
+checks the authority signature, role permission, time window, target, and
+persists the nonce before queueing the job. Work stealing preserves the
+authorization unchanged.
 
 Production nodes reject a side-effecting remote operation when its Human
 Authorization is missing. Local compatibility scenarios must opt in explicitly
@@ -70,24 +70,33 @@ JobData.creator    = the Sister that originally created the Job (logical owner; 
 JobData.executor   = the Sister intended/currently expected to run the Job
 ```
 
-When a Job is forwarded (e.g. C creates it, A relays to B, B runs it), the hop
-A→B sends `Envelope.from = A` — A is who authenticated that stream. It must NOT
-put C into `Envelope.from`; C did not authenticate A→B, and the authenticated
-control plane rejects a sender that disagrees with the authenticated peer. The
-logical creator C stays in `JobData.creator`. `JobData.creator` is never
-rewritten by forwarding. The result path keeps the same discipline: the executor
-B returns `Envelope.from = B`, `JobResultData.creator = C`,
-`JobResultData.executor = B`.
+The transport `Envelope.from` is **always** the immediate authenticated sender
+— never the logical creator. The authenticated control plane rejects a sender
+that disagrees with the authenticated peer, so a forwarder must put its own id
+in `Envelope.from`, never the creator's. `JobData.creator` is never rewritten
+by forwarding. The result path keeps the same discipline: the executor returns
+`Envelope.from = itself`, with the original creator named inside
+`JobResultData`.
 
-Today a normal remote submission is delivered directly to the named executor
-(no next-hop routing: `submit_to_sister_authorized` sends straight to the
-executor's endpoint), so no CLI/process path produces a forwarding hop yet. The
-rules above are the contract a hop must honor WHEN one occurs: a received Job
-whose `executor` is a reachable different Sister is forwarded by the handler
-with `Envelope.from` = the forwarding Sister, the authorization verified without
-consuming the destination nonce. That arm is covered by the `misaka-runtime`
-JH04 forwarding-identity unit test; a real C→A→B E2E would need a sender-side
-routing capability (deferred).
+### The forwarding arm is a defensive/compatibility path, not a routing mechanism
+
+Today a normal remote submission is delivered **directly** to the selected
+executor: the creator Sister selects the executor, issues a target-bound
+authorization to it, and sends over authenticated Iroh straight to that
+Sister's endpoint. There is no next-hop routing, and **no CLI/runtime
+submission path drives a Sister-to-Sister forwarding hop**.
+
+The handler does contain a forwarding branch for a *received* Job whose
+declared `executor` is a different, reachable Sister (`will_forward`): it
+verifies the authorization without consuming the destination's nonce, then
+forwards the Job with `Envelope.from` = the forwarding Sister. This is a
+defensive/compatibility protocol path — a way to honor an already-received Job
+whose declared executor differs from the receiver — not a normal sender-side
+routing capability, and not an expected production C→A→B Job topology. Misaka
+deliberately does not implement Sister next-hop Job routing; Iroh owns
+connectivity and relay fallback. The forwarding branch's envelope identity
+(`from` = forwarder, creator preserved) is covered by the `misaka-runtime`
+JH04 unit test; it is not exercised as an E2E topology.
 
 ## Production JobSubmit is always Sister-targeted
 
@@ -109,9 +118,7 @@ Enforcement at execution: a Sister runs a Human-authorized Job only if
 signature/NetworkId are valid, the human membership is valid and not locally
 revoked, the exact `command=` constraint matches, and the nonce was not already
 consumed locally. A Job whose `target` names a DIFFERENT Sister is not executed
-here.
-
-An intermediate relay Sister verifies the authorization is signature- and
+here. An intermediate relay Sister verifies the authorization is signature- and
 Network-valid and that `target == Job.executor`, then forwards it unchanged
 WITHOUT consuming the nonce. Only the Sister that actually executes consumes the
 nonce. This preserves target binding without any re-signing.
@@ -128,7 +135,9 @@ This is an intentional, temporary limitation. It is preferable to silently
 granting broader authority. Cross-Sister Job execution — delegated authorization,
 authorization chains, a Sister re-signing a Human command, a scheduler-held
 authority, or Network-wide nonce state — is NOT implemented here and is a
-separate future design.
+separate future design. Executor delegation is tracked as a deferred item in
+the canonical list in
+[architecture.md](architecture.md#current-open-architecture-items).
 
 ## Job control transport: authenticated Iroh
 
@@ -138,8 +147,7 @@ the legacy TCP control listener:
 ```text
 misaka run  →  loopback API of the RUNNING local Sister (POST /api/v1/jobs)
            →  target-bound Human Authorization built from local material
-           →  authenticated Iroh control channel  →  target Sister
-           →  optional forwarding (each hop keeps Envelope.from = that hop's sender)
+           →  authenticated Iroh control channel → target executor Sister
            →  executor runs it
            →  JobResponse returns over authenticated Iroh to the owning Sister
            →  the loopback API resolves and the CLI prints the result
@@ -168,8 +176,9 @@ caller. A self-targeted or scheduler-local command runs as the daemon's OS
 user; a remote command uses the daemon's local Human material to sign the
 request. Loopback binding does not isolate users on a shared host. Deployments
 must currently trust processes that can reach this API. Per-caller API
-authentication is a separate compatibility change, not a property of the
-Human signatures created after a request is accepted.
+authentication is a separate open item, not a property of the Human signatures
+created after a request is accepted — see the canonical list in
+[architecture.md](architecture.md#current-open-architecture-items).
 
 Command execution uses the host shell without a sandbox, execution deadline,
 or output quota. The remote-result timeout only bounds waiting for a result;

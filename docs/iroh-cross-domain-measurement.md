@@ -1,5 +1,10 @@
 # Iroh Cross-domain Measurement Runbook
 
+> Operator measurement runbook — describes how to *measure*, not what the
+> architecture is. For current architecture see
+> [architecture.md](architecture.md) and
+> [network-stream-v0.md](network-stream-v0.md).
+
 The Iroh backend is now executable through the public CLI, but loopback tests
 do not prove NAT traversal, relay fallback, or real-world stability. This
 runbook defines the measurements to collect on two real hosts without changing
@@ -8,7 +13,7 @@ the Sister protocol or introducing another backend.
 ## Setup
 
 Use a separate `MISAKA_CONFIG_DIR` on each host. Start both Sisters with the
-opt-in Iroh backend and `--probe-only`. The preflight measurement itself does
+Iroh backend and `--probe-only`. The preflight measurement itself does
 not require a remotely reachable original control-plane TCP listener or a
 `:31700` bootstrap; probe-only keeps that legacy listener loopback-only:
 

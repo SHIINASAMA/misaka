@@ -1,5 +1,13 @@
 # Protocol
 
+> Transport note: the normal Sister transport is **authenticated Iroh**. The
+> `misaka-core::Envelope` domain messages below are carried both on the legacy
+> Direct TCP control plane and inside the `MSKC` control channel of the
+> authenticated Iroh session (see
+> [iroh-control-plane-v0.md](iroh-control-plane-v0.md)). The Direct TCP
+> framing described in the wire-framing section is the **compatibility/debug**
+> path, not the default production transport.
+
 ## Envelope
 
 All peer messages use the shared `misaka-core::Envelope`:
@@ -31,32 +39,52 @@ The payload in `data` is bincode-encoded message-specific data:
   service;
 - `Ping`/`Pong`: empty payloads used for a read-only compatibility probe.
 
-Transfer v0/v1/v2 and tunnel requests optionally carry a signed
-`CommandAuthorization`. Authenticated deployments bind this to the exact file
-destination or remote socket and reject replayed nonces at the receiving
-Sister. The optional field preserves the compatibility mode used by the
-black-box Testament scenarios.
+Transfer v0/v1/v2 and tunnel requests carry a signed `CommandAuthorization`.
+Production requires it for every side-effecting remote operation (missing
+authorization fails closed); the receiver binds it to the exact file
+destination or remote socket, validates the authority signature, membership,
+time window, target Sister, and local revocation, and rejects replayed nonces.
+Only the explicit `--insecure-development` startup flag drops the requirement,
+and only for local compatibility scenarios. See
+[human-authorization-v0.md](human-authorization-v0.md).
 
-## Wire framing and encryption
+## Wire framing: legacy Direct TCP control plane
 
-Peer TCP traffic is a sequence of length-prefixed encrypted envelopes:
+The legacy Direct TCP control plane is a sequence of length-prefixed encrypted
+envelopes:
 
 ```text
 [u32 big-endian length][AES-256-GCM ciphertext + nonce]
 ```
 
-The length is the encrypted payload length. `misaka-runtime::network` checks it against `MAX_FRAME_LENGTH` (4 MiB) before allocating a receive buffer. Invalid, truncated, or oversized frames fail the connection. AES-GCM authentication failure is fatal to that message.
+The length is the encrypted payload length. `misaka-runtime::network` checks
+it against `MAX_FRAME_LENGTH` (4 MiB) before allocating a receive buffer.
+Invalid, truncated, or oversized frames fail the connection. AES-GCM
+authentication failure is fatal to that message.
 
-The control-plane development configuration still uses a shared compatibility
-key. Network Stream Security v0 uses TLS 1.3 with mutual certificate
-authentication, pinned peer certificates, and server-name identity checks;
-rustls owns the key exchange and record encryption. The secure wrapper is
-available as a separate stream primitive and is not yet the default runtime
-transport.
+This Direct TCP path remains the **compatibility/debug** backend. The control
+plane of a normal enrolled Sister runs over authenticated Iroh instead: Iroh
+owns encryption and endpoint identity, the authenticated session binds
+membership/revocation/transport before dispatch, and the same Envelope domain
+messages are carried inside the `MSKC` control channel (see
+[authenticated-session-v0.md](authenticated-session-v0.md) and
+[iroh-control-plane-v0.md](iroh-control-plane-v0.md)).
+
+The Direct TCP control-plane development configuration still uses a shared
+compatibility key. A separate TLS 1.3/mTLS wrapper (certificate pinning,
+server-name checks; rustls owns key exchange) is available for the **secure
+Direct TCP stream variant** only; raw Direct TCP streams and authenticated Iroh
+do not have equivalent identity guarantees.
 
 ## Message handling
 
-`Hello` records the sender's identity and declared listen address, then returns a Hello response. `Ping` returns `Pong` without recording the sender, touching the peer registry, persisting a PeerStore entry, or triggering discovery. `State` replaces the sender's observed resource and job counters. `Job` is forwarded when an explicit executor differs from the receiving Sister; otherwise it enters the local queue. `JobRequest` transfers one queued job to an idle requester, or returns an Ack when no job is available. `JobResponse` resolves the creator's pending result.
+`Hello` records the sender's identity and declared listen address, then returns a Hello response. `Ping` returns `Pong` without recording the sender, touching the peer registry, persisting a PeerStore entry, or triggering discovery. `State` replaces the sender's observed resource and job counters. `Job` normally enters the local queue and runs locally; a *received* Job whose
+declared `executor` names a different, reachable Sister is forwarded by the
+receiver (`Envelope.from` = the forwarding Sister, creator preserved). That
+forwarding arm is a defensive/compatibility path — normal submission sends
+directly to the selected executor, and Misaka has no next-hop routing layer
+(see [architecture.md](architecture.md#routing-boundary)).
+`JobRequest` transfers one queued job to an idle requester, or returns an Ack when no job is available. `JobResponse` resolves the creator's pending result.
 
 Transport owns connect, framing, encryption, send, and receive. Handler owns message interpretation. Handler must not bypass transport framing or let an untrusted message mutate state outside its defined message semantics.
 

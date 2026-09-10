@@ -1,8 +1,25 @@
 # Contributor and Agent Guide
 
-> **If you are resuming this repository after a pause, read
-> `docs/HANDOFF.md` first** — it records the unpushed commits, the work that
-> was in flight, and the deliberately-open design items at the last pause.
+> **Start with `docs/architecture.md`** — it is the authoritative description
+> of the current runtime. Superseded design records are marked "Historical
+> design record" at the top of their files.
+
+## Documentation authority
+
+When documentation and code disagree, follow the code. The authority order
+is:
+
+```text
+Current source code + tests
+        ↓
+docs/architecture.md
+        ↓
+current subsystem docs        (identity, membership, human-authorization,
+                               authenticated-session, gateway, relay,
+                               network-knowledge, jobs/testing, …)
+        ↓
+historical design/planning records   (marked "Historical design record")
+```
 
 ## Scope
 
