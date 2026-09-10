@@ -1,10 +1,24 @@
-use axum::extract::{Path, State};
+//! Misaka Network local Sister HTTP API (loopback-only, authenticated).
+//!
+//! Every `/api/v1/*` route requires the local control token issued by the
+//! running Sister (`misaka-runtime::local_control_token_store`). Loopback is a
+//! network boundary, not a local-user authorization boundary: the token is the
+//! local authorization boundary. A single unauthenticated `GET /healthz` exists
+//! for liveness and exposes no state.
+//!
+//! Authentication does NOT justify binding this API to a LAN/public address;
+//! the API remains loopback-only.
+
+use axum::extract::{Path, Request, State};
+use axum::http::header::AUTHORIZATION;
 use axum::http::StatusCode;
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use misaka_core::introspection::{IntrospectionSnapshot, PeerSnapshot};
 use misaka_core::protocol::JobResultData;
+use misaka_runtime::local_control_token_store::constant_time_eq;
 use misaka_runtime::{ShutdownToken, SisterHandle};
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};
@@ -53,6 +67,12 @@ impl IntoResponse for ApiError {
         )
             .into_response()
     }
+}
+
+/// The single generic local-control failure. Missing, malformed, and incorrect
+/// tokens all produce exactly this response, so a caller cannot tell which.
+fn unauthorized() -> Response {
+    ApiError::new(StatusCode::UNAUTHORIZED, "unauthorized").into_response()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -105,20 +125,55 @@ pub struct PingResponse {
     pub status: &'static str,
 }
 
+/// Minimal unauthenticated liveness response. Exposes no Sister identity,
+/// NetworkId, peers, keys, service state, or job data.
+#[derive(Debug, Clone, Serialize)]
+pub struct HealthResponse {
+    pub status: &'static str,
+}
+
+async fn healthz() -> Json<HealthResponse> {
+    Json(HealthResponse { status: "ok" })
+}
+
 pub struct ApiServer {
     listener: TcpListener,
     app: Router,
     bound: SocketAddr,
 }
 
-pub fn router(handle: SisterHandle) -> Router {
+/// Build the API router. `token` is the local control token minted by the
+/// running Sister; every `/api/v1/*` route requires it.
+pub fn router(handle: SisterHandle, token: String) -> Router {
+    // Loopback authorization guard for every `/api/v1/*` route. One invariant:
+    // `/api/v1 = authenticated local control surface`. Missing, malformed, and
+    // incorrect tokens all yield the same generic 401.
+    let guard = middleware::from_fn(move |request: Request, next: Next| {
+        let token = token.clone();
+        async move {
+            let presented = request
+                .headers()
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.strip_prefix("Bearer "));
+            match presented {
+                Some(presented) if constant_time_eq(presented, &token) => next.run(request).await,
+                _ => unauthorized(),
+            }
+        }
+    });
     Router::new()
-        .route("/api/v1/overview", get(overview))
-        .route("/api/v1/sisters", get(sisters))
-        .route("/api/v1/sisters/{id}", get(sister))
-        .route("/api/v1/streams", get(streams))
-        .route("/api/v1/jobs", post(submit_job))
-        .route("/api/v1/sisters/{id}/ping", post(ping))
+        .route("/healthz", get(healthz))
+        .merge(
+            Router::new()
+                .route("/api/v1/overview", get(overview))
+                .route("/api/v1/sisters", get(sisters))
+                .route("/api/v1/sisters/{id}", get(sister))
+                .route("/api/v1/streams", get(streams))
+                .route("/api/v1/jobs", post(submit_job))
+                .route("/api/v1/sisters/{id}/ping", post(ping))
+                .route_layer(guard),
+        )
         .with_state(handle)
 }
 
@@ -135,23 +190,28 @@ pub fn validate_bind(bind: SocketAddr) -> Result<(), ApiError> {
 
 pub async fn serve(
     handle: SisterHandle,
+    token: String,
     address: SocketAddr,
     shutdown: ShutdownToken,
 ) -> Result<SocketAddr, ApiError> {
-    let server = bind(handle, address).await?;
+    let server = bind(handle, token, address).await?;
     let bound = server.bound;
     server.run(shutdown).await?;
     Ok(bound)
 }
 
-pub async fn bind(handle: SisterHandle, bind: SocketAddr) -> Result<ApiServer, ApiError> {
+pub async fn bind(
+    handle: SisterHandle,
+    token: String,
+    bind: SocketAddr,
+) -> Result<ApiServer, ApiError> {
     validate_bind(bind)?;
     let listener = TcpListener::bind(bind).await.map_err(ApiError::internal)?;
     let bound = listener.local_addr().map_err(ApiError::internal)?;
     tracing::info!(event = "api_started", address = %bound, "local Sister API started");
     Ok(ApiServer {
         listener,
-        app: router(handle),
+        app: router(handle, token),
         bound,
     })
 }
@@ -334,18 +394,30 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use tower::util::ServiceExt;
 
+    const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    fn authed_get(uri: &str) -> Request<Body> {
+        Request::get(uri)
+            .header("authorization", format!("Bearer {TOKEN}"))
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    fn authed_post(uri: &str, body: impl Into<Body>) -> Request<Body> {
+        Request::post(uri)
+            .header("authorization", format!("Bearer {TOKEN}"))
+            .header("content-type", "application/json")
+            .body(body.into())
+            .unwrap()
+    }
+
     #[tokio::test]
     async fn all_v1_read_routes_are_registered() {
-        let handle = test_handle().await;
-        let app = router(handle);
+        let app = router(test_handle().await, TOKEN.to_string());
 
         let overview = app
             .clone()
-            .oneshot(
-                Request::get("/api/v1/overview")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(authed_get("/api/v1/overview"))
             .await
             .unwrap();
         assert_eq!(overview.status(), StatusCode::OK);
@@ -355,39 +427,31 @@ mod tests {
 
         let sisters = app
             .clone()
-            .oneshot(Request::get("/api/v1/sisters").body(Body::empty()).unwrap())
+            .oneshot(authed_get("/api/v1/sisters"))
             .await
             .unwrap();
         assert_eq!(sisters.status(), StatusCode::OK);
 
         let detail = app
             .clone()
-            .oneshot(
-                Request::get("/api/v1/sisters/1")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(authed_get("/api/v1/sisters/1"))
             .await
             .unwrap();
         assert_eq!(detail.status(), StatusCode::NOT_FOUND);
 
         let streams = app
             .clone()
-            .oneshot(Request::get("/api/v1/streams").body(Body::empty()).unwrap())
+            .oneshot(authed_get("/api/v1/streams"))
             .await
             .unwrap();
         assert_eq!(streams.status(), StatusCode::OK);
 
         let job = app
             .clone()
-            .oneshot(
-                Request::post("/api/v1/jobs")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({ "command": "printf j", "sister": 999 }).to_string(),
-                    ))
-                    .unwrap(),
-            )
+            .oneshot(authed_post(
+                "/api/v1/jobs",
+                Body::from(serde_json::json!({ "command": "printf j", "sister": 999 }).to_string()),
+            ))
             .await
             .unwrap();
         // The route is registered (it attempts the job; #999 is unknown so it is
@@ -396,11 +460,7 @@ mod tests {
         let _ = to_bytes(job.into_body(), 4096).await.unwrap();
 
         let ping = app
-            .oneshot(
-                Request::post("/api/v1/sisters/1/ping")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(authed_post("/api/v1/sisters/1/ping", Body::empty()))
             .await
             .unwrap();
         assert_eq!(ping.status(), StatusCode::NOT_FOUND);
@@ -408,15 +468,8 @@ mod tests {
 
     #[tokio::test]
     async fn missing_sister_returns_a_small_json_error() {
-        let app = router(test_handle().await);
-        let response = app
-            .oneshot(
-                Request::get("/api/v1/sisters/99")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let app = router(test_handle().await, TOKEN.to_string());
+        let response = app.oneshot(authed_get("/api/v1/sisters/99")).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         let body = to_bytes(response.into_body(), 4096).await.unwrap();
@@ -428,6 +481,93 @@ mod tests {
     fn non_loopback_bind_is_rejected() {
         let result = validate_bind("0.0.0.0:31702".parse().unwrap());
         assert!(result.is_err());
+    }
+
+    // LC01: a missing token is rejected with 401.
+    #[tokio::test]
+    async fn missing_token_is_unauthorized() {
+        let app = router(test_handle().await, TOKEN.to_string());
+        let response = app
+            .oneshot(
+                Request::get("/api/v1/overview")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // LC02: an incorrect token is rejected with 401.
+    #[tokio::test]
+    async fn wrong_token_is_unauthorized() {
+        let app = router(test_handle().await, TOKEN.to_string());
+        let response = app
+            .oneshot(
+                Request::get("/api/v1/overview")
+                    .header("authorization", "Bearer deadbeef")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // LC03: the correct token is accepted.
+    #[tokio::test]
+    async fn correct_token_is_accepted() {
+        let app = router(test_handle().await, TOKEN.to_string());
+        let response = app.oneshot(authed_get("/api/v1/overview")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    // LC04: a malformed Authorization header is rejected with 401, with the
+    // same generic body as the other failures (no oracle).
+    #[tokio::test]
+    async fn malformed_authorization_header_is_unauthorized() {
+        let app = router(test_handle().await, TOKEN.to_string());
+        let cases = [
+            "Token abc",
+            "Bearer",
+            "Bearer ",
+            "bearer 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ];
+        for value in cases {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::get("/api/v1/overview")
+                        .header("authorization", value)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "header {value:?}"
+            );
+            let body = to_bytes(response.into_body(), 1024).await.unwrap();
+            let error: ErrorResponse = serde_json::from_slice(&body).unwrap();
+            assert_eq!(error.error, "unauthorized");
+            assert!(!error.error.contains(TOKEN));
+        }
+    }
+
+    // The unauthenticated liveness endpoint works and reveals nothing.
+    #[tokio::test]
+    async fn healthz_is_public_and_minimal() {
+        let app = router(test_handle().await, TOKEN.to_string());
+        let response = app
+            .oneshot(Request::get("/healthz").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1024).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json, serde_json::json!({ "status": "ok" }));
     }
 }
 

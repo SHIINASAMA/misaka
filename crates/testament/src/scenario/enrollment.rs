@@ -729,6 +729,34 @@ fn ji01_directed_job_over_iroh(ctx: &mut Context) -> Result<(), ScenarioError> {
         "ji01a",
         &["run", "--sister", &b_id.to_string(), "printf iroh-job-ok"],
     )?;
+
+    // §49: an unauthenticated local caller must be rejected, and its command
+    // must not run. POST /api/v1/jobs with no Authorization header → 401.
+    if let Ok(raw) = std::fs::read_to_string(authority.join("api-endpoint")) {
+        if let Ok(api_addr) = raw.trim().parse::<std::net::SocketAddr>() {
+            let sentinel = ctx.layout.root.join("ji01-unauth-sentinel");
+            let body = serde_json::json!({
+                "command": format!("touch {}", sentinel.display())
+            })
+            .to_string();
+            let response = unauthenticated_post(api_addr, "/api/v1/jobs", &body);
+            if !response.contains("401") {
+                ctx.teardown();
+                stop_gateway(gateway)?;
+                return Err(ScenarioError::assertion(format!(
+                    "unauthenticated POST /api/v1/jobs was not rejected with 401: {response}"
+                )));
+            }
+            if sentinel.exists() {
+                let _ = std::fs::remove_file(&sentinel);
+                ctx.teardown();
+                stop_gateway(gateway)?;
+                return Err(ScenarioError::assertion(
+                    "an unauthenticated local caller executed a command".to_string(),
+                ));
+            }
+        }
+    }
     ctx.teardown();
     stop_gateway(gateway)?;
     if output.contains("iroh-job-ok") {
@@ -738,6 +766,28 @@ fn ji01_directed_job_over_iroh(ctx: &mut Context) -> Result<(), ScenarioError> {
             "directed Iroh job did not return the expected result: {output}"
         )))
     }
+}
+
+/// A raw HTTP POST with no `Authorization` header — a hostile local caller.
+/// Returns the raw response (possibly empty on transport failure).
+fn unauthenticated_post(addr: std::net::SocketAddr, path: &str, body: &str) -> String {
+    use std::io::{Read, Write};
+    let Ok(mut stream) =
+        std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(1500))
+    else {
+        return String::new();
+    };
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    if stream.write_all(request.as_bytes()).is_err() {
+        return String::new();
+    }
+    let mut response = String::new();
+    let _ = stream.read_to_string(&mut response);
+    response
 }
 
 /// JI04 — submitting to a known-but-unreachable Sister fails within a bound

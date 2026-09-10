@@ -201,6 +201,13 @@ enum Command {
         json: bool,
     },
 
+    /// Report build and protocol versions.
+    Version {
+        /// Emit a machine-readable version report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Run only the native Iroh relay service.
     Relay {
         /// Public address on which the Iroh relay listens.
@@ -563,8 +570,14 @@ async fn async_main() -> Result<(), MisakaError> {
                 IdentityStore::config_dir().map_err(|e| MisakaError::Other(e.to_string()))?;
             let network_id = NetworkIdStore::load_or_init(&data_dir, requested_network_id)
                 .map_err(|e| MisakaError::Other(e.to_string()))?;
-            let identity = IdentityStore::load_or_init(nickname.clone(), port)
+            let mut identity = IdentityStore::load_or_init(nickname.clone(), port)
                 .map_err(|e| MisakaError::Other(e.to_string()))?;
+            // The persisted `identity.json` version is the version recorded when
+            // the identity was first written — not the running binary. Report the
+            // current binary version for deployment/upgrade visibility. Stable
+            // identity is the Sister key + numeric SisterId; version is runtime
+            // metadata and never rewritten here.
+            apply_runtime_version(&mut identity);
             let sister_key = SisterKeyStore::load_or_init(&data_dir)
                 .map_err(|e| MisakaError::Other(e.to_string()))?;
             let stream_security = if stream_secure {
@@ -800,25 +813,38 @@ async fn async_main() -> Result<(), MisakaError> {
             let signal_task = shutdown.install_signal_handler();
             let relay_task = relay_service.map(|service| tokio::spawn(service.run()));
             let api_addr: SocketAddr = format!("127.0.0.1:{api_port}").parse().unwrap();
-            let api_server = misaka_api::bind(runtime.handle(), api_addr)
+            // Local control requires possession of the machine-local control
+            // token. It is generated on first use, persisted 0600, and never
+            // logged or passed on a command line.
+            let control_dir = IdentityStore::config_dir()
+                .map_err(|error| MisakaError::Other(error.to_string()))?;
+            let local_control_token =
+                misaka_runtime::local_control_token_store::LocalControlTokenStore::load_or_init(
+                    &control_dir,
+                )
+                .map_err(|error| MisakaError::Other(format!("local control token: {error}")))?;
+            let api_server = misaka_api::bind(runtime.handle(), local_control_token, api_addr)
                 .await
                 .map_err(|error| MisakaError::Other(error.to_string()))?;
-            // Record the bound loopback API address so a separate `misaka run`
-            // can route Jobs through this running Sister over authenticated Iroh
-            // (and so `misaka ps` can find it) even on an ephemeral `--api-port 0`.
-            if let Ok(dir) = IdentityStore::config_dir() {
-                let _ = std::fs::write(
-                    dir.join("api-endpoint"),
-                    api_server.local_addr().to_string(),
-                );
-                // The Job-result bound the running Sister will hold its HTTP
-                // response open for (`config.job_timeout`). A separate `misaka
-                // run` reads this so it waits for a legitimate long Job instead
-                // of aborting at some shorter fixed client deadline.
-                let _ = std::fs::write(
-                    dir.join("api-result-timeout"),
-                    api_result_timeout.as_secs().to_string(),
-                );
+            // Record one structured ephemeral runtime marker so a separate
+            // `misaka run` / doctor can find the bound loopback API, its
+            // Job-result bound, and the owning process. The marker is written
+            // atomically and removed only by the process that owns it.
+            let runtime_instance = misaka_runtime::runtime_instance_store::RuntimeInstance {
+                schema_version:
+                    misaka_runtime::runtime_instance_store::CURRENT_RUNTIME_SCHEMA_VERSION,
+                instance_id: uuid::Uuid::new_v4().to_string(),
+                pid: std::process::id(),
+                started_at: unix_now(),
+                api_endpoint: api_server.local_addr().to_string(),
+                api_result_timeout_secs: api_result_timeout.as_secs(),
+                binary_version: env!("CARGO_PKG_VERSION").to_string(),
+            };
+            if let Err(error) = misaka_runtime::runtime_instance_store::RuntimeInstanceStore::write(
+                &control_dir,
+                &runtime_instance,
+            ) {
+                tracing::warn!(%error, "failed to write runtime.json");
             }
             let api_task = tokio::spawn(api_server.run(shutdown.token()));
             let result = runtime.run().await;
@@ -829,6 +855,12 @@ async fn async_main() -> Result<(), MisakaError> {
             if let Err(error) = api_task.await {
                 tracing::warn!(?error, "local API task did not exit cleanly");
             }
+            // Graceful shutdown: drop the marker, but only if it is still ours
+            // (an old process must never delete a newer process's state).
+            let _ = misaka_runtime::runtime_instance_store::RuntimeInstanceStore::remove_if_matches(
+                &control_dir,
+                &runtime_instance.instance_id,
+            );
             result?;
         }
 
@@ -1426,6 +1458,53 @@ async fn async_main() -> Result<(), MisakaError> {
             .run()
             .await
             .map_err(|error| MisakaError::Other(error.to_string()))?;
+        }
+
+        Command::Version { json } => {
+            let report = serde_json::json!({
+                "binary_version": binary_version(),
+                // Set by the release workflow; "unknown" for ordinary local builds.
+                "build_git_sha": option_env!("MISAKA_BUILD_GIT_SHA").unwrap_or("unknown"),
+                "state_layout_version": misaka_runtime::state_layout::CURRENT_STATE_LAYOUT_VERSION,
+                "control_protocol_version": misaka_core::protocol::PROTOCOL_VERSION,
+                "network_stream_protocol_version": misaka_network::PROTOCOL_VERSION,
+                "auth_session_protocol_version": misaka_core::protocol::AUTH_SESSION_PROTOCOL_VERSION,
+                "enrollment_protocol_version": misaka_core::enrollment::ENROLLMENT_VERSION,
+                "gateway_protocol_version": misaka_core::gateway::GATEWAY_PROTOCOL_VERSION,
+            });
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report)
+                        .map_err(|error| MisakaError::Other(error.to_string()))?
+                );
+            } else {
+                println!("Misaka {}", binary_version());
+                println!(
+                    "State layout: v{}",
+                    misaka_runtime::state_layout::CURRENT_STATE_LAYOUT_VERSION
+                );
+                println!(
+                    "Control protocol: v{}",
+                    misaka_core::protocol::PROTOCOL_VERSION
+                );
+                println!(
+                    "Network stream protocol: v{}",
+                    misaka_network::PROTOCOL_VERSION
+                );
+                println!(
+                    "Auth session protocol: v{}",
+                    misaka_core::protocol::AUTH_SESSION_PROTOCOL_VERSION
+                );
+                println!(
+                    "Enrollment protocol: v{}",
+                    misaka_core::enrollment::ENROLLMENT_VERSION
+                );
+                println!(
+                    "Gateway protocol: v{}",
+                    misaka_core::gateway::GATEWAY_PROTOCOL_VERSION
+                );
+            }
         }
 
         Command::Connect { sister } => {
@@ -3778,6 +3857,19 @@ fn load_authenticated_session(
     }
 }
 
+/// The running binary's package version. Deployment visibility only; never
+/// treated as protocol version or as immutable Sister identity.
+fn binary_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+/// Report the current binary version as the Sister's runtime version, regardless
+/// of what `identity.json` recorded when the identity was first persisted.
+/// Version is runtime metadata; stable identity is the Sister key + SisterId.
+fn apply_runtime_version(identity: &mut misaka_core::SisterIdentity) {
+    identity.version = binary_version().to_string();
+}
+
 fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -3812,22 +3904,40 @@ enum RunAttempt {
     NoLocalSister,
 }
 
-/// Address of the running local Sister's loopback API: the address it recorded
-/// at startup (handles ephemeral `--api-port 0`), else the default 31702.
+/// Address of the running local Sister's loopback API.
+///
+/// Prefers the structured `runtime.json` marker; falls back to the legacy
+/// `api-endpoint` file for one compatibility period.
 fn running_sister_api_addr(data_dir: &Path) -> Option<SocketAddr> {
+    if let Ok(Some(instance)) =
+        misaka_runtime::runtime_instance_store::RuntimeInstanceStore::load(data_dir)
+    {
+        if let Ok(addr) = instance.api_endpoint.parse::<SocketAddr>() {
+            if addr.ip().is_loopback() {
+                return Some(addr);
+            }
+        }
+    }
     let value = std::fs::read_to_string(data_dir.join("api-endpoint")).ok()?;
     let addr = value.trim().parse::<SocketAddr>().ok()?;
     addr.ip().is_loopback().then_some(addr)
 }
 
-/// The running local Sister's Job-result bound (seconds), recorded at `start`
-/// alongside `api-endpoint`. The CLI relay must hold its HTTP response open at
-/// least this long: a Job that legitimately runs longer than a fixed client
-/// wait would otherwise be reported as failed while still executing on the
-/// executor. Absent the marker (older Sister, or a `run` against a config dir
-/// with no recorded bound), the server default `job_timeout` applies.
+/// The running local Sister's Job-result bound (seconds). Prefers `runtime.json`,
+/// falling back to the legacy `api-result-timeout` file. The CLI relay must hold
+/// its HTTP response open at least this long: a Job that legitimately runs
+/// longer than a fixed client wait would otherwise be reported as failed while
+/// still executing on the executor. Absent any marker, the server default
+/// `job_timeout` applies.
 fn running_sister_result_timeout(data_dir: &Path) -> Duration {
     let fallback = Duration::from_secs(60);
+    if let Ok(Some(instance)) =
+        misaka_runtime::runtime_instance_store::RuntimeInstanceStore::load(data_dir)
+    {
+        if instance.api_result_timeout_secs > 0 {
+            return Duration::from_secs(instance.api_result_timeout_secs);
+        }
+    }
     let Ok(value) = std::fs::read_to_string(data_dir.join("api-result-timeout")) else {
         return fallback;
     };
@@ -3840,12 +3950,14 @@ fn running_sister_result_timeout(data_dir: &Path) -> Duration {
     Duration::from_secs(secs)
 }
 
-/// A minimal loopback HTTP POST (the Misaka API is loopback-only). Returns the
-/// status and response body, or `None` on any transport error (no Sister there).
-/// The result-read deadline is the running Sister's Job-result bound: a Job is
-/// allowed to execute up to that long before the API returns its result.
+/// A minimal loopback HTTP POST to the local control API. Attaches the
+/// `Authorization: Bearer <token>` header. Returns the status and response
+/// body, or `None` on any transport error (no Sister there). The result-read
+/// deadline is the running Sister's Job-result bound: a Job is allowed to
+/// execute up to that long before the API returns its result.
 async fn http_post_json(
     addr: SocketAddr,
+    token: &str,
     path: &str,
     body: &serde_json::Value,
     result_timeout: Duration,
@@ -3860,7 +3972,7 @@ async fn http_post_json(
     .ok()?;
     let body = body.to_string();
     let request = format!(
-        "POST {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "POST {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
     tokio::time::timeout(result_timeout, async {
@@ -3877,18 +3989,63 @@ async fn http_post_json(
     .ok()?
 }
 
+/// Client for the running Sister's authenticated loopback control surface.
+///
+/// Owns the endpoint, the local control token, and the request timeout so no
+/// command duplicates header/token handling. It is intentionally not a generic
+/// RPC framework.
+struct LocalControlClient {
+    addr: SocketAddr,
+    token: String,
+    result_timeout: Duration,
+}
+
+impl LocalControlClient {
+    /// Build a client from a running Sister's recorded local state.
+    ///
+    /// `Ok(None)` means no running Sister is recorded. `Err` means a Sister is
+    /// present but local control is unusable (missing/unreadable token) — the
+    /// caller must fail closed rather than retry unauthenticated.
+    fn for_config_dir(data_dir: &Path) -> Result<Option<Self>, String> {
+        let Some(addr) = running_sister_api_addr(data_dir) else {
+            return Ok(None);
+        };
+        let token =
+            misaka_runtime::local_control_token_store::LocalControlTokenStore::load(data_dir)
+                .map_err(|error| format!("local control token is unreadable: {error}"))?
+                .ok_or_else(|| {
+                    "a Sister is running but its local control token is missing; \
+                 restart the Sister (misaka service restart / misaka start)"
+                        .to_string()
+                })?;
+        Ok(Some(Self {
+            addr,
+            token,
+            result_timeout: running_sister_result_timeout(data_dir),
+        }))
+    }
+
+    fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+
+    async fn post_json(&self, path: &str, body: &serde_json::Value) -> Option<(u16, String)> {
+        http_post_json(self.addr, &self.token, path, body, self.result_timeout).await
+    }
+}
+
 async fn try_run_via_running_sister(
     data_dir: &Path,
     command: &str,
     sister: Option<u64>,
 ) -> RunAttempt {
-    let Some(addr) = running_sister_api_addr(data_dir) else {
-        return RunAttempt::NoLocalSister;
+    let client = match LocalControlClient::for_config_dir(data_dir) {
+        Ok(Some(client)) => client,
+        Ok(None) => return RunAttempt::NoLocalSister,
+        Err(message) => return RunAttempt::Failed(message),
     };
     let body = serde_json::json!({ "command": command, "sister": sister });
-    let result_timeout = running_sister_result_timeout(data_dir);
-    let Some((status, resp)) = http_post_json(addr, "/api/v1/jobs", &body, result_timeout).await
-    else {
+    let Some((status, resp)) = client.post_json("/api/v1/jobs", &body).await else {
         return RunAttempt::NoLocalSister;
     };
     if (200..300).contains(&status) {
@@ -3896,6 +4053,12 @@ async fn try_run_via_running_sister(
             Ok(result) => RunAttempt::Printed(result),
             Err(error) => RunAttempt::Failed(format!("malformed job response: {error}")),
         }
+    } else if status == 401 {
+        RunAttempt::Failed(format!(
+            "local control authentication failed for the Sister API at {}; \
+             check MISAKA_CONFIG_DIR and restart the Sister",
+            client.addr()
+        ))
     } else {
         // Distinguish "no such running Sister" from a real job failure by the
         // status; a 502 from the API is a genuine submit/result error.
@@ -4779,5 +4942,32 @@ mod tighten_tests {
         assert!(!relay_url_is_loopback(&relay(
             "https://relay.example.com:443"
         )));
+    }
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::*;
+
+    // §54: an old persisted identity version must not masquerade as the daemon
+    // version — startup reports the current binary version.
+    #[test]
+    fn runtime_version_overrides_persisted_identity_version() {
+        let mut identity = misaka_core::SisterIdentity::new(
+            7,
+            "n".into(),
+            "h".into(),
+            "p".into(),
+            "0.0.1-old".into(),
+            31700,
+        );
+        apply_runtime_version(&mut identity);
+        assert_eq!(identity.version, env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn version_command_accepts_json_flag() {
+        let cli = Cli::try_parse_from(["misaka", "version", "--json"]).unwrap();
+        assert!(matches!(cli.command, Command::Version { json: true }));
     }
 }
