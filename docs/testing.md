@@ -328,9 +328,13 @@ launchd/systemd required in CI):
   generated token + `misaka run --sister B` over authenticated Iroh returns the
   result, and a raw unauthenticated `POST /api/v1/jobs` returns 401 and does
   not execute. JI04/JI08/JI09 fail-closed behavior is unchanged.
-- **Runtime marker** (`misaka-runtime`): `runtime.json` roundtrips (loopback
-  endpoint + binary version), is removed only by its owning `instance_id`, and
-  a malformed marker is an error.
+- **Runtime marker** (`misaka-runtime` unit + T14): `runtime.json` roundtrips
+  (loopback endpoint + binary version), is removed only by its owning
+  `instance_id`, and a malformed marker is an error. `T14_runtime_marker`
+  covers the process lifecycle: created after the API binds with a loopback
+  endpoint and the current binary version (compared with `misaka version
+  --json`), removed by the owning process on graceful shutdown, and a stale
+  marker is detected by `misaka doctor`.
 - **State layout** (`misaka-runtime`, SL01–SL06): create v1, adopt legacy,
   too-new fails closed, failed migration does not advance the version, adoption
   never rewrites (even malformed) secret files.
@@ -341,11 +345,20 @@ launchd/systemd required in CI):
   `MISAKA_CONFIG_DIR`, restart-on-failure, no token), deterministic labels,
   name validation, and safe `service run` argv (no insecure/test flags).
 - **Doctor** (`misaka`): Gateway-without-connectivity warning, URL parsing,
-  permission checks, healthy aggregation.
+  permission checks, healthy aggregation; the report also covers file
+  permissions, the Authority-owner serial allocator, and the service-manager vs
+  runtime-marker cross-check.
+- **Live service (opt-in, NOT in CI)** — `cargo run -p testament --
+  service-verify`: installs a temporary, uniquely named per-user service in an
+  isolated config dir, waits for the authenticated local API, checks
+  `service status` health, restarts, stops, uninstalls, and asserts the Sister
+  identity survives. It uses a `Drop` guard so a failed run still uninstalls,
+  and it never touches `~/.misaka`.
 
 `misaka doctor --network` performs bounded opt-in reachability checks and is
-not part of normal CI. Live service installation (launchd/systemd) is an
-operator-only manual procedure (see `docs/deployment-v1.md`), never CI.
+not part of normal CI. Live service installation (launchd/systemd) is
+exercised only by the opt-in `testament service-verify` (see above), never by
+CI; see `docs/deployment-v1.md` for the manual procedure too.
 
 ## CI gate
 

@@ -131,6 +131,23 @@ Re-running `service install` for the same profile is safe: unchanged config is
 a no-op; changed connectivity updates `service.json` and reloads the
 definition. It never touches Network identity or membership.
 
+`service status [--json]` reports name, installed/not, the service manager's
+state, config dir, configured executable + version, the running daemon version
+(from `runtime.json`), the local API endpoint, and a `healthy` flag defined as
+**service manager reports running AND the authenticated local API responds**.
+It warns when the configured binary version differs from the running daemon.
+
+Opt-in live verification (never CI):
+
+```bash
+cargo run -p testament -- service-verify --json
+```
+
+This installs a temporary, uniquely named service in an isolated config dir,
+checks the authenticated local API / `service status` health, restarts, stops,
+uninstalls, and asserts the Sister identity survives. It never touches
+`~/.misaka` and uninstalls even on failure.
+
 ### Uninstall semantics
 
 `service uninstall` removes the registration, the generated plist/unit, and the
