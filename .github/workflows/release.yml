@@ -14,15 +14,40 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Verify tag matches the workspace package version
+      - name: Verify CalVer tag matches the workspace package version
         run: |
-          tag="${GITHUB_REF_NAME#v}"
-          pkg="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
-          echo "tag=$tag workspace_version=$pkg"
-          if [ "$tag" != "$pkg" ]; then
-            echo "::error::tag v$tag does not match workspace version $pkg"
-            exit 1
-          fi
+          python3 - <<'PY'
+          import datetime
+          import os
+          import re
+          import tomllib
+
+          tag = os.environ["GITHUB_REF_NAME"]
+          match = re.fullmatch(
+              r"v([0-9]{4})\.([1-9]|1[0-2])\.([1-9]|[12][0-9]|3[01])",
+              tag,
+          )
+          if match is None:
+              raise SystemExit(
+                  f"::error::release tag {tag!r} must match vYYYY.M.D "
+                  "without leading zeroes"
+              )
+
+          year, month, day = (int(value) for value in match.groups())
+          try:
+              datetime.date(year, month, day)
+          except ValueError as error:
+              raise SystemExit(f"::error::invalid CalVer date in {tag}: {error}")
+
+          with open("Cargo.toml", "rb") as handle:
+              package_version = tomllib.load(handle)["workspace"]["package"]["version"]
+          version = tag[1:]
+          print(f"tag={tag} workspace_version={package_version}")
+          if version != package_version:
+              raise SystemExit(
+                  f"::error::tag {tag} does not match workspace version {package_version}"
+              )
+          PY
 
   build:
     needs: validate
@@ -33,7 +58,7 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-14
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-15-intel
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
     runs-on: ${{ matrix.os }}
@@ -55,7 +80,8 @@ jobs:
           name="misaka-v${version}-${{ matrix.target }}"
           mkdir -p "dist/${name}"
           cp "target/${{ matrix.target }}/release/misaka" "dist/${name}/"
-          [ -f README.md ] && cp README.md "dist/${name}/" || true
+          cp README.md "dist/${name}/"
+          cp scripts/install-user.sh "dist/${name}/"
           tar -C dist -czf "dist/${name}.tar.gz" "${name}"
           if command -v sha256sum >/dev/null 2>&1; then
             (cd dist && sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256")
@@ -72,6 +98,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -88,8 +115,12 @@ jobs:
               prefix = f"misaka-v{version}-"
               target = name[len(prefix):-len(".tar.gz")] if name.startswith(prefix) else name
               assets.append({"target": target, "name": name, "sha256": sha})
+          year, month, day = (int(part) for part in version.split("."))
           manifest = {
+              "schema_version": 1,
+              "version_scheme": "calver",
               "version": version,
+              "release_date": f"{year:04d}-{month:02d}-{day:02d}",
               "git_sha": os.environ["GITHUB_SHA"],
               "assets": assets,
           }
@@ -101,6 +132,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" dist/* \
+          gh release create "${GITHUB_REF_NAME}" dist/*.tar.gz dist/*.tar.gz.sha256 dist/release-manifest.json \
             --title "${GITHUB_REF_NAME}" \
-            --generate-notes
+            --notes "First CalVer dogfooding release for the Pre-Resource Alpha. Focus: authenticated Iroh Sister networking, timed enrollment, Gateway/Relay discovery and transport, local-control authentication, per-user service deployment, doctor diagnostics, and upgrade-safe state layout. Resource/Ability abstractions are not part of this release."
