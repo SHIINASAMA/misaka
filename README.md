@@ -2,11 +2,16 @@
 
 Misaka Network is a local-network, decentralized runtime in which every node is a **Sister**. A Sister can listen for peers, discover and remember network state, accept or submit work, execute jobs, and contribute idle capacity. There is no master/slave role.
 
-**Current status: pre-Resource alpha.** Identity, membership, timed-invite
+**Current release: v2026.9.18 (CalVer). Current status: Pre-Resource Alpha.**
+Identity, membership, timed-invite
 enrollment, authenticated Iroh connectivity, Gateway/Relay discovery, Network
 Knowledge, and basic distributed Job execution are real. The Resource/Ability
 abstractions and distributed-storage semantics are **not** designed yet. See
 [docs/architecture.md](docs/architecture.md) for the current architecture.
+
+The current engineering focus is real per-user deployment and multi-machine
+dogfooding. See [docs/versioning.md](docs/versioning.md) and
+[docs/dogfooding-v1.md](docs/dogfooding-v1.md).
 
 ## Workspace
 

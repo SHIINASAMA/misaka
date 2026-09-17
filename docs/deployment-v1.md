@@ -5,6 +5,10 @@ run a Sister persistently as a per-user service, control it locally with an
 authenticated API, diagnose it with `misaka doctor`, and upgrade the binary at a
 stable path without re-running `network init` / `join` / `human init`.
 
+The current dogfooding release is `v2026.9.18` (CalVer). Release installation,
+two-host operation, and evidence boundaries are described in
+[dogfooding-v1.md](dogfooding-v1.md).
+
 Scope reminders:
 
 ```text
@@ -25,6 +29,30 @@ MISAKA_CONFIG_DIR=/tmp/x ./target/debug/misaka start      # foreground daemon
 
 `misaka start` remains the direct, debug-friendly path. Service management is
 additive; nothing forces a developer launch through launchd/systemd.
+
+## 1a. Release installation at a stable path
+
+For formal dogfooding, download a target-matching release archive, verify its
+published SHA-256, extract it, and run the packaged installer:
+
+    cd misaka-v2026.9.18-<target>
+    ./install-user.sh
+    "$HOME/.local/bin/misaka" version --json
+
+The default destination is $HOME/.local/bin/misaka; set
+MISAKA_INSTALL_DIR to choose another per-user directory. The installer copies
+only the binary through a same-directory temporary file and atomic rename where
+supported. It does not touch ~/.misaka, create identity or membership,
+install/start a service, configure Gateway/Relay, or use sudo.
+
+Because `service install` records the executable returned by
+`current_exe()`, install first and run service commands from this stable path:
+
+    "$HOME/.local/bin/misaka" service install
+    "$HOME/.local/bin/misaka" service status --json
+
+Do not install a service from a temporary extraction directory unless that
+temporary path is deliberately the desired permanent binary path.
 
 ## 2. Local control authentication
 
@@ -322,7 +350,7 @@ ephemeral, not Network/identity/config/authorization state:
 {
   "schema_version": 1, "instance_id": "…", "pid": 12345,
   "started_at": 1234567890, "api_endpoint": "127.0.0.1:31702",
-  "api_result_timeout_secs": 60, "binary_version": "0.1.0"
+  "api_result_timeout_secs": 60, "binary_version": "2026.9.18"
 }
 ```
 
@@ -346,13 +374,16 @@ the running binary's version, never the version recorded in `identity.json`.
 
 ## 8. Release artifacts (no automatic updater)
 
-`.github/workflows/release.yml` runs on a version **tag** (`v0.1.0`), never on a
-`main` push. It verifies the tag equals the workspace package version, builds
-macOS (aarch64/x86_64) and Linux (x86_64) artifacts, produces SHA-256
-checksums, and attaches a machine-readable manifest:
+`.github/workflows/release.yml` runs on a CalVer **tag** (`v2026.9.18`), never
+on a `main` push. It validates `vYYYY.M.D` as a real calendar date, verifies
+the tag equals the workspace package version, builds macOS (aarch64/x86_64)
+and Linux (x86_64) artifacts, produces SHA-256 checksums, and attaches a
+machine-readable manifest. Each archive contains `misaka`, `README.md`, and
+`install-user.sh`:
 
 ```json
-{ "version": "0.1.0", "git_sha": "…",
+{ "schema_version": 1, "version_scheme": "calver",
+  "version": "2026.9.18", "release_date": "2026-09-18", "git_sha": "…",
   "assets": [ { "target": "…", "name": "…", "sha256": "…" } ] }
 ```
 

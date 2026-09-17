@@ -8,6 +8,11 @@
 
 ## Project stage: Pre-Resource Alpha
 
+Current release: 2026.9.18 (CalVer). Current engineering focus: real
+installation, long-running per-user deployment, and multi-machine dogfooding.
+The release date is binary metadata only; protocol and state-layout versions
+remain independent. See [versioning.md](versioning.md).
+
 Misaka is currently a **pre-Resource alpha**. The identity, membership,
 enrollment, authenticated-connectivity, Gateway/Relay/Network-Knowledge, and
 basic distributed-Job layers are mature enough to exercise end to end. The
