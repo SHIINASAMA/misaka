@@ -789,7 +789,9 @@ pub async fn infra_checks(
 
 #[cfg(test)]
 mod tests {
-    use super::{connectivity_gap_warning, permissions_are_tight, DoctorReport, Status};
+    #[cfg(unix)]
+    use super::permissions_are_tight;
+    use super::{connectivity_gap_warning, DoctorReport, Status};
 
     #[test]
     fn gateway_without_connectivity_is_warned() {
@@ -821,9 +823,31 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             if let Ok((mut stream, _)) = listener.accept().await {
-                use tokio::io::AsyncWriteExt;
-                let _ = stream.write_all(response.as_bytes()).await;
-                let _ = stream.shutdown().await;
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+                // Read the request headers before replying. A server that
+                // writes and closes immediately can cause a TCP RST on
+                // Windows while the client is still sending its request.
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let read = match stream.read(&mut buffer).await {
+                        Ok(read) => read,
+                        Err(_) => return,
+                    };
+                    if read == 0 {
+                        return;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                    if request.len() > 64 * 1024 {
+                        return;
+                    }
+                }
+
+                if stream.write_all(response.as_bytes()).await.is_ok() {
+                    let _ = stream.flush().await;
+                    let _ = stream.shutdown().await;
+                }
             }
         });
         addr
