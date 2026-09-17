@@ -12,7 +12,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "2026.9.18"
 edition = "2021"
 
 [workspace.dependencies]
@@ -50,3 +50,11 @@ clap = { version = "4", features = ["derive"] }
 debug = false
 [profile.test.package."*"]
 debug = false
+
+[profile.dev]
+debug = 0
+incremental = false
+
+[profile.test]
+debug = 0
+incremental = false

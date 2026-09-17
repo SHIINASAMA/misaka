@@ -2060,7 +2060,7 @@ dependencies = [
 
 [[package]]
 name = "misaka"
-version = "0.1.0"
+version = "2026.9.18"
 dependencies = [
  "bincode",
  "clap",
@@ -2085,7 +2085,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-api"
-version = "0.1.0"
+version = "2026.9.18"
 dependencies = [
  "axum",
  "misaka-core",
@@ -2100,7 +2100,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-core"
-version = "0.1.0"
+version = "2026.9.18"
 dependencies = [
  "bincode",
  "ed25519-dalek 2.2.0",
@@ -2114,7 +2114,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-gatewayd"
-version = "0.1.0"
+version = "2026.9.18"
 dependencies = [
  "axum",
  "misaka-core",
@@ -2129,7 +2129,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-network"
-version = "0.1.0"
+version = "2026.9.18"
 dependencies = [
  "futures-util",
  "iroh",
@@ -2147,7 +2147,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-relay"
-version = "0.1.0"
+version = "2026.9.18"
 dependencies = [
  "iroh",
  "iroh-relay",
@@ -2163,7 +2163,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-runtime"
-version = "0.1.0"
+version = "2026.9.18"
 dependencies = [
  "aes-gcm",
  "bincode",
@@ -3934,7 +3934,7 @@ checksum = "7b2093cf4c8eb1e67749a6762251bc9cd836b6fc171623bd0a9d324d37af2417"
 
 [[package]]
 name = "testament"
-version = "0.1.0"
+version = "2026.9.18"
 dependencies = [
  "bincode",
  "clap",
