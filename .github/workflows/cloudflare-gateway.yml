@@ -63,7 +63,7 @@ jobs:
             --var NETWORK_ID:03030303-0303-0303-0303-030303030303 \
             --var NETWORK_AUTHORITY_PUBLIC_KEY:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa &
           WPID=$!
-          for i in $(seq 1 40); do
+          for _ in $(seq 1 40); do
             curl -sf http://127.0.0.1:8799/ >/dev/null && break
             sleep 1
           done
