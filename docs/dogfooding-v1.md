@@ -37,8 +37,13 @@ The convenient path on each host is:
 
 The bootstrap selects the current host target, downloads the published
 manifest and archive, verifies SHA-256, and installs only the binary. It does
-not create `~/.misaka` or install a service. For a fully manual artifact
-review, use the archive procedure below.
+not initialize identity, membership, or a service. It creates only the
+`$MISAKA/bin` installation directories. For a fully manual artifact review,
+use an archive produced with the current installer below.
+
+The immutable `v2026.9.18` archive predates the versioned-root installer; use
+the one-line bootstrap above for that release. The manual procedure below
+applies to archives produced after this layout change.
 
 On each host, verify the downloaded archive before extraction:
 
@@ -47,29 +52,35 @@ On each host, verify the downloaded archive before extraction:
     tar -xzf misaka-v2026.9.18-<target>.tar.gz -C "$HOME/misaka-releases"
     cd "$HOME/misaka-releases/misaka-v2026.9.18-<target>"
     ./install-user.sh
-    "$HOME/.local/bin/misaka" version --json
+    "$HOME/.misaka/bin/misaka" version --json
 
 After either installation path, shorten the remaining commands for this host:
 
-    export MISAKA="$HOME/.local/bin/misaka"
-    export MISAKA_CONFIG_DIR="$HOME/.misaka"
-    "$MISAKA" version --json
+    export MISAKA="${MISAKA:-$HOME/.misaka}"
+    export MISAKA_CONFIG_DIR="${MISAKA_CONFIG_DIR:-$MISAKA}"
+    export MISAKA_LOG_DIR="${MISAKA_LOG_DIR:-$MISAKA/log}"
+    export MISAKA_BIN="${MISAKA_BIN:-$MISAKA/bin/misaka}"
+    "$MISAKA_BIN" version --json
 
 Record `binary_version` and `build_git_sha`. The installer only copies the
-binary to `$HOME/.local/bin/misaka` (or `MISAKA_INSTALL_DIR/misaka`); it does
-not create `~/.misaka`, initialize a Network, install a service, configure a
-Gateway, or contact a Relay.
+binary to `$MISAKA/bin/<version>/misaka` and `$MISAKA/bin/misaka`; it does not
+initialize a Network, install a service, configure a Gateway, or contact a
+Relay.
+
+`$MISAKA` is the product root and default persistent runtime state/configuration
+directory. `$MISAKA_LOG_DIR` is independent and defaults to `$MISAKA/log`.
+`$MISAKA_BIN` is the stable ordinary executable path.
 
 ## Stage B — Host A owner Sister
 
 Use the stable installed path for all service operations:
 
-    "$MISAKA" network init
-    "$MISAKA" network gateway add "$GATEWAY_URL"
-    "$MISAKA" --iroh-relay "$RELAY_URL" service install
-    "$MISAKA" service status --json
-    "$MISAKA" doctor
-    "$MISAKA" doctor --infra
+    "$MISAKA_BIN" network init
+    "$MISAKA_BIN" network gateway add "$GATEWAY_URL"
+    "$MISAKA_BIN" --iroh-relay "$RELAY_URL" service install
+    "$MISAKA_BIN" service status --json
+    "$MISAKA_BIN" doctor
+    "$MISAKA_BIN" doctor --infra
 
 For an explicitly LAN-only test, replace the relay service install with
 --advertise-host <host-a-lan-ip>. Do not enable both connectivity policies
@@ -80,16 +91,16 @@ Authority public fingerprint only; never record Authority private material.
 
 On Host A, create a short-lived Invite Code and transfer it privately:
 
-    "$MISAKA" network invite --expires 1h
+    "$MISAKA_BIN" network invite --expires 1h
 
 On Host B, use the printed Network ID and Invite Code only in the shell session
 or another approved secret-handling channel:
 
-    "$MISAKA" network join <NETWORK_ID> <INVITE_CODE> --gateway "$GATEWAY_URL"
-    "$MISAKA" --iroh-relay "$RELAY_URL" service install
-    "$MISAKA" service status --json
-    "$MISAKA" doctor
-    "$MISAKA" doctor --infra
+    "$MISAKA_BIN" network join <NETWORK_ID> <INVITE_CODE> --gateway "$GATEWAY_URL"
+    "$MISAKA_BIN" --iroh-relay "$RELAY_URL" service install
+    "$MISAKA_BIN" service status --json
+    "$MISAKA_BIN" doctor
+    "$MISAKA_BIN" doctor --infra
 
 Use --advertise-host <host-b-lan-ip> instead when this stage is intentionally
 LAN-only. Do not commit or paste the Invite Code into the dogfood report.
@@ -99,7 +110,7 @@ LAN-only. Do not commit or paste the Invite Code into the dogfood report.
 From both hosts, wait for the existing Network Knowledge/Gateway convergence
 and run:
 
-    "$MISAKA" ps --json
+    "$MISAKA_BIN" ps --json
 
 Confirm both known Sisters, expected identities, Network state, and binary
 versions. Record the actual convergence time if it is not immediate; do not
@@ -109,8 +120,8 @@ add sleeps or production retries merely to make the observation pass.
 
 Use the dedicated data-path diagnostics, not doctor --infra:
 
-    "$MISAKA" connect '#<TARGET_SISTER_ID>'
-    "$MISAKA" stream-test --endpoint 'iroh://<TARGET_ENDPOINT>' --mode bidirectional --json
+    "$MISAKA_BIN" connect '#<TARGET_SISTER_ID>'
+    "$MISAKA_BIN" stream-test --endpoint 'iroh://<TARGET_ENDPOINT>' --mode bidirectional --json
 
 Use the actual endpoint emitted by misaka endpoint --json or misaka ps and the
 current CLI equivalent if the stored record is more convenient. Record target
@@ -123,7 +134,7 @@ health, not a Sister-to-Sister path.
 From a running local Sister, submit one harmless command to the selected remote
 Sister:
 
-    "$MISAKA" run --sister <TARGET_SISTER_ID> 'printf misaka-dogfood\n'
+    "$MISAKA_BIN" run --sister <TARGET_SISTER_ID> 'printf misaka-dogfood\n'
 
 Confirm the result returns through the authenticated local-control API and Iroh
 path, and that the target Sister executes it. Do not use destructive commands.
@@ -133,10 +144,10 @@ Do not treat a local run --local result as remote validation.
 
 On each host:
 
-    "$MISAKA" service restart
-    "$MISAKA" service status --json
-    "$MISAKA" doctor
-    "$MISAKA" version --json
+    "$MISAKA_BIN" service restart
+    "$MISAKA_BIN" service status --json
+    "$MISAKA_BIN" doctor
+    "$MISAKA_BIN" version --json
 
 Confirm Sister key/ID, Network membership, Iroh identity, Human identity,
 Gateway configuration, and local-control token are preserved. Confirm
@@ -161,12 +172,12 @@ destructive failure experiments.
 There is no prior real CalVer release to claim as an upgrade baseline. Verify
 the contract with an isolated binary replacement if useful:
 
-    "$MISAKA" service stop
+    "$MISAKA_BIN" service stop
     # extract the replacement archive and run its install-user.sh
-    "$MISAKA" service start
-    "$MISAKA" doctor
-    "$MISAKA" version --json
-    "$MISAKA" service status --json
+    "$MISAKA_BIN" service start
+    "$MISAKA_BIN" doctor
+    "$MISAKA_BIN" version --json
+    "$MISAKA_BIN" service status --json
 
 The service definition must continue to point to the same stable path. Normal
 upgrade does not rerun network init, network join, human init, or service

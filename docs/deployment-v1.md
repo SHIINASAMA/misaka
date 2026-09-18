@@ -58,19 +58,27 @@ published SHA-256, extract it, and run the packaged installer:
 
     cd misaka-v2026.9.18-<target>
     ./install-user.sh
-    "$HOME/.local/bin/misaka" version --json
+    "$HOME/.misaka/bin/misaka" version --json
 
-The default destination is $HOME/.local/bin/misaka; set
-MISAKA_INSTALL_DIR to choose another per-user directory. The installer copies
-only the binary through a same-directory temporary file and atomic rename where
-supported. It does not touch ~/.misaka, create identity or membership,
-install/start a service, configure Gateway/Relay, or use sudo.
+The default product root is `$HOME/.misaka`. The installer retains the binary
+at `$MISAKA/bin/<version>/misaka` and copies it to the stable ordinary file
+`$MISAKA/bin/misaka`. Set `MISAKA` to choose another root, or override
+`MISAKA_BIN_DIR` / `MISAKA_BIN` for an explicit binary layout. It does not
+initialize identity or membership, install/start a service, configure
+Gateway/Relay, or use sudo.
 
-Because `service install` records the executable returned by
-`current_exe()`, install first and run service commands from this stable path:
+The runtime paths are independently overridable:
 
-    "$HOME/.local/bin/misaka" service install
-    "$HOME/.local/bin/misaka" service status --json
+    export MISAKA="${MISAKA:-$HOME/.misaka}"
+    export MISAKA_CONFIG_DIR="${MISAKA_CONFIG_DIR:-$MISAKA}"
+    export MISAKA_LOG_DIR="${MISAKA_LOG_DIR:-$MISAKA/log}"
+    export MISAKA_BIN="${MISAKA_BIN:-$MISAKA/bin/misaka}"
+
+Install the service from the stable path so its definition remains unchanged
+across binary replacement:
+
+    "$MISAKA_BIN" service install
+    "$MISAKA_BIN" service status --json
 
 Do not install a service from a temporary extraction directory unless that
 temporary path is deliberately the desired permanent binary path.

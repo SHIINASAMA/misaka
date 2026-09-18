@@ -29,12 +29,18 @@ curl -fsSL https://raw.githubusercontent.com/SHIINASAMA/misaka/main/scripts/inst
   | MISAKA_VERSION=2026.9.18 sh
 ```
 
-Both forms verify the release manifest and SHA-256 before installing only
-`$HOME/.local/bin/misaka`. They do not create `~/.misaka`, initialize a
-Network, install a service, or configure Gateway/Relay. Set
-`MISAKA_INSTALL_DIR` to choose another per-user binary directory. If the
-bootstrap script itself must be independently reviewed, download it first
-instead of piping it directly to `sh`.
+Both forms verify the release manifest and SHA-256 before installing the
+versioned binary under `$HOME/.misaka/bin/<version>/misaka` and updating the
+stable ordinary file `$HOME/.misaka/bin/misaka`. They do not initialize a
+Network, create identity or membership, install a service, or configure
+Gateway/Relay. Set `MISAKA` to choose another product root, or override
+`MISAKA_BIN_DIR` / `MISAKA_BIN` for an explicit binary layout. If the bootstrap
+script itself must be independently reviewed, download it first instead of
+piping it directly to `sh`.
+
+The default `~/.misaka` path is the Misaka product root. Unless explicitly
+overridden, configuration remains in `$MISAKA`, logs in `$MISAKA/log`, and
+managed binaries in `$MISAKA/bin`.
 
 ## Workspace
 

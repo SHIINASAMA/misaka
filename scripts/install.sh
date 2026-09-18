@@ -12,10 +12,13 @@ Install the latest published Misaka release for this macOS/Linux host.
 
 Environment:
   MISAKA_VERSION       Pin the release, for example 2026.9.18.
-  MISAKA_INSTALL_DIR   Override the per-user binary directory.
+  MISAKA                Override the per-user Misaka root.
+  MISAKA_BIN_DIR        Override the versioned/stable binary directory.
+  MISAKA_BIN            Override the stable executable path.
 
-This installs only the binary. It does not initialize a Network, create
-~/.misaka, install a service, or configure Gateway/Relay settings.
+This installs only the binary under MISAKA/bin. It does not initialize a
+Network, create identity or membership, install a service, or configure
+Gateway/Relay settings.
 EOF
 }
 
@@ -33,7 +36,7 @@ esac
 home=${HOME:-}
 [ -n "$home" ] || die "HOME is not set"
 
-for command_name in awk basename curl find grep head mkdir mktemp rm sed tar uname; do
+for command_name in awk basename cmp cp curl dirname find grep head mkdir mktemp mv rm sed tar uname; do
     command -v "$command_name" >/dev/null 2>&1 || die "required command not found: $command_name"
 done
 
@@ -79,7 +82,10 @@ else
     release_base="https://github.com/SHIINASAMA/misaka/releases/latest/download"
 fi
 
-install_dir=${MISAKA_INSTALL_DIR:-"$home/.local/bin"}
+root_dir=${MISAKA:-"$home/.misaka"}
+bin_dir=${MISAKA_BIN_DIR:-"$root_dir/bin"}
+stable_binary=${MISAKA_BIN:-"$bin_dir/misaka"}
+
 temporary_root=$(mktemp -d "${TMPDIR:-/tmp}/misaka-install.XXXXXX")
 cleanup() {
     rm -rf "$temporary_root"
@@ -167,16 +173,46 @@ mkdir -p "$extract_dir"
 tar -xzf "$archive_file" -C "$extract_dir" \
     || die "failed to extract $asset_name"
 
-archive_installer=$(find "$extract_dir" -type f -name install-user.sh -print -quit)
-[ -n "$archive_installer" ] || die "release archive has no install-user.sh"
+source_binary=$(find "$extract_dir" -type f -name misaka -print -quit)
+[ -n "$source_binary" ] && [ -x "$source_binary" ] \
+    || die "release archive has no executable misaka binary"
 
-MISAKA_INSTALL_DIR="$install_dir" sh "$archive_installer"
-installed_binary=$install_dir/misaka
-[ -x "$installed_binary" ] || die "installer did not create executable $installed_binary"
+version_dir=$bin_dir/$release_version
+versioned_binary=$version_dir/misaka
+mkdir -p "$version_dir" "$(dirname "$stable_binary")"
 
-echo "Installed Misaka $release_version for $target at $installed_binary"
+if [ -e "$versioned_binary" ]; then
+    cmp -s "$source_binary" "$versioned_binary" \
+        || die "versioned binary already exists with different content: $versioned_binary"
+else
+    versioned_tmp=$(mktemp "$versioned_binary.tmp.XXXXXX")
+    cleanup_versioned() {
+        rm -f "$versioned_tmp"
+    }
+    trap cleanup_versioned EXIT HUP INT TERM
+    cp "$source_binary" "$versioned_tmp"
+    chmod 0755 "$versioned_tmp"
+    mv "$versioned_tmp" "$versioned_binary"
+    trap cleanup EXIT HUP INT TERM
+fi
+
+stable_tmp=$(mktemp "$stable_binary.tmp.XXXXXX")
+cleanup_stable() {
+    rm -f "$stable_tmp"
+}
+trap cleanup_stable EXIT HUP INT TERM
+cp "$versioned_binary" "$stable_tmp"
+chmod 0755 "$stable_tmp"
+mv -f "$stable_tmp" "$stable_binary"
+trap cleanup EXIT HUP INT TERM
+
+echo "Installed Misaka $release_version for $target at $stable_binary"
+echo "Retained versioned binary at $versioned_binary"
 case ":${PATH:-}:" in
-    *:"$install_dir":*) ;;
-    *) echo "Add it to the current shell with: export PATH=\"$install_dir:\$PATH\"" ;;
+    *:"$(dirname "$stable_binary")":*) ;;
+    *) echo "Add it to the current shell with: export PATH=\"$(dirname "$stable_binary"):\$PATH\"" ;;
 esac
+if ! "$stable_binary" version --json; then
+    echo "Run '$stable_binary version' to inspect the installed binary." >&2
+fi
 echo "Configuration is separate; no Network or service state was created."

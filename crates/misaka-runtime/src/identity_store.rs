@@ -18,18 +18,44 @@ pub enum IdentityStoreError {
 pub struct IdentityStore;
 
 impl IdentityStore {
-    /// 允许通过 misaka_config_dir 环境变量覆盖配置目录 (默认 ~/.misaka)。
-    /// 便于本机测试多个节点、以及未来支持自定义数据目录。
-    pub fn config_dir() -> Result<PathBuf, IdentityStoreError> {
-        if let Ok(dir) = std::env::var("MISAKA_CONFIG_DIR") {
-            if !dir.is_empty() {
-                return Ok(PathBuf::from(dir));
-            }
+    /// The per-user Misaka product root (default `~/.misaka`).
+    pub fn root_dir() -> Result<PathBuf, IdentityStoreError> {
+        if let Some(dir) = non_empty_env_path("MISAKA") {
+            return Ok(dir);
         }
-        let home = std::env::var("HOME")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .map_err(|_| IdentityStoreError::NoConfigDir)?;
-        Ok(PathBuf::from(home).join(".misaka"))
+        Ok(home_dir()?.join(".misaka"))
+    }
+
+    /// Persistent state/configuration directory (default `MISAKA`).
+    pub fn config_dir() -> Result<PathBuf, IdentityStoreError> {
+        if let Some(dir) = non_empty_env_path("MISAKA_CONFIG_DIR") {
+            return Ok(dir);
+        }
+        Self::root_dir()
+    }
+
+    /// Service/runtime log directory (default `MISAKA/log`).
+    pub fn log_dir() -> Result<PathBuf, IdentityStoreError> {
+        if let Some(dir) = non_empty_env_path("MISAKA_LOG_DIR") {
+            return Ok(dir);
+        }
+        Ok(Self::root_dir()?.join("log"))
+    }
+
+    /// Versioned and stable installed binary directory (default `MISAKA/bin`).
+    pub fn bin_dir() -> Result<PathBuf, IdentityStoreError> {
+        if let Some(dir) = non_empty_env_path("MISAKA_BIN_DIR") {
+            return Ok(dir);
+        }
+        Ok(Self::root_dir()?.join("bin"))
+    }
+
+    /// Stable executable path used by a managed per-user service.
+    pub fn stable_binary() -> Result<PathBuf, IdentityStoreError> {
+        if let Some(path) = non_empty_env_path("MISAKA_BIN") {
+            return Ok(path);
+        }
+        Ok(Self::bin_dir()?.join("misaka"))
     }
 
     /// 尽量探测主机名，失败则回退到 "unknown"
@@ -124,6 +150,19 @@ impl IdentityStore {
         Self::save(&identity)?;
         Ok(identity)
     }
+}
+
+fn non_empty_env_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+fn home_dir() -> Result<PathBuf, IdentityStoreError> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .ok_or(IdentityStoreError::NoConfigDir)
 }
 
 #[cfg(test)]

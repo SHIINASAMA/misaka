@@ -157,24 +157,22 @@ impl ServiceManager {
             ServiceManager::Systemd => home.join(".config/systemd/user").join(self.label(name)),
         })
     }
-
-    pub fn logs_dir(self, config_dir: &Path) -> PathBuf {
-        match self {
-            // Keep logs beside the config but not among the secret files.
-            ServiceManager::Launchd => config_dir.join("logs"),
-            ServiceManager::Systemd => config_dir.join("logs"),
-        }
-    }
 }
 
 /// Generate a macOS LaunchAgent plist.
 ///
-/// Absolute program path; explicit `MISAKA_CONFIG_DIR`; `RunAtLoad`; restart on
-/// failure; no reliance on the working directory or the interactive shell PATH.
-/// Never contains the local control token.
-pub fn launchd_plist(label: &str, program: &str, config_dir: &Path, logs_dir: &Path) -> String {
-    let stdout = logs_dir.join("service.out.log");
-    let stderr = logs_dir.join("service.err.log");
+/// Absolute program path; explicit Misaka root/config/log paths; `RunAtLoad`;
+/// restart on failure; no reliance on the working directory or interactive
+/// shell PATH. Never contains the local control token.
+pub fn launchd_plist(
+    label: &str,
+    program: &str,
+    root_dir: &Path,
+    config_dir: &Path,
+    log_dir: &Path,
+) -> String {
+    let stdout = log_dir.join("service.out.log");
+    let stderr = log_dir.join("service.err.log");
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -190,8 +188,12 @@ pub fn launchd_plist(label: &str, program: &str, config_dir: &Path, logs_dir: &P
     </array>
     <key>EnvironmentVariables</key>
     <dict>
+        <key>MISAKA</key>
+        <string>{root_dir}</string>
         <key>MISAKA_CONFIG_DIR</key>
         <string>{config_dir}</string>
+        <key>MISAKA_LOG_DIR</key>
+        <string>{log_dir}</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>
@@ -209,7 +211,9 @@ pub fn launchd_plist(label: &str, program: &str, config_dir: &Path, logs_dir: &P
 "#,
         label = xml_escape(label),
         program = xml_escape(program),
+        root_dir = xml_escape(&root_dir.to_string_lossy()),
         config_dir = xml_escape(&config_dir.to_string_lossy()),
+        log_dir = xml_escape(&log_dir.to_string_lossy()),
         stdout = xml_escape(&stdout.to_string_lossy()),
         stderr = xml_escape(&stderr.to_string_lossy()),
     )
@@ -217,9 +221,15 @@ pub fn launchd_plist(label: &str, program: &str, config_dir: &Path, logs_dir: &P
 
 /// Generate a systemd --user unit.
 ///
-/// Absolute `ExecStart`; explicit `MISAKA_CONFIG_DIR`; `Restart=on-failure`.
-/// Never contains the local control token.
-pub fn systemd_unit(name: &str, program: &str, config_dir: &Path) -> String {
+/// Absolute `ExecStart`; explicit Misaka root/config/log paths;
+/// `Restart=on-failure`. Never contains the local control token.
+pub fn systemd_unit(
+    name: &str,
+    program: &str,
+    root_dir: &Path,
+    config_dir: &Path,
+    log_dir: &Path,
+) -> String {
     format!(
         "[Unit]\n\
          Description=Misaka Sister service ({name})\n\
@@ -228,7 +238,9 @@ pub fn systemd_unit(name: &str, program: &str, config_dir: &Path) -> String {
          [Service]\n\
          Type=simple\n\
          ExecStart={program} service run\n\
+         Environment=MISAKA={root_dir}\n\
          Environment=MISAKA_CONFIG_DIR={config_dir}\n\
+         Environment=MISAKA_LOG_DIR={log_dir}\n\
          Restart=on-failure\n\
          RestartSec=3\n\
          \n\
@@ -236,7 +248,9 @@ pub fn systemd_unit(name: &str, program: &str, config_dir: &Path) -> String {
          WantedBy=default.target\n",
         name = name,
         program = program,
+        root_dir = root_dir.to_string_lossy(),
         config_dir = config_dir.to_string_lossy(),
+        log_dir = log_dir.to_string_lossy(),
     )
 }
 
@@ -381,8 +395,12 @@ pub struct ServiceStatus {
 pub fn install(request: InstallRequest) -> Result<(), MisakaError> {
     validate_name(&request.name).map_err(MisakaError::Other)?;
     let manager = ServiceManager::detect().map_err(MisakaError::Other)?;
+    let root_dir =
+        crate::IdentityStore::root_dir().map_err(|error| MisakaError::Other(error.to_string()))?;
     let config_dir = crate::IdentityStore::config_dir()
         .map_err(|error| MisakaError::Other(error.to_string()))?;
+    let log_dir =
+        crate::IdentityStore::log_dir().map_err(|error| MisakaError::Other(error.to_string()))?;
     let program = std::env::current_exe()
         .map_err(|error| MisakaError::Other(format!("cannot resolve binary path: {error}")))?;
     let program = program.to_string_lossy().to_string();
@@ -409,17 +427,19 @@ pub fn install(request: InstallRequest) -> Result<(), MisakaError> {
     if let Some(parent) = definition.parent() {
         std::fs::create_dir_all(parent).map_err(|error| MisakaError::Other(error.to_string()))?;
     }
-    let logs_dir = manager.logs_dir(&config_dir);
-    std::fs::create_dir_all(&logs_dir)
+    std::fs::create_dir_all(&log_dir)
         .map_err(|error| MisakaError::Other(format!("create logs dir: {error}")))?;
     let contents = match manager {
         ServiceManager::Launchd => launchd_plist(
             &manager.label(&request.name),
             &program,
+            &root_dir,
             &config_dir,
-            &logs_dir,
+            &log_dir,
         ),
-        ServiceManager::Systemd => systemd_unit(&request.name, &program, &config_dir),
+        ServiceManager::Systemd => {
+            systemd_unit(&request.name, &program, &root_dir, &config_dir, &log_dir)
+        }
     };
     std::fs::write(&definition, contents)
         .map_err(|error| MisakaError::Other(format!("write service definition: {error}")))?;
@@ -630,6 +650,14 @@ mod tests {
         PathBuf::from("/tmp/misaka-config")
     }
 
+    fn root_dir() -> PathBuf {
+        PathBuf::from("/tmp/misaka-root")
+    }
+
+    fn log_dir() -> PathBuf {
+        root_dir().join("log")
+    }
+
     #[test]
     fn rejects_unsafe_service_names() {
         assert!(validate_name("home").is_ok());
@@ -646,14 +674,17 @@ mod tests {
         let plist = launchd_plist(
             "io.github.shiinasama.misaka.default",
             "/usr/local/bin/misaka",
+            &root_dir(),
             &config_dir(),
-            &config_dir().join("logs"),
+            &log_dir(),
         );
         assert!(plist.contains("<key>Label</key>"));
         assert!(plist.contains("<string>/usr/local/bin/misaka</string>"));
         assert!(plist.contains("<string>service</string>"));
         assert!(plist.contains("<string>run</string>"));
+        assert!(plist.contains("<key>MISAKA</key>"));
         assert!(plist.contains("<key>MISAKA_CONFIG_DIR</key>"));
+        assert!(plist.contains("<key>MISAKA_LOG_DIR</key>"));
         assert!(plist.contains("<key>RunAtLoad</key>"));
         assert!(plist.contains("SuccessfulExit"));
         // The token is never written into a service definition.
@@ -663,9 +694,17 @@ mod tests {
 
     #[test]
     fn systemd_unit_is_well_formed_and_secret_free() {
-        let unit = systemd_unit("home", "/usr/local/bin/misaka", &config_dir());
+        let unit = systemd_unit(
+            "home",
+            "/usr/local/bin/misaka",
+            &root_dir(),
+            &config_dir(),
+            &log_dir(),
+        );
         assert!(unit.contains("ExecStart=/usr/local/bin/misaka service run"));
+        assert!(unit.contains("Environment=MISAKA="));
         assert!(unit.contains("Environment=MISAKA_CONFIG_DIR="));
+        assert!(unit.contains("Environment=MISAKA_LOG_DIR="));
         assert!(unit.contains("Restart=on-failure"));
         assert!(unit.contains("WantedBy=default.target"));
         assert!(!unit.contains("local-control-token"));
