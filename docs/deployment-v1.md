@@ -32,6 +32,27 @@ additive; nothing forces a developer launch through launchd/systemd.
 
 ## 1a. Release installation at a stable path
 
+The shortest supported installation path is the release bootstrap script:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/SHIINASAMA/misaka/main/scripts/install.sh | sh
+```
+
+For a pinned release artifact:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/SHIINASAMA/misaka/main/scripts/install.sh \
+  | MISAKA_VERSION=2026.9.18 sh
+```
+
+The bootstrap detects the host target, downloads the published manifest and
+matching archive, verifies SHA-256, and delegates to the archive installer.
+It installs only the binary. Network initialization, service installation,
+Gateway configuration, and Relay configuration remain separate operations.
+
+For operators who want to inspect every downloaded file manually, use the
+archive procedure below instead:
+
 For formal dogfooding, download a target-matching release archive, verify its
 published SHA-256, extract it, and run the packaged installer:
 

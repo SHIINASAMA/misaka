@@ -13,6 +13,29 @@ The current engineering focus is real per-user deployment and multi-machine
 dogfooding. See [docs/versioning.md](docs/versioning.md) and
 [docs/dogfooding-v1.md](docs/dogfooding-v1.md).
 
+## One-line release installation
+
+On supported macOS and Linux hosts, install the latest published release with:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/SHIINASAMA/misaka/main/scripts/install.sh | sh
+```
+
+To pin the downloaded artifact to a specific release while keeping the same
+bootstrap script:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/SHIINASAMA/misaka/main/scripts/install.sh \
+  | MISAKA_VERSION=2026.9.18 sh
+```
+
+Both forms verify the release manifest and SHA-256 before installing only
+`$HOME/.local/bin/misaka`. They do not create `~/.misaka`, initialize a
+Network, install a service, or configure Gateway/Relay. Set
+`MISAKA_INSTALL_DIR` to choose another per-user binary directory. If the
+bootstrap script itself must be independently reviewed, download it first
+instead of piping it directly to `sh`.
+
 ## Workspace
 
 ```text
